@@ -4,7 +4,22 @@ import {
   HttpClient,
   type RetryOptions,
 } from "./http.js";
-import type { InfoResponse } from "./types.js";
+import type {
+  DocumentByUrlRequest,
+  DocumentByUrlResponse,
+  DocumentContentBatchRequest,
+  DocumentContentBatchResponse,
+  DocumentContentRequest,
+  DocumentContentResponse,
+  DocumentMetadataRequest,
+  DocumentMetadataResponse,
+  InfoResponse,
+  RecentDocumentsParams,
+  RecentDocumentsResponse,
+  ResolveResponse,
+  SearchRequest,
+  SearchResponse,
+} from "./types.js";
 
 export { DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./http.js";
 
@@ -79,4 +94,151 @@ export class LexAPI {
       timeoutMs: options?.timeoutMs,
     });
   }
+
+  /**
+   * `POST /search` — search EUR-Lex with structured filters.
+   *
+   * At least one filter is required. Truncation and partial-result signals
+   * are surfaced on the response rather than hidden: check `truncated` /
+   * `truncatedAt` / `truncatedReason` (tier-capped pagination), `partial` /
+   * `partialReason` (an upstream page timed out), `postFilteredBy`
+   * (controller-side post-filter dropped rows — `"date"` means raising
+   * `maxPages` widens recall), `ignoredDocumentTypes`, and `xWarning`
+   * (the `X-Warning` response header, e.g. `maxPages` tier clamping).
+   */
+  async search(request: SearchRequest, options?: CallOptions): Promise<SearchResponse> {
+    const { data, response } = await this.http.requestJsonWithResponse<SearchResponse>({
+      method: "POST",
+      path: "/search",
+      body: request,
+      timeoutMs: options?.timeoutMs,
+    });
+    return withHeaderSignals(data, response);
+  }
+
+  /**
+   * `POST /documentContent` — fetch a single fully-parsed document by CELEX.
+   *
+   * Corpus-first with live-scrape fallback (`bypassCorpus: true` forces a
+   * live read). Use `include`/`fields`/`articleId` to trim the payload.
+   */
+  async getDocument(
+    request: DocumentContentRequest,
+    options?: CallOptions,
+  ): Promise<DocumentContentResponse> {
+    return this.http.requestJson<DocumentContentResponse>({
+      method: "POST",
+      path: "/documentContent",
+      body: request,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `POST /documentContent/batch` — fetch multiple documents in one request.
+   *
+   * The batch is clamped to the tier ceiling (FREE=1, STARTER=5,
+   * PROFESSIONAL=20, BUSINESS=50). Clamping is surfaced, not silent: check
+   * `trimmed` / `trimmedTo` / `trimmedReason` on the body and `xWarning`
+   * (the `X-Warning` header). Per-CELEX failures are collected in `errors`
+   * instead of aborting the batch.
+   */
+  async getDocumentsBatch(
+    request: DocumentContentBatchRequest,
+    options?: CallOptions,
+  ): Promise<DocumentContentBatchResponse> {
+    const { data, response } = await this.http.requestJsonWithResponse<DocumentContentBatchResponse>({
+      method: "POST",
+      path: "/documentContent/batch",
+      body: request,
+      timeoutMs: options?.timeoutMs,
+    });
+    return withHeaderSignals(data, response);
+  }
+
+  /**
+   * `GET /documents/recent` — recently-published documents (last `days`
+   * days, default 7). Page fetching is tier-clamped like `/search`;
+   * `xWarning` carries the `X-Warning` header when clamping fired, and
+   * `languageFilter` reports rows dropped by the language post-filter.
+   */
+  async getRecentDocuments(
+    params: RecentDocumentsParams = {},
+    options?: CallOptions,
+  ): Promise<RecentDocumentsResponse> {
+    const { data, response } = await this.http.requestJsonWithResponse<RecentDocumentsResponse>({
+      method: "GET",
+      path: "/documents/recent",
+      query: {
+        days: params.days,
+        documentType: params.documentType,
+        author: params.author,
+        domain: params.domain,
+        subdomain: params.subdomain,
+        language: params.language,
+        limit: params.limit,
+      },
+      timeoutMs: options?.timeoutMs,
+    });
+    return withHeaderSignals(data, response);
+  }
+
+  /**
+   * `POST /documents/url` — fetch a document by any EUR-Lex URL. The
+   * response is shaped like `getDocument` plus `sourceUrl` and
+   * `extractedCelex` echo-backs.
+   */
+  async getDocumentByUrl(
+    request: DocumentByUrlRequest,
+    options?: CallOptions,
+  ): Promise<DocumentByUrlResponse> {
+    return this.http.requestJson<DocumentByUrlResponse>({
+      method: "POST",
+      path: "/documents/url",
+      body: request,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `POST /documents/metadata` — metadata only (title, dates, ECLI/ELI,
+   * keywords, subjects). Skips the body parse: significantly faster and
+   * cheaper than `getDocument`.
+   */
+  async getDocumentMetadata(
+    request: DocumentMetadataRequest,
+    options?: CallOptions,
+  ): Promise<DocumentMetadataResponse> {
+    return this.http.requestJson<DocumentMetadataResponse>({
+      method: "POST",
+      path: "/documents/metadata",
+      body: request,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `POST /resolve` — resolve any legal identifier (bare CELEX, EUR-Lex
+   * URL, ELI URI, or ECLI) to the canonical CELEX plus access URLs.
+   */
+  async resolve(identifier: string, options?: CallOptions): Promise<ResolveResponse> {
+    return this.http.requestJson<ResolveResponse>({
+      method: "POST",
+      path: "/resolve",
+      body: { identifier },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+}
+
+/**
+ * Merge header-only signals into the parsed body so callers can't miss
+ * them: `X-Warning` announces tier clamping (maxPages / batch size).
+ */
+function withHeaderSignals<T extends object>(data: T, response: Response): T {
+  const warning = response.headers.get("x-warning");
+  if (warning !== null && typeof data === "object" && data !== null) {
+    return { ...data, xWarning: warning };
+  }
+  return data;
 }

@@ -24,6 +24,41 @@ console.log(info.subscription, info.usage);
 
 Keys come from the [LexAPI dashboard](https://lex-api.com) and are prefixed `lex_`.
 
+## Search & documents
+
+```ts
+// Structured search (POST /search)
+const hits = await client.search({
+  query: "artificial intelligence",
+  documentType: ["communication", "guideline"],
+  dateFrom: "2025-01-01",
+  maxPages: 2,
+});
+if (hits.truncated) console.warn(hits.truncatedReason); // tier-capped pagination
+if (hits.partial) console.warn(hits.partialReason);     // an upstream page timed out
+if (hits.xWarning) console.warn(hits.xWarning);         // X-Warning header (e.g. maxPages clamped)
+
+// Single document (POST /documentContent) with payload control
+const { document } = await client.getDocument({
+  celexNumber: "32016R0679",
+  include: ["metadata", "articles"],
+  articleId: "17",
+});
+
+// Batch (POST /documentContent/batch) — per-CELEX errors don't abort the batch
+const batch = await client.getDocumentsBatch({ celexNumbers: ["32016R0679", "62018CJ0311"] });
+if (batch.trimmed) console.warn(`clamped to ${batch.trimmedTo}: ${batch.trimmedReason}`);
+batch.errors.forEach((e) => console.warn(`${e.celexNumber}: ${e.error}`));
+
+// Recent documents, metadata-only reads, URL + identifier resolution
+const recent = await client.getRecentDocuments({ days: 7, documentType: "judgment" });
+const meta = await client.getDocumentMetadata({ celexNumber: "32016R0679" });
+const byUrl = await client.getDocumentByUrl({ url: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679" });
+const resolved = await client.resolve("ECLI:EU:C:2020:559"); // → { celex: "62018CJ0311", ... }
+```
+
+Truncation/partial signals are always surfaced on the result (`truncated`, `partial`, `postFilteredBy`, `trimmed`/`trimmedTo`, and `xWarning` from the `X-Warning` header) — never swallowed.
+
 ## Configuration
 
 ```ts
