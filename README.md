@@ -193,6 +193,26 @@ const { unitsCharged, creditsRemaining, resetsAt } = getCreditUsage(info);
 
 `unitsCharged` maps `credits.operation_weight` (0 for free ops like `/info`); `creditsRemaining` falls back to `usage.remaining` on legacy daily-call accounts.
 
+## Point-in-time versions
+
+> Requires a LexAPI deployment with the point-in-time endpoints (lex-api PR #72).
+> Versions are LexAPI *observation snapshots* — the document as fetched — not
+> legal in-force reconstructions; history begins at first ingestion.
+
+```ts
+const history = await client.listDocumentVersions("32016R0679");
+console.log(history.currentVersion, history.trackedSince);
+
+const snapshot = await client.getDocumentVersion("32016R0679", 2);
+console.log(snapshot.document.parsedContent);
+
+const asOf = await client.getDocumentAtDate("32016R0679", "2026-03-20");
+console.log(asOf.asOf, asOf.document.version);
+```
+
+Each call costs 1 credit. Dates before the document entered the corpus reject
+with `NotFoundError` carrying the tracking start date.
+
 ## Development
 
 ```bash

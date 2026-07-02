@@ -85,6 +85,9 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | webhooks | `getWebhook` / `updateWebhook` / `deleteWebhook` | `GET/PUT/DELETE /webhooks/{id}` | P3 | ✅ shipped (`webhooks.get`/`update`/`delete`) |
 | webhooks | `testWebhook` | `POST /webhooks/{id}/test` | P3 | ✅ shipped (`webhooks.test`) |
 | webhooks | `getWebhookDeliveries` | `GET /webhooks/{id}/deliveries` | P3 | ✅ shipped (`webhooks.deliveries`) |
+| versions | `listDocumentVersions` | `GET /documents/{celex}/versions` | P3 | ✅ shipped |
+| versions | `getDocumentVersion` | `GET /documents/{celex}/versions/{version}` | P3 | ✅ shipped |
+| versions | `getDocumentAtDate` | `GET /documents/{celex}/at/{date}` | P3 | ✅ shipped (requires lex-api #72) |
 
 Cross-cutting model work per group: `ErrorResponse`, `SubscriptionInfo`, `UsageInfo`, `CreditsInfo` (P0); search filter enums driven from `/info` capability map where possible instead of hardcoding.
 ## 3. Language-specific architecture
