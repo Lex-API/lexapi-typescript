@@ -64,13 +64,13 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | Group | Operation | Method + Path | Priority | SDK status |
 | --- | --- | --- | --- | --- |
 | user/info | `getInfo` | `GET /info` | **P0** (scaffolded) | ✅ shipped |
-| search | `search` | `POST /search` | **P0** | ⏳ planned |
-| documents/content | `getDocumentContent` | `POST /documentContent` | **P0** | ⏳ planned |
-| documents/content | `getDocumentContentBatch` | `POST /documentContent/batch` | P1 | ⏳ planned |
-| documents/content | `getRecentDocuments` | `GET /documents/recent` | P1 | ⏳ planned |
-| documents/content | `getDocumentByUrl` | `POST /documents/url` | P1 | ⏳ planned |
-| documents/content | `getDocumentMetadata` | `POST /documents/metadata` | P1 | ⏳ planned |
-| resolve | `resolveIdentifier` | `POST /resolve` | P1 | ⏳ planned |
+| search | `search` | `POST /search` | **P0** | ✅ shipped (`search`) |
+| documents/content | `getDocumentContent` | `POST /documentContent` | **P0** | ✅ shipped (`getDocument`) |
+| documents/content | `getDocumentContentBatch` | `POST /documentContent/batch` | P1 | ✅ shipped (`getDocumentsBatch`) |
+| documents/content | `getRecentDocuments` | `GET /documents/recent` | P1 | ✅ shipped (`getRecentDocuments`) |
+| documents/content | `getDocumentByUrl` | `POST /documents/url` | P1 | ✅ shipped (`getDocumentByUrl`) |
+| documents/content | `getDocumentMetadata` | `POST /documents/metadata` | P1 | ✅ shipped (`getDocumentMetadata`) |
+| resolve | `resolveIdentifier` | `POST /resolve` | P1 | ✅ shipped (`resolve`) |
 | citations | `extractCitations` | `POST /citations/extract` | P2 | ⏳ planned |
 | citations | `getCitedBy` | `GET /citations/cited-by/{celexNumber}` | P2 | ⏳ planned |
 | citations | `getCites` | `GET /citations/cites/{celexNumber}` | P2 | ⏳ planned |
