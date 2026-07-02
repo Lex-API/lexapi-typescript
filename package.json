@@ -4,6 +4,13 @@
   "description": "Official TypeScript SDK for LexAPI - European legal data, made queryable.",
   "license": "MIT",
   "homepage": "https://lex-api.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lex-API/lexapi-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lex-API/lexapi-typescript/issues"
+  },
   "keywords": [
     "eur-lex",
     "eu",
