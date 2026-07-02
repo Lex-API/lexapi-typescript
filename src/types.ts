@@ -585,3 +585,364 @@ export interface ResolveResponse {
     xml?: string;
   };
 }
+
+// ── Citations ───────────────────────────────────────────────────────
+
+/** Classification of a citation edge. */
+export type CitationType =
+  | "reference"
+  | "amendment"
+  | "repeal"
+  | "implementation"
+  | "legal-basis"
+  | "proposal";
+
+/** Edge shape emitted on fresh extraction. */
+export interface CitationEdgeSummary {
+  targetCelex?: string;
+  citationType?: CitationType;
+  /** Surrounding text around the citation on the source metadata page, when available. */
+  contextSnippet?: string | null;
+}
+
+export interface CitationExtractResponse {
+  success: boolean;
+  message?: string;
+  /** Present on fresh extraction. Omitted when `alreadyExtracted` is true. */
+  document?: {
+    celexNumber?: string;
+    title?: string | null;
+  };
+  /** Number of citation edges persisted (or already on file). */
+  citationCount?: number;
+  /** Edges that were just extracted. Empty array when `alreadyExtracted: true`. */
+  citations?: CitationEdgeSummary[];
+  /** True when the document had already been processed (extraction is idempotent). */
+  alreadyExtracted?: boolean;
+}
+
+/** A single citation edge with classification, context, and timestamp. */
+export interface CitationEdgeDetail {
+  citationType?: CitationType;
+  contextSnippet?: string | null;
+  extractedAt?: string;
+}
+
+/** All edges from one source document into the target (cited-by grouping). */
+export interface CitingDocumentGroup {
+  celexNumber?: string;
+  title?: string | null;
+  citationCount?: number;
+  citations?: CitationEdgeDetail[];
+}
+
+/** All edges from the source document into one target (cites grouping). */
+export interface CitedDocumentGroup {
+  celexNumber?: string;
+  title?: string | null;
+  citationCount?: number;
+  citations?: CitationEdgeDetail[];
+}
+
+/** Pagination filters shared by the cites / cited-by endpoints. */
+export interface CitationEdgeParams {
+  /** Filter to a single citation type. */
+  citationType?: CitationType;
+  /** Max edges to return per page. Default 100. */
+  limit?: number;
+  /** Pagination offset (in edges, not documents). Default 0. */
+  offset?: number;
+}
+
+export interface CitedByResponse {
+  success: boolean;
+  /** The CELEX whose inbound edges are being listed. */
+  targetDocument: string;
+  /** Total inbound edges matching the filter (across all pages). */
+  totalCitations?: number;
+  uniqueDocuments?: number;
+  limit?: number;
+  offset?: number;
+  citedBy: CitingDocumentGroup[];
+}
+
+export interface CitesResponse {
+  success: boolean;
+  /** The CELEX whose outbound edges are being listed. */
+  sourceDocument: string;
+  totalCitations?: number;
+  uniqueDocuments?: number;
+  limit?: number;
+  offset?: number;
+  cites: CitedDocumentGroup[];
+}
+
+/** A neighbour in the citation graph, deduplicated across edge types. */
+export interface CitationNeighbour {
+  celexNumber?: string;
+  title?: string | null;
+  /** Number of edges to/from this neighbour. */
+  count?: number;
+  /** Union of `citationType` values across all edges to/from it. */
+  types?: CitationType[];
+}
+
+export interface CitationNetworkParams {
+  /** Filter both directions to a single citation type. */
+  citationType?: CitationType;
+  /** Max edges to fetch per direction (default 100, max 500). */
+  limit?: number;
+  /** Pagination offset (in edges, applied to both directions). */
+  offset?: number;
+}
+
+export interface CitationNetworkResponse {
+  success: boolean;
+  /** The centre CELEX. */
+  document: string;
+  network: {
+    celexNumber: string;
+    /** Unique outbound neighbours in THIS PAGE — see `paging.citesTotal` for the unbounded total. */
+    citesCount: number;
+    /** Unique inbound neighbours in THIS PAGE — see `paging.citedByTotal` for the unbounded total. */
+    citedByCount: number;
+    cites: CitationNeighbour[];
+    citedBy: CitationNeighbour[];
+  };
+  paging: {
+    /** Effective per-direction limit after clamping. */
+    limit: number;
+    offset: number;
+    /** Total outbound edges matching the query. `null` when the response is partial. */
+    citesTotal: number | null;
+    /** Total inbound edges matching the query. `null` when the response is partial. */
+    citedByTotal: number | null;
+  };
+  /**
+   * Present and `true` when the server-side wall-clock budget expired —
+   * `network` arrays are empty and paging totals `null`. Retry with a
+   * smaller `limit` or use the per-direction endpoints. Do not treat an
+   * empty partial network as "no citations".
+   */
+  partial?: boolean;
+  partialReason?: "TIMEOUT";
+  message?: string;
+  /** The server-side budget that expired (only on partial responses). */
+  timeoutMs?: number;
+}
+
+export interface CitationStatsTopCited {
+  celexNumber?: string;
+  title?: string | null;
+  citedByCount?: number;
+}
+
+export interface CitationStatsTopCiting {
+  celexNumber?: string;
+  title?: string | null;
+  citesCount?: number;
+}
+
+export interface CitationStatsResponse {
+  success: boolean;
+  stats: {
+    totalCitations: number;
+    uniqueSourceDocuments: number;
+    uniqueTargetDocuments: number;
+    /** Top-10 most-cited documents. */
+    mostCited: CitationStatsTopCited[];
+    /** Top-10 documents with the most outbound citations. */
+    mostCiting: CitationStatsTopCiting[];
+  };
+}
+
+export interface CitationPathNode {
+  celexNumber: string;
+  /** Enriched at read time from the corpus where available. */
+  title: string | null;
+}
+
+export interface CitationPathResponse {
+  success: boolean;
+  from: string;
+  to: string;
+  /** `false` is a graceful HTTP 200, not an error — see `message`. */
+  found: boolean;
+  /** Number of edges (0 for self-loops). `null` when `found` is false. */
+  pathLength?: number | null;
+  /** The depth budget actually used. */
+  maxDepth?: number;
+  path: CitationPathNode[];
+  /** Present when `found` is false. */
+  message?: string;
+}
+
+export interface RelatedDocument {
+  celexNumber: string;
+  title?: string | null;
+  /** Number of citation targets the related document shares with the seed. */
+  sharedCount: number;
+  sharedTargets?: string[];
+}
+
+export interface RelatedDocumentsResponse {
+  success: boolean;
+  celexNumber: string;
+  method: "bibliographic-coupling";
+  /** Outbound citations on the seed, used to compute coupling. */
+  seedCitationCount?: number;
+  count: number;
+  related: RelatedDocument[];
+  /** Present when the seed has no outbound citations to couple on. */
+  message?: string;
+}
+
+// ── Semantic search ─────────────────────────────────────────────────
+
+/** Languages accepted by the semantic endpoints (narrower than `Language`). */
+export type SemanticLanguage =
+  | "en" | "fr" | "de" | "es" | "it" | "sl" | "el" | "nl" | "pt" | "pl";
+
+/**
+ * SDK-side options for the semantic endpoints. Camel-cased; the SDK maps
+ * them to the wire shape (`min_score`, `include: ["text"]`).
+ */
+export interface SemanticSearchOptions {
+  /** Natural-language query to embed. */
+  query: string;
+  /** Max results. Clamped to the caller's tier ceiling. Default 10. */
+  limit?: number;
+  /**
+   * Drop results below this cosine similarity (wire: `min_score`).
+   * Unset applies the upstream's default relevance floor of ~0.7 — if you
+   * got fewer results than `limit`, the floor cut in; pass `0.5` (or lower)
+   * to widen recall, `0` to disable the floor entirely.
+   */
+  minScore?: number;
+  /** Language of returned content. Default `en`. */
+  language?: SemanticLanguage;
+  /**
+   * Set `true` to receive the full document text in each hit (wire:
+   * `include: ["text"]`). By default each hit carries a ~600-char snippet
+   * instead — about a 10-50x payload reduction.
+   */
+  includeText?: boolean;
+  /** Free-form filter object forwarded to the semantic backend. */
+  filters?: Record<string, unknown>;
+}
+
+/** Options for `semanticSearch` (case law) — adds HyDE query rewriting. */
+export interface SemanticCaseLawSearchOptions extends SemanticSearchOptions {
+  /**
+   * Enable HyDE query rewriting (case-law endpoint only; ignored by
+   * `/legislation/semantic`): an LLM drafts the passage a relevant
+   * judgment would contain and retrieval fuses plain-query and
+   * hypothetical-passage rankings. Markedly better recall on short or
+   * keyword-style queries.
+   *
+   * **Billing: 15 credits instead of 5**, and adds ~1–3 s of latency (one
+   * LLM call). Best-effort: if generation fails the search transparently
+   * falls back to plain retrieval, the response reports `hyde: false`,
+   * and the 10-credit premium is **automatically refunded**
+   * (`credits.operation_weight` reflects the base rate).
+   *
+   * Must be a JSON boolean — string values are rejected with 400.
+   */
+  hyde?: boolean;
+}
+
+/** Single case-law match from `/search/semantic`. */
+export interface SemanticCaseLawResult {
+  /**
+   * Snapshot-scoped UUID — regenerated when the upstream index is rebuilt.
+   * Do NOT store as a long-term identifier; use
+   * `(metadata.celex_id, metadata.document_type)` for persistent joins.
+   */
+  case_id?: string | null;
+  /** Cosine similarity, 0–1. */
+  score?: number;
+  /** Matching passage; replaced with the full document text when a parsed copy is available. */
+  text?: string;
+  case_name?: string | null;
+  case_number?: string | null;
+  ecli?: string | null;
+  court?: string | null;
+  /** Always includes `celex_id` when available — the persistent identity key. */
+  metadata?: {
+    celex_id?: string;
+    document_type?: string | null;
+    [key: string]: unknown;
+  };
+}
+
+/** Semantic-specific quota counters (legacy daily-call plans only). */
+export interface SemanticUsageInfo {
+  current?: number;
+  limit?: number;
+  remaining?: number;
+}
+
+export interface SemanticCaseLawSearchResponse {
+  success: boolean;
+  searchType?: "semantic-case-law";
+  query?: string;
+  resultCount?: number;
+  results: SemanticCaseLawResult[];
+  /**
+   * Present only on best-effort responses (low-confidence hits below your
+   * `minScore`, or noise-floor fallback) — its presence is itself the
+   * low-confidence signal. Omitted entirely (never `null`) otherwise.
+   */
+  hint?: string;
+  /**
+   * Present only when the request set `hyde: true`. Reports whether HyDE
+   * rewriting actually ran; `false` means generation failed, the search
+   * fell back to plain retrieval, and the 10-credit premium was refunded.
+   */
+  hyde?: boolean;
+  /**
+   * Present only when HyDE ran (`hyde: true` in the response): the
+   * LLM-drafted hypothetical judgment passage whose embedding was fused
+   * into retrieval — useful for debugging why results matched.
+   */
+  hypotheticalDocument?: string;
+  /** Opaque upstream pass-through; shape not stable — use `tookMs` for timing. */
+  metadata?: Record<string, unknown>;
+  /** Server-measured wall-clock time for this request, in ms. */
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: SubscriptionInfo & { maxResults?: number };
+  usage?: UsageInfo;
+  credits?: CreditsInfo;
+}
+
+/** Single article-level match from `/legislation/semantic`. */
+export interface SemanticLegislationResult {
+  /** Cosine similarity, 0–1. */
+  score?: number;
+  /** Matching article text from the embedding index. */
+  text?: string;
+  /** Article identifier (e.g. `Article 17`). */
+  article_ref?: string | null;
+  /** CELEX identifier of the parent legal act. */
+  law_id?: string | null;
+  law_title?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SemanticLegislationSearchResponse {
+  success: boolean;
+  searchType?: "semantic-legislation";
+  query?: string;
+  resultCount?: number;
+  results: SemanticLegislationResult[];
+  /** Present only on best-effort responses — see `SemanticCaseLawSearchResponse.hint`. */
+  hint?: string;
+  /** Opaque upstream pass-through; shape not stable — use `tookMs` for timing. */
+  metadata?: Record<string, unknown>;
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: SubscriptionInfo & { maxResults?: number };
+  usage?: UsageInfo;
+  credits?: CreditsInfo;
+}

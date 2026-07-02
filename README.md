@@ -59,6 +59,48 @@ const resolved = await client.resolve("ECLI:EU:C:2020:559"); // → { celex: "62
 
 Truncation/partial signals are always surfaced on the result (`truncated`, `partial`, `postFilteredBy`, `trimmed`/`trimmedTo`, and `xWarning` from the `X-Warning` header) — never swallowed.
 
+## Citations
+
+```ts
+await client.extractCitations("32016R0679");          // crawl + persist (idempotent)
+const outbound = await client.getCites("32016R0679", { citationType: "repeal" });
+const inbound = await client.getCitedBy("32016R0679", { limit: 50 });
+
+const network = await client.getCitationNetwork("62018CJ0311", { limit: 100 });
+if (network.partial) console.warn(network.message);   // server budget expired — network is EMPTY, not zero
+
+const path = await client.getCitationPath("32016R0679", "31995L0046", { maxDepth: 5 });
+if (!path.found) console.log(path.message);           // graceful 200, not an error
+
+const related = await client.getRelatedDocuments("32016R0679"); // bibliographic coupling
+const stats = await client.getCitationStats();
+```
+
+## Semantic search
+
+```ts
+// Case law (POST /search/semantic) — 5 credits
+const hits = await client.semanticSearch({
+  query: "transfer of personal data to third countries",
+  limit: 10,
+  minScore: 0.5,      // unset applies the upstream's ~0.7 relevance floor
+  includeText: true,  // full document text per hit instead of ~600-char snippets
+});
+if (hits.hint) console.warn(hits.hint); // present only on low-confidence result sets
+
+// HyDE query rewriting — 15 credits instead of 5, ~1-3s extra latency.
+// Best-effort: on LLM failure it falls back to plain retrieval, the response
+// reports hyde: false, and the 10-credit premium is refunded automatically.
+const hyde = await client.semanticSearch({ query: "credit scoring article 22", hyde: true });
+console.log(hyde.hyde, hyde.hypotheticalDocument, hyde.credits?.operation_weight);
+
+// Legislation (POST /legislation/semantic) — article-level matches; no hyde option
+const articles = await client.semanticLegislationSearch({ query: "right to be forgotten" });
+console.log(articles.results[0]?.article_ref, articles.results[0]?.law_id);
+```
+
+Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
+
 ## Configuration
 
 ```ts
