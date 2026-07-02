@@ -2,7 +2,7 @@
 
 Official TypeScript SDK for [LexAPI](https://lex-api.com) — European legal data, made queryable. EUR-Lex, CJEU case law, and the Official Journal behind one REST API.
 
-> **Status: pre-release scaffold (0.x).** API coverage and installation instructions below are placeholders until the first npm release. See [PLAN.md](PLAN.md).
+> **Status: pre-release (0.x).** Not yet published to npm. See [PLAN.md](PLAN.md) for the endpoint coverage matrix.
 
 ## Install
 
@@ -10,7 +10,7 @@ Official TypeScript SDK for [LexAPI](https://lex-api.com) — European legal dat
 npm install @lexapi/client   # not yet published
 ```
 
-Requires Node ≥ 18 (native `fetch`). Server-side use only — API keys must never ship in client-side code.
+Requires Node ≥ 18 (native `fetch`); also works on Deno, Bun, and edge runtimes. **Server-side use only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
 
 ## Quickstart
 
@@ -24,6 +24,60 @@ console.log(info.subscription, info.usage);
 
 Keys come from the [LexAPI dashboard](https://lex-api.com) and are prefixed `lex_`.
 
+## Configuration
+
+```ts
+const client = new LexAPI({
+  apiKey: "lex_...",              // or LEXAPI_API_KEY env var
+  baseUrl: "https://lex-api.com/api/v1", // default
+  timeoutMs: 60_000,              // per attempt; per-call override: client.getInfo({ timeoutMs: 5_000 })
+  retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 30_000 },
+  fetch: myFetch,                 // injectable transport (testing / polyfills)
+  userAgentSuffix: "my-app/1.0",  // appended to `lexapi-typescript/<version>`
+});
+```
+
+## Retries
+
+Failed requests are retried up to 3 times (configurable via `retry`) with exponential backoff + full jitter:
+
+- **Retried:** HTTP 429, 502, 503, 504 and transport-level network errors.
+- **Server-directed waits win:** the `Retry-After` response **header** is honored first (then `RateLimit-Reset`, then the JSON `retryAfter` body field — epoch-guarded, since that field historically carried buggy absolute timestamps).
+- **Non-idempotent safety:** non-GET requests are retried **only on 429** — never on 5xx or network errors, where the request may already have been applied.
+- Client-side timeouts throw `TimeoutError` and are not retried.
+
+## Typed errors
+
+Every non-2xx response maps to a typed error carrying `code`, `status`, `details`, and `retryAfter`:
+
+```ts
+import { CreditsExhaustedError, NotFoundError, RateLimitedError } from "@lexapi/client";
+
+try {
+  await client.getInfo();
+} catch (err) {
+  if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`);
+  else if (err instanceof CreditsExhaustedError) console.log(`credits reset at ${err.resetsAt}`);
+  else if (err instanceof NotFoundError) console.log("no such document");
+  else throw err;
+}
+```
+
+Subclasses: `NotFoundError`, `InvalidCelexError`, `InvalidUrlError`, `InvalidParamsError`, `AuthenticationError` (401), `RateLimitedError`, `TierForbiddenError`, `CreditsExhaustedError`, `UpstreamError`, `TimeoutError`, `InternalServerError`, `NetworkError`. Both the typed envelope (`{success: false, error: {code, message, details}}`) and the legacy bare `{error, message}` shape are parsed; unknown codes stay on the base `LexAPIError` with the raw code string.
+
+## Credit visibility
+
+Every response keeps its raw `usage` / `credits` blocks; `getCreditUsage` normalizes them:
+
+```ts
+import { getCreditUsage } from "@lexapi/client";
+
+const info = await client.getInfo();
+const { unitsCharged, creditsRemaining, resetsAt } = getCreditUsage(info);
+```
+
+`unitsCharged` maps `credits.operation_weight` (0 for free ops like `/info`); `creditsRemaining` falls back to `usage.remaining` on legacy daily-call accounts.
+
 ## Development
 
 ```bash
@@ -33,4 +87,4 @@ npm test       # vitest
 npm run build  # tsup -> dist/ (ESM + CJS + d.ts)
 ```
 
-Docs: <https://lex-api.com/docs>
+Zero runtime dependencies. Docs: <https://lex-api.com/docs>
