@@ -23,6 +23,15 @@ export {
   type ErrorCode,
 } from "./errors.js";
 export { getCreditUsage, type CreditUsage } from "./credits.js";
+export { WebhooksAPI } from "./webhooks.js";
+export type {
+  ExportParams,
+  ExportRow,
+  ExportMeta,
+  ExportDone,
+  ExportHeaderInfo,
+  ExportStream,
+} from "./export.js";
 export type {
   SubscriptionTier,
   Language,
@@ -92,5 +101,19 @@ export type {
   SemanticCaseLawSearchResponse,
   SemanticLegislationResult,
   SemanticLegislationSearchResponse,
+  WebhookStatus,
+  DeliveryStatus,
+  WebhookListItem,
+  WebhookDelivery,
+  WebhookDetail,
+  WebhookListResponse,
+  WebhookCreateRequest,
+  WebhookUpdateRequest,
+  WebhookCreateResponse,
+  WebhookUpdateResponse,
+  WebhookResponse,
+  WebhookTestResponse,
+  WebhookDeliveriesParams,
+  WebhookDeliveriesResponse,
 } from "./types.js";
 export { VERSION } from "./version.js";

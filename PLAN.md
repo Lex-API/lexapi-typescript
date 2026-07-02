@@ -80,11 +80,11 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | citations | `getRelatedDocuments` | `GET /citations/related/{celexNumber}` | P2 | ✅ shipped (`getRelatedDocuments`) |
 | semantic | `semanticCaseLawSearch` | `POST /search/semantic` | P2 | ✅ shipped (`semanticSearch`, incl. `hyde`) |
 | semantic | `semanticLegislationSearch` | `POST /legislation/semantic` | P2 | ✅ shipped (`semanticLegislationSearch`) |
-| export | `exportCorpus` | `GET /export` | P3 | ⏳ planned |
-| webhooks | `listWebhooks` / `createWebhook` | `GET/POST /webhooks` | P3 | ⏳ planned |
-| webhooks | `getWebhook` / `updateWebhook` / `deleteWebhook` | `GET/PUT/DELETE /webhooks/{id}` | P3 | ⏳ planned |
-| webhooks | `testWebhook` | `POST /webhooks/{id}/test` | P3 | ⏳ planned |
-| webhooks | `getWebhookDeliveries` | `GET /webhooks/{id}/deliveries` | P3 | ⏳ planned |
+| export | `exportCorpus` | `GET /export` | P3 | ✅ shipped (`export`, async NDJSON iterator) |
+| webhooks | `listWebhooks` / `createWebhook` | `GET/POST /webhooks` | P3 | ✅ shipped (`webhooks.list`/`webhooks.create`) |
+| webhooks | `getWebhook` / `updateWebhook` / `deleteWebhook` | `GET/PUT/DELETE /webhooks/{id}` | P3 | ✅ shipped (`webhooks.get`/`update`/`delete`) |
+| webhooks | `testWebhook` | `POST /webhooks/{id}/test` | P3 | ✅ shipped (`webhooks.test`) |
+| webhooks | `getWebhookDeliveries` | `GET /webhooks/{id}/deliveries` | P3 | ✅ shipped (`webhooks.deliveries`) |
 
 Cross-cutting model work per group: `ErrorResponse`, `SubscriptionInfo`, `UsageInfo`, `CreditsInfo` (P0); search filter enums driven from `/info` capability map where possible instead of hardcoding.
 ## 3. Language-specific architecture
