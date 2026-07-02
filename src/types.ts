@@ -1105,3 +1105,51 @@ export interface WebhookDeliveriesResponse {
   offset?: number;
   deliveries: WebhookDelivery[];
 }
+
+// ── Point-in-time versions (requires lex-api PR #72 deployed) ─────────
+
+/**
+ * One entry in a document's version history.
+ *
+ * Versions are LexAPI *observation snapshots* (content-hash changes between
+ * fetches), not legal in-force reconstructions. `fetchedAt` is when THIS
+ * version was fetched — version N is "current" from there until version
+ * N+1's `fetchedAt`.
+ */
+export interface VersionEntry {
+  version: number;
+  isCurrent: boolean;
+  /** Equality across versions means no real content change. */
+  contentHash: string;
+  fetchedAt: string;
+  title?: string | null;
+  documentType?: string | null;
+  documentTypeCode?: string | null;
+  /** Present on single-snapshot responses only (not in history listings). */
+  parsedContent?: Record<string, unknown> | null;
+}
+
+export interface DocumentVersionsResponse extends CreditedResponse {
+  success: boolean;
+  celex: string;
+  language: string;
+  currentVersion: number;
+  /** When the document first entered the corpus — history starts here. */
+  trackedSince: string;
+  /** Server restatement of the observation-snapshot semantics. */
+  semantics: string;
+  /** Newest first; the current version is included and flagged. */
+  versions: VersionEntry[];
+}
+
+export interface DocumentVersionResponse extends CreditedResponse {
+  success: boolean;
+  celex: string;
+  language: string;
+  /** Present on `/at/{date}` responses only — the requested date. */
+  asOf?: string;
+  semantics: string;
+  document: VersionEntry;
+  /** Mirrors the `X-Corpus-Version` response header. */
+  corpusVersion?: number;
+}

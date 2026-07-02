@@ -23,6 +23,8 @@ import type {
   DocumentContentResponse,
   DocumentMetadataRequest,
   DocumentMetadataResponse,
+  DocumentVersionResponse,
+  DocumentVersionsResponse,
   InfoResponse,
   RecentDocumentsParams,
   RecentDocumentsResponse,
@@ -247,6 +249,69 @@ export class LexAPI {
       body: { identifier },
       timeoutMs: options?.timeoutMs,
     });
+  }
+
+  // ── Point-in-time versions ────────────────────────────────────────
+  // Requires lex-api PR #72 deployed. Versions are LexAPI observation
+  // snapshots (content-hash changes between fetches), NOT legal in-force
+  // reconstructions; history begins at first ingestion.
+
+  /**
+   * `GET /documents/{celex}/versions` — version history, newest first,
+   * current version included and flagged. 1 credit.
+   */
+  async listDocumentVersions(
+    celex: string,
+    params: { language?: string } = {},
+    options?: CallOptions,
+  ): Promise<DocumentVersionsResponse> {
+    return this.http.requestJson<DocumentVersionsResponse>({
+      method: "GET",
+      path: `/documents/${encodeURIComponent(celex)}/versions`,
+      query: { language: params.language },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /documents/{celex}/versions/{version}` — one immutable snapshot
+   * including `parsedContent`. `corpusVersion` mirrors the
+   * `X-Corpus-Version` response header. 1 credit.
+   */
+  async getDocumentVersion(
+    celex: string,
+    version: number,
+    params: { language?: string } = {},
+    options?: CallOptions,
+  ): Promise<DocumentVersionResponse> {
+    const { data, response } = await this.http.requestJsonWithResponse<DocumentVersionResponse>({
+      method: "GET",
+      path: `/documents/${encodeURIComponent(celex)}/versions/${version}`,
+      query: { language: params.language },
+      timeoutMs: options?.timeoutMs,
+    });
+    return withCorpusVersion(data, response);
+  }
+
+  /**
+   * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI observed as
+   * current on `date` (`YYYY-MM-DD`, end-of-day UTC inclusive). Dates
+   * before the document entered the corpus reject with `NotFoundError`
+   * carrying the tracking start date. 1 credit.
+   */
+  async getDocumentAtDate(
+    celex: string,
+    date: string,
+    params: { language?: string } = {},
+    options?: CallOptions,
+  ): Promise<DocumentVersionResponse> {
+    const { data, response } = await this.http.requestJsonWithResponse<DocumentVersionResponse>({
+      method: "GET",
+      path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
+      query: { language: params.language },
+      timeoutMs: options?.timeoutMs,
+    });
+    return withCorpusVersion(data, response);
   }
 
   // ── Citations ─────────────────────────────────────────────────────
@@ -496,6 +561,18 @@ function withHeaderSignals<T extends object>(data: T, response: Response): T {
   const warning = response.headers.get("x-warning");
   if (warning !== null && typeof data === "object" && data !== null) {
     return { ...data, xWarning: warning };
+  }
+  return data;
+}
+
+function withCorpusVersion<T extends { corpusVersion?: number }>(
+  data: T,
+  response: Response,
+): T {
+  const raw = response.headers.get("x-corpus-version");
+  const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  if (!Number.isNaN(parsed)) {
+    return { ...data, corpusVersion: parsed };
   }
   return data;
 }
