@@ -5,6 +5,14 @@ import {
   type RetryOptions,
 } from "./http.js";
 import type {
+  CitationEdgeParams,
+  CitationExtractResponse,
+  CitationNetworkParams,
+  CitationNetworkResponse,
+  CitationPathResponse,
+  CitationStatsResponse,
+  CitedByResponse,
+  CitesResponse,
   DocumentByUrlRequest,
   DocumentByUrlResponse,
   DocumentContentBatchRequest,
@@ -16,9 +24,14 @@ import type {
   InfoResponse,
   RecentDocumentsParams,
   RecentDocumentsResponse,
+  RelatedDocumentsResponse,
   ResolveResponse,
   SearchRequest,
   SearchResponse,
+  SemanticCaseLawSearchOptions,
+  SemanticCaseLawSearchResponse,
+  SemanticLegislationSearchResponse,
+  SemanticSearchOptions,
 } from "./types.js";
 
 export { DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./http.js";
@@ -229,6 +242,203 @@ export class LexAPI {
       timeoutMs: options?.timeoutMs,
     });
   }
+
+  // ── Citations ─────────────────────────────────────────────────────
+
+  /**
+   * `POST /citations/extract` — crawl a document's EUR-Lex metadata page
+   * for citations and persist them into the graph. Idempotent: an already
+   * processed document returns immediately with `alreadyExtracted: true`.
+   */
+  async extractCitations(
+    celexNumber: string,
+    options?: CallOptions,
+  ): Promise<CitationExtractResponse> {
+    return this.http.requestJson<CitationExtractResponse>({
+      method: "POST",
+      path: "/citations/extract",
+      body: { celexNumber },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /citations/cites/{celexNumber}` — documents this one cites
+   * (outbound edges), grouped by target. The document must first have been
+   * crawled via `extractCitations` to appear here.
+   */
+  async getCites(
+    celexNumber: string,
+    params: CitationEdgeParams = {},
+    options?: CallOptions,
+  ): Promise<CitesResponse> {
+    return this.http.requestJson<CitesResponse>({
+      method: "GET",
+      path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
+      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /citations/cited-by/{celexNumber}` — documents that cite this one
+   * (inbound edges), grouped by source.
+   */
+  async getCitedBy(
+    celexNumber: string,
+    params: CitationEdgeParams = {},
+    options?: CallOptions,
+  ): Promise<CitedByResponse> {
+    return this.http.requestJson<CitedByResponse>({
+      method: "GET",
+      path: `/citations/cited-by/${encodeURIComponent(celexNumber)}`,
+      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /citations/network/{celexNumber}` — inbound and outbound
+   * neighbourhood in one call, paginated per direction.
+   *
+   * If the server-side wall-clock budget expires the endpoint still
+   * returns 200 with `partial: true`, an EMPTY `network`, and `null`
+   * paging totals — check `partial` before treating the network as empty.
+   */
+  async getCitationNetwork(
+    celexNumber: string,
+    params: CitationNetworkParams = {},
+    options?: CallOptions,
+  ): Promise<CitationNetworkResponse> {
+    return this.http.requestJson<CitationNetworkResponse>({
+      method: "GET",
+      path: `/citations/network/${encodeURIComponent(celexNumber)}`,
+      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /citations/path/{from}/{to}` — shortest citation path (BFS over
+   * outbound edges). `found: false` is a graceful HTTP 200, not an error.
+   * Default `maxDepth` 3 (max 8); the visited set is bounded to 5000 nodes.
+   */
+  async getCitationPath(
+    from: string,
+    to: string,
+    params: { maxDepth?: number } = {},
+    options?: CallOptions,
+  ): Promise<CitationPathResponse> {
+    return this.http.requestJson<CitationPathResponse>({
+      method: "GET",
+      path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+      query: { maxDepth: params.maxDepth },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `GET /citations/related/{celexNumber}` — bibliographic-coupling
+   * neighbours (documents sharing the most outbound citation targets with
+   * the seed). Returns a graceful empty list with `message` when the seed
+   * has no outbound citations to couple on.
+   */
+  async getRelatedDocuments(
+    celexNumber: string,
+    params: { limit?: number } = {},
+    options?: CallOptions,
+  ): Promise<RelatedDocumentsResponse> {
+    return this.http.requestJson<RelatedDocumentsResponse>({
+      method: "GET",
+      path: `/citations/related/${encodeURIComponent(celexNumber)}`,
+      query: { limit: params.limit },
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /** `GET /citations/stats` — global citation graph statistics. */
+  async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse> {
+    return this.http.requestJson<CitationStatsResponse>({
+      method: "GET",
+      path: "/citations/stats",
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  // ── Semantic search ───────────────────────────────────────────────
+
+  /**
+   * `POST /search/semantic` — embedding-based semantic search over CJEU
+   * case law. Use this (not `search`) for *concept* queries; EUR-Lex
+   * keyword matching is literal.
+   *
+   * **Billing:** 5 credits per call — **15 credits with `hyde: true`**
+   * (HyDE query rewriting: an LLM drafts the passage a relevant judgment
+   * would contain and retrieval fuses both rankings; ~1–3 s extra
+   * latency). HyDE is best-effort: on LLM failure the search falls back
+   * to plain retrieval, the response reports `hyde: false`, and the
+   * 10-credit premium is **refunded automatically** — verify via
+   * `credits.operation_weight`.
+   *
+   * The response exposes `hint` (present only on low-confidence,
+   * best-effort result sets — its presence is itself the signal), `hyde`
+   * (whether HyDE actually ran), and `hypotheticalDocument` (the drafted
+   * passage, present only when HyDE ran).
+   *
+   * Fewer results than `limit`? The upstream's ~0.7 default relevance
+   * floor cut in — pass `minScore: 0.5` (or `0`) to widen recall.
+   *
+   * Persistent document identity is `(metadata.celex_id,
+   * metadata.document_type)`; `case_id` is snapshot-scoped and does not
+   * survive index rebuilds.
+   */
+  async semanticSearch(
+    request: SemanticCaseLawSearchOptions,
+    options?: CallOptions,
+  ): Promise<SemanticCaseLawSearchResponse> {
+    return this.http.requestJson<SemanticCaseLawSearchResponse>({
+      method: "POST",
+      path: "/search/semantic",
+      body: semanticWireBody(request),
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * `POST /legislation/semantic` — embedding-based semantic search over EU
+   * legislation; results are article-level matches (`article_ref`,
+   * `law_id`, `law_title`, `score`).
+   *
+   * Costs 5 credits. The `hyde` option is case-law only and is therefore
+   * not accepted here (the server ignores it on this endpoint). The same
+   * ~0.7 default relevance floor applies — lower `minScore` to widen
+   * recall; `hint` is present only on low-confidence result sets.
+   */
+  async semanticLegislationSearch(
+    request: SemanticSearchOptions,
+    options?: CallOptions,
+  ): Promise<SemanticLegislationSearchResponse> {
+    return this.http.requestJson<SemanticLegislationSearchResponse>({
+      method: "POST",
+      path: "/legislation/semantic",
+      body: semanticWireBody(request),
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+}
+
+/** Map camel-cased SDK semantic options to the wire shape (`min_score`, `include: ["text"]`). */
+function semanticWireBody(
+  request: SemanticSearchOptions & { hyde?: boolean },
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { query: request.query };
+  if (request.limit !== undefined) body["limit"] = request.limit;
+  if (request.minScore !== undefined) body["min_score"] = request.minScore;
+  if (request.language !== undefined) body["language"] = request.language;
+  if (request.includeText) body["include"] = ["text"];
+  if (request.filters !== undefined) body["filters"] = request.filters;
+  if (request.hyde !== undefined) body["hyde"] = request.hyde;
+  return body;
 }
 
 /**

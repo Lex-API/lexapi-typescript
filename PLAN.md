@@ -71,15 +71,15 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | documents/content | `getDocumentByUrl` | `POST /documents/url` | P1 | ✅ shipped (`getDocumentByUrl`) |
 | documents/content | `getDocumentMetadata` | `POST /documents/metadata` | P1 | ✅ shipped (`getDocumentMetadata`) |
 | resolve | `resolveIdentifier` | `POST /resolve` | P1 | ✅ shipped (`resolve`) |
-| citations | `extractCitations` | `POST /citations/extract` | P2 | ⏳ planned |
-| citations | `getCitedBy` | `GET /citations/cited-by/{celexNumber}` | P2 | ⏳ planned |
-| citations | `getCites` | `GET /citations/cites/{celexNumber}` | P2 | ⏳ planned |
-| citations | `getCitationNetwork` | `GET /citations/network/{celexNumber}` | P2 | ⏳ planned |
-| citations | `getCitationStats` | `GET /citations/stats` | P2 | ⏳ planned |
-| citations | `getCitationPath` | `GET /citations/path/{from}/{to}` | P2 | ⏳ planned |
-| citations | `getRelatedDocuments` | `GET /citations/related/{celexNumber}` | P2 | ⏳ planned |
-| semantic | `semanticCaseLawSearch` | `POST /search/semantic` | P2 | ⏳ planned |
-| semantic | `semanticLegislationSearch` | `POST /legislation/semantic` | P2 | ⏳ planned |
+| citations | `extractCitations` | `POST /citations/extract` | P2 | ✅ shipped (`extractCitations`) |
+| citations | `getCitedBy` | `GET /citations/cited-by/{celexNumber}` | P2 | ✅ shipped (`getCitedBy`) |
+| citations | `getCites` | `GET /citations/cites/{celexNumber}` | P2 | ✅ shipped (`getCites`) |
+| citations | `getCitationNetwork` | `GET /citations/network/{celexNumber}` | P2 | ✅ shipped (`getCitationNetwork`) |
+| citations | `getCitationStats` | `GET /citations/stats` | P2 | ✅ shipped (`getCitationStats`) |
+| citations | `getCitationPath` | `GET /citations/path/{from}/{to}` | P2 | ✅ shipped (`getCitationPath`) |
+| citations | `getRelatedDocuments` | `GET /citations/related/{celexNumber}` | P2 | ✅ shipped (`getRelatedDocuments`) |
+| semantic | `semanticCaseLawSearch` | `POST /search/semantic` | P2 | ✅ shipped (`semanticSearch`, incl. `hyde`) |
+| semantic | `semanticLegislationSearch` | `POST /legislation/semantic` | P2 | ✅ shipped (`semanticLegislationSearch`) |
 | export | `exportCorpus` | `GET /export` | P3 | ⏳ planned |
 | webhooks | `listWebhooks` / `createWebhook` | `GET/POST /webhooks` | P3 | ⏳ planned |
 | webhooks | `getWebhook` / `updateWebhook` / `deleteWebhook` | `GET/PUT/DELETE /webhooks/{id}` | P3 | ⏳ planned |
