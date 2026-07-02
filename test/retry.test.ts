@@ -135,6 +135,10 @@ describe("retry policy", () => {
     // Attach a no-op catch so an assertion failure doesn't become an unhandled rejection.
     pending.catch(() => undefined);
 
+    // Flush microtasks first so the retry's sleep timer is REGISTERED at
+    // fake-time 0 — otherwise (observed on CI) registration can land after
+    // the first advance and the 7 s target drifts past the second advance.
+    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(6_900);
     expect(fetchMock).toHaveBeenCalledTimes(1); // still waiting on the server-directed 7s
     await vi.advanceTimersByTimeAsync(200);
