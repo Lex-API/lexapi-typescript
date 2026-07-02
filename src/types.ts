@@ -946,3 +946,162 @@ export interface SemanticLegislationSearchResponse {
   usage?: UsageInfo;
   credits?: CreditsInfo;
 }
+
+// ── Webhooks ────────────────────────────────────────────────────────
+
+/** Operational state. `FAILED` is set automatically after repeated delivery errors. */
+export type WebhookStatus = "ACTIVE" | "PAUSED" | "FAILED";
+
+export type DeliveryStatus = "PENDING" | "SUCCESS" | "FAILED" | "RETRYING";
+
+/** Summary shape used in list responses. The `secret` is never included here. */
+export interface WebhookListItem {
+  id?: string;
+  name?: string;
+  url?: string;
+  status?: WebhookStatus;
+  /** The saved search — same shape as a `/search` request body. */
+  searchCriteria?: SearchRequest;
+  lastChecked?: string | null;
+  lastTriggered?: string | null;
+  consecutiveFailures?: number;
+  /** Total delivery attempts ever made (success and failure combined). */
+  deliveryCount?: number;
+  createdAt?: string;
+}
+
+/** A single delivery attempt. */
+export interface WebhookDelivery {
+  id?: string;
+  status?: DeliveryStatus;
+  /** The JSON payload that was POSTed (or queued) to the webhook URL. */
+  payload?: Record<string, unknown>;
+  /** HTTP status code returned by the webhook URL. */
+  responseStatus?: number | null;
+  /** Truncated response body (max 500 chars). */
+  responseBody?: string | null;
+  errorMessage?: string | null;
+  attemptCount?: number;
+  nextRetryAt?: string | null;
+  deliveredAt?: string | null;
+  createdAt?: string;
+}
+
+/** Full webhook details (no `secret`). */
+export interface WebhookDetail {
+  id?: string;
+  name?: string;
+  url?: string;
+  status?: WebhookStatus;
+  searchCriteria?: SearchRequest;
+  lastChecked?: string | null;
+  lastTriggered?: string | null;
+  consecutiveFailures?: number;
+  maxRetries?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  /** Up to 20 most recent delivery attempts, newest first. */
+  recentDeliveries?: WebhookDelivery[];
+}
+
+export interface WebhookListResponse {
+  success: boolean;
+  count?: number;
+  webhooks: WebhookListItem[];
+}
+
+export interface WebhookCreateRequest {
+  /** User-friendly label for the webhook. */
+  name: string;
+  /** HTTPS endpoint to POST matching documents to. */
+  url: string;
+  /**
+   * Optional HMAC-SHA256 signing secret. If omitted, the server generates
+   * a 32-byte hex value and returns it in the create response — the ONLY
+   * time it is exposed. Store it.
+   */
+  secret?: string;
+  /** Documents newly matching these filters trigger a delivery to `url`. */
+  searchCriteria: SearchRequest;
+}
+
+/**
+ * Partial update — only the supplied fields are changed. Setting `status`
+ * to `ACTIVE` additionally resets `consecutiveFailures` to 0 (how you
+ * re-enable an auto-paused webhook).
+ */
+export interface WebhookUpdateRequest {
+  name?: string;
+  url?: string;
+  searchCriteria?: SearchRequest;
+  status?: WebhookStatus;
+}
+
+/** Returned by `POST /webhooks`. The `secret` is included here only. */
+export interface WebhookCreateResponse {
+  success: boolean;
+  message?: string;
+  webhook: {
+    id: string;
+    name: string;
+    url: string;
+    /** HMAC-SHA256 signing secret. Store this — it is not returned again. */
+    secret?: string;
+    status: WebhookStatus;
+    searchCriteria?: SearchRequest;
+    createdAt: string;
+  };
+}
+
+/** Returned by `PUT /webhooks/{id}` — summary fields only. */
+export interface WebhookUpdateResponse {
+  success: boolean;
+  message?: string;
+  webhook: {
+    id?: string;
+    name?: string;
+    url?: string;
+    status?: WebhookStatus;
+    searchCriteria?: SearchRequest;
+    updatedAt?: string;
+  };
+}
+
+/** Returned by `GET /webhooks/{id}`. */
+export interface WebhookResponse {
+  success: boolean;
+  webhook: WebhookDetail;
+}
+
+/**
+ * Result of a synchronous test delivery. `success: true` means the
+ * upstream responded 2xx; non-2xx and network errors both yield
+ * `success: false` plus a populated `delivery.errorMessage`.
+ */
+export interface WebhookTestResponse {
+  success: boolean;
+  message?: string;
+  delivery: {
+    status?: "SUCCESS" | "FAILED";
+    responseStatus?: number | null;
+    /** Truncated upstream response body (max 500 chars). */
+    responseBody?: string | null;
+    errorMessage?: string | null;
+  };
+}
+
+export interface WebhookDeliveriesParams {
+  /** Max deliveries to return. Default 50. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+}
+
+export interface WebhookDeliveriesResponse {
+  success: boolean;
+  /** Total deliveries for this webhook (across all pages). */
+  total?: number;
+  limit?: number;
+  offset?: number;
+  deliveries: WebhookDelivery[];
+}

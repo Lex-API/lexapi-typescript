@@ -4,6 +4,8 @@ import {
   HttpClient,
   type RetryOptions,
 } from "./http.js";
+import { createExportStream, type ExportParams, type ExportStream } from "./export.js";
+import { WebhooksAPI } from "./webhooks.js";
 import type {
   CitationEdgeParams,
   CitationExtractResponse,
@@ -75,6 +77,9 @@ export interface CallOptions {
 export class LexAPI {
   protected readonly http: HttpClient;
 
+  /** Webhook subscriptions (`client.webhooks.list/create/get/update/delete/test/deliveries`). */
+  readonly webhooks: WebhooksAPI;
+
   constructor(options: LexAPIOptions = {}) {
     const apiKey =
       options.apiKey ??
@@ -94,6 +99,7 @@ export class LexAPI {
       },
       userAgentSuffix: options.userAgentSuffix,
     });
+    this.webhooks = new WebhooksAPI(this.http);
   }
 
   /**
@@ -424,6 +430,47 @@ export class LexAPI {
       body: semanticWireBody(request),
       timeoutMs: options?.timeoutMs,
     });
+  }
+
+  // ── Export ────────────────────────────────────────────────────────
+
+  /**
+   * `GET /export` — stream matching corpus rows as NDJSON (BUSINESS tier;
+   * 402 `TierForbidden`/`CreditsExhausted`-style envelope otherwise).
+   *
+   * Returns a single-pass async iterator over document rows. The leading
+   * `_meta` envelope is parsed before this resolves (`stream.meta`); the
+   * trailing `_done` line is exposed as `stream.done` after iteration
+   * finishes — check `done.truncated` / `headers.truncated` to detect the
+   * server row cap (`X-Export-Truncated: 1`) instead of assuming the
+   * export was complete.
+   *
+   * ```ts
+   * const stream = await client.export({ documentType: "regulation", limit: 1000 });
+   * console.log(stream.meta, stream.headers.total);
+   * for await (const row of stream) process(row.celex, row.parsedContent);
+   * if (stream.done?.truncated) console.warn("row cap hit — paginate with fetchedSince");
+   * ```
+   */
+  async export(params: ExportParams = {}, options?: CallOptions): Promise<ExportStream> {
+    const response = await this.http.requestRaw({
+      method: "GET",
+      path: "/export",
+      query: {
+        documentType: params.documentType,
+        author: params.author,
+        subdomain: params.subdomain,
+        language: params.language,
+        dateFrom: params.dateFrom,
+        dateTo: params.dateTo,
+        fetchedSince: params.fetchedSince,
+        includeHtml: params.includeHtml,
+        includeContent: params.includeContent,
+        limit: params.limit,
+      },
+      timeoutMs: options?.timeoutMs,
+    });
+    return createExportStream(response);
   }
 }
 

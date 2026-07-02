@@ -101,6 +101,44 @@ console.log(articles.results[0]?.article_ref, articles.results[0]?.law_id);
 
 Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
 
+## Webhooks
+
+```ts
+const created = await client.webhooks.create({
+  name: "New CJEU judgments",
+  url: "https://example.com/webhooks/lexapi",
+  searchCriteria: { documentType: "judgment", author: ["court-of-justice"] },
+});
+console.log(created.webhook.secret); // returned ONLY here — store it (HMAC-SHA256 signing key)
+
+const { webhooks } = await client.webhooks.list();
+const detail = await client.webhooks.get(created.webhook.id); // includes recentDeliveries
+await client.webhooks.update(created.webhook.id, { status: "ACTIVE" }); // resets consecutiveFailures
+await client.webhooks.test(created.webhook.id);               // synchronous signed test delivery
+const history = await client.webhooks.deliveries(created.webhook.id, { limit: 50 });
+await client.webhooks.delete(created.webhook.id);             // 204 → resolves void
+```
+
+## Corpus export (BUSINESS tier)
+
+`export()` streams NDJSON rows via the fetch body stream — constant memory regardless of result size:
+
+```ts
+const stream = await client.export({ documentType: "regulation", dateFrom: "2024-01-01", limit: 10_000 });
+
+console.log(stream.meta);           // leading _meta envelope (parsed before iteration)
+console.log(stream.headers.total);  // X-Export-Total header
+
+for await (const row of stream) {
+  process(row.celex, row.documentTypeCode, row.parsedContent);
+}
+
+console.log(stream.done);           // trailing _done line (available after iteration)
+if (stream.done?.truncated) console.warn("row cap hit — narrow filters or resume via fetchedSince");
+```
+
+The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass.
+
 ## Configuration
 
 ```ts
