@@ -1,6 +1,6 @@
 # @lexapi/client (TypeScript)
 
-Official TypeScript SDK for [LexAPI](https://lex-api.com) — European legal data, made queryable. EUR-Lex, CJEU case law, and the Official Journal behind one REST API.
+Official TypeScript SDK for [LexAPI](https://lex-api.com/?ref=npm-sdk) — European legal data, made queryable. EUR-Lex, CJEU case law, and the Official Journal behind one REST API.
 
 > **Status: pre-release (0.x).** Not yet published to npm. See [PLAN.md](PLAN.md) for the endpoint coverage matrix.
 
@@ -22,7 +22,7 @@ const info = await client.getInfo();
 console.log(info.subscription, info.usage);
 ```
 
-Keys come from the [LexAPI dashboard](https://lex-api.com) and are prefixed `lex_`.
+Keys come from the [LexAPI dashboard](https://lex-api.com/dashboard?ref=npm-sdk) and are prefixed `lex_`.
 
 ## Search & documents
 
