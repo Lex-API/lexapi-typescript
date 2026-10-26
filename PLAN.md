@@ -24,7 +24,7 @@ Source of truth: `openapi.yaml` (LexAPI 2.0.0, OpenAPI 3.1.0). Production base U
   2. `RateLimit-*` headers (`RateLimit-Remaining`, `RateLimit-Reset` / draft IETF forms) when present,
   3. the JSON `retryAfter` field on the 429 error body, when present,
   4. computed exponential backoff as fallback.
-- Retry behaviour is configurable (max attempts, disable entirely). Idempotent GETs retry by default; non-GET calls retry only on 429/network-error-before-send unless the caller opts in.
+- Retry behaviour is configurable (max attempts, disable entirely). Idempotent GETs retry by default. Non-GET calls retry on 429; **read-only POSTs** (search, document reads, semantic search, resolve, citation extraction) additionally retry on 502/503/504 because the API refunds every 5xx in full (TypeScript: `retry.retryReadOnlyPosts`, default on). Network errors on POST are never retried (the request may have been billed); write endpoints (webhook create/update/delete/test) never retry on 5xx.
 
 ### 1.3 Typed errors
 
@@ -40,8 +40,8 @@ Source of truth: `openapi.yaml` (LexAPI 2.0.0, OpenAPI 3.1.0). Production base U
 
 ### 1.4 Pagination helpers
 
-- Search endpoints are page-based (`page`/`maxPages`, tier-bounded per the `subscription` block). SDKs provide an iterator/stream helper that walks pages transparently and stops at the tier cap, surfacing `truncated`/`truncatedAt`/`truncatedReason` and `partial`/`partialReason` flags rather than hiding them.
-- `/webhooks/{id}/deliveries` and other list endpoints get the same helper where applicable.
+- `/search` has no page cursor — only `maxPages` (fetch the first N pages, tier-bounded), so there is nothing to iterate; SDKs surface `truncated`/`truncatedAt`/`truncatedReason` and `partial`/`partialReason` instead of hiding them.
+- Offset-paginated list endpoints (`/citations/cites`, `/citations/cited-by` — offsets in edges — and `/webhooks/{id}/deliveries`) get a page iterator.
 
 ### 1.5 Credit visibility
 
@@ -79,7 +79,7 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | citations | `getCitationPath` | `GET /citations/path/{from}/{to}` | P2 | ✅ shipped (`getCitationPath`) |
 | citations | `getRelatedDocuments` | `GET /citations/related/{celexNumber}` | P2 | ✅ shipped (`getRelatedDocuments`) |
 | semantic | `semanticCaseLawSearch` | `POST /search/semantic` | P2 | ✅ shipped (`semanticSearch`, incl. `hyde`) |
-| semantic | `semanticLegislationSearch` | `POST /legislation/semantic` | P2 | ✅ shipped (`semanticLegislationSearch`) |
+| semantic | `semanticLegislationSearch` | `POST /legislation/semantic` | P2 | ✅ shipped (`semanticLegislationSearch`, incl. `asOf` + consolidated labels — 0.2.0) |
 | export | `exportCorpus` | `GET /export` | P3 | ✅ shipped (`export`, async NDJSON iterator) |
 | webhooks | `listWebhooks` / `createWebhook` | `GET/POST /webhooks` | P3 | ✅ shipped (`webhooks.list`/`webhooks.create`) |
 | webhooks | `getWebhook` / `updateWebhook` / `deleteWebhook` | `GET/PUT/DELETE /webhooks/{id}` | P3 | ✅ shipped (`webhooks.get`/`update`/`delete`) |
@@ -87,7 +87,11 @@ Priority order: **P0** first (`info` + `search` + `documentContent`), then P1 �
 | webhooks | `getWebhookDeliveries` | `GET /webhooks/{id}/deliveries` | P3 | ✅ shipped (`webhooks.deliveries`) |
 | versions | `listDocumentVersions` | `GET /documents/{celex}/versions` | P3 | ✅ shipped |
 | versions | `getDocumentVersion` | `GET /documents/{celex}/versions/{version}` | P3 | ✅ shipped |
-| versions | `getDocumentAtDate` | `GET /documents/{celex}/at/{date}` | P3 | ✅ shipped (requires lex-api #72) |
+| versions | `getDocumentAtDate` | `GET /documents/{celex}/at/{date}` | P3 | ✅ shipped |
+| helpers | page iterators | cites / cited-by / webhook deliveries | — | ✅ `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` (0.2.0) |
+| helpers | webhook receiver | `X-Webhook-Signature` | — | ✅ `verifyWebhookSignature`, `constructWebhookEvent` (0.2.0) |
+| — | national-law lanes | `/{jurisdiction}/…` | — | ⏸ deliberately not exposed: undocumented server routes until launch |
+| — | legacy `/parse` | `POST /parse` | — | ⏸ deprecated alias of `/search`; not exposed |
 
 Cross-cutting model work per group: `ErrorResponse`, `SubscriptionInfo`, `UsageInfo`, `CreditsInfo` (P0); search filter enums driven from `/info` capability map where possible instead of hardcoding.
 ## 3. Language-specific architecture
@@ -124,4 +128,4 @@ Cross-cutting model work per group: `ErrorResponse`, `SubscriptionInfo`, `UsageI
 - **Semver.** `0.x` until the LexAPI v1 surface freeze; during 0.x, minor bumps may break (documented in CHANGELOG), patch bumps never break.
 - `1.0.0` is tagged only when: P0+P1 endpoint groups are covered, the shared SDK contract (section 1) is fully implemented, and the API team declares the v1 freeze.
 - API additions (new fields/endpoints) → minor. Error-envelope or auth changes → coordinated minor across all four SDKs in the same week.
-- Each release records the `openapi.yaml` revision it was generated/validated against.
+- Each release records the `openapi.yaml` revision it was generated/validated against (0.2.0: lex-api `main` @ `633eb67`, 2026-10-26).
