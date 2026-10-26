@@ -121,6 +121,8 @@ export interface ExportDoneInfo {
   truncated?: boolean;
   /** Metadata-only rows skipped because `includeStubs` was off. */
   skippedStubs?: number;
+  /** Exactly `false` marks an incomplete export (SDK contract §1.8); absent or `true` = complete. */
+  complete?: boolean;
   [key: string]: unknown;
 }
 
@@ -159,15 +161,26 @@ export interface ExportHeaderInfo {
  *   throws `NetworkError` (`CONNECTION_ERROR`); no data for `timeoutMs`
  *   throws `TimeoutError` (`REQUEST_TIMEOUT`); the call's `signal` throws
  *   `RequestAbortedError`. In every case the connection is released.
+ * - A `_done` line with `complete: false`, or any line whose only key is
+ *   `_error`, also means incomplete: iteration throws `IncompleteExportError`
+ *   after the rows that did arrive (the `_error` body is on its `details` and
+ *   on `stream.error`). Unknown `_done` fields (`truncatedBy`, `credits`) are
+ *   kept on `done`.
  * - Lines that are not JSON objects are counted in `invalidLines`, not yielded.
- * - `_meta`/`_done` lines are never yielded as rows.
+ * - `_meta`/`_done`/`_error` lines are never yielded as rows.
  */
 export interface ExportStream extends AsyncIterable<ExportRow> {
   readonly meta: ExportMeta | undefined;
   readonly done: ExportDone | undefined;
   readonly headers: ExportHeaderInfo;
-  /** `true` once the `_done` trailer was read — only then is the export whole (SDK contract §1.8). */
+  /**
+   * `true` once a `_done` trailer was read that does not say
+   * `complete: false`, and no `_error` line arrived — only then is the export
+   * whole (SDK contract §1.8).
+   */
   readonly complete: boolean;
+  /** The server's `_error` line body, if one arrived (never yielded as a row). */
+  readonly error: Record<string, unknown> | undefined;
   /** Data rows yielded so far. */
   readonly rowsRead: number;
   /** Lines that were not JSON objects (e.g. a half-written last line) — counted, not yielded. */
@@ -337,6 +350,16 @@ function liftEnvelope<T>(parsed: Record<string, unknown>, key: "_meta" | "_done"
   return parsed as T;
 }
 
+/** A line whose only key is `_error`: a server failure signal, never a row. */
+function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | undefined {
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "_error") return undefined;
+  const value = parsed._error;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : { message: String(value) };
+}
+
 /** Parse one NDJSON line; `undefined` when it is not a JSON object. */
 function parseLine(line: string): Record<string, unknown> | undefined {
   try {
@@ -352,6 +375,7 @@ function parseLine(line: string): Record<string, unknown> | undefined {
 class ExportStreamImpl implements ExportStream {
   meta: ExportMeta | undefined;
   done: ExportDone | undefined;
+  error: Record<string, unknown> | undefined;
   readonly headers: ExportHeaderInfo;
 
   private readonly lines: NdjsonReader;
@@ -360,7 +384,22 @@ class ExportStreamImpl implements ExportStream {
   invalidLines = 0;
 
   get complete(): boolean {
-    return this.done !== undefined;
+    return this.done !== undefined && this.done.complete !== false && this.error === undefined;
+  }
+
+  private incomplete(reason: string): IncompleteExportError {
+    return new IncompleteExportError(
+      `Export stream is incomplete after ${this.lines.rows} rows: ${reason}`,
+      this.lines.rows,
+      this.error,
+    );
+  }
+
+  private failureReason(): string {
+    if (this.error !== undefined) {
+      return `the server reported an error mid-stream (${String(this.error.code ?? "UNKNOWN")}: ${String(this.error.message ?? "")})`;
+    }
+    return "its _done trailer says complete: false";
   }
 
   get rowsRead(): number {
@@ -398,7 +437,12 @@ class ExportStreamImpl implements ExportStream {
       const first = await this.lines.nextLine();
       if (first === undefined) return;
       parsed = parseLine(first);
-      if (parsed !== undefined) break;
+      if (parsed !== undefined) {
+        const error = errorLine(parsed);
+        if (error === undefined) break;
+        this.error = error; // never a row; iteration reports it
+        continue;
+      }
       this.invalidLines++;
     }
     if ("_meta" in parsed) {
@@ -417,7 +461,8 @@ class ExportStreamImpl implements ExportStream {
       // SDK contract §1.8: a stream is read once. Re-iterating one that was
       // read to its `_done` yields nothing; one that was ended early
       // (cancel(), break, an error) never looks complete.
-      if (this.done !== undefined) return;
+      if (this.complete) return;
+      if (this.done !== undefined || this.error !== undefined) throw this.incomplete(this.failureReason());
       throw new IncompleteExportError(
         `Export stream was ended before its _done trailer (after ${this.lines.rows} rows) — call export() again to re-read`,
         this.lines.rows,
@@ -431,11 +476,16 @@ class ExportStreamImpl implements ExportStream {
         this.lines.rows++;
         yield row;
       }
-      if (this.done !== undefined) return; // _done arrived first (empty export)
+      if (this.done !== undefined) {
+        // _done arrived first (empty export)
+        if (!this.complete) throw this.incomplete(this.failureReason());
+        return;
+      }
       for (;;) {
         const line = await this.lines.nextLine();
         if (line === undefined) {
           // Clean EOF without the trailer: the server stopped mid-export.
+          if (this.error !== undefined) throw this.incomplete(this.failureReason());
           throw new IncompleteExportError(
             `Export stream ended without its _done trailer after ${this.lines.rows} rows — the export is incomplete`,
             this.lines.rows,
@@ -448,9 +498,15 @@ class ExportStreamImpl implements ExportStream {
         }
         if ("_done" in parsed) {
           this.done = liftEnvelope<ExportDone>(parsed, "_done");
+          if (!this.complete) throw this.incomplete(this.failureReason());
           return;
         }
         if ("_meta" in parsed) continue; // never surface envelope lines as rows
+        const error = errorLine(parsed);
+        if (error !== undefined) {
+          this.error = error; // a failure signal, never a row
+          continue;
+        }
         this.lines.rows++;
         yield parsed as ExportRow;
       }

@@ -113,6 +113,19 @@ was audited against the spec **and** the server controllers.
 - Docs/README: the export tier gate is a `403` (not `402`) and covers BUSINESS, SCALE and
   ENTERPRISE; tier limits include SCALE; "not yet published" and "requires lex-api PR #72" notes
   removed; webhook ceilings updated.
+- Export streams never report a failed export as complete. A `_done` trailer with
+  `complete: false`, or any line whose only key is `_error`, now throws `IncompleteExportError`
+  (after the rows that did arrive) and leaves `stream.complete` false; before, any `_done` line
+  counted as complete and an `_error` line was yielded as an `ExportRow`. The error line's body is
+  on the exception's `details` and on the new `stream.error`. Unknown `_done` fields
+  (`truncatedBy`, `credits`) are kept on `stream.done`. (PLAN.md §1.8; lex-api #303.)
+- A top-level string `code` on a legacy-shape error body (lex-api #304 adds it next to the text
+  `error`) is now the error's `code`, ahead of the status-derived one. A 429 with
+  `code: "QUOTA_EXHAUSTED"` (a legacy plan's used-up daily or monthly-semantic quota) is a
+  `RateLimitedError` with `code === "QUOTA_EXHAUSTED"`, `quotaExhausted` true, `retryAfter`
+  `undefined` and `resetsAt` from the body's `resetsAt`; it is never retried. `QUOTA_EXHAUSTED`
+  joins `ErrorCode`. Servers without the `code` are still recognised by the old shape check.
+  (PLAN.md §1.2/§1.3.)
 
 ### Changed
 
