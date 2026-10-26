@@ -141,7 +141,21 @@ describe("export", () => {
     }).rejects.toThrow(LexAPIError);
   });
 
-  it("maps the 402 tier gate to a typed error before streaming", async () => {
+  it("maps the tier gate (legacy-shape 403, as the server sends it) to TierForbiddenError", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(403, {
+        error: "Bulk export is a BUSINESS-tier feature",
+        message: "Upgrade your plan to export the LexAPI corpus in bulk.",
+        upgradeUrl: "/pricing",
+      }),
+    );
+
+    const error = await client(fetchMock).export().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(TierForbiddenError);
+    expect((error as TierForbiddenError).body).toMatchObject({ upgradeUrl: "/pricing" });
+  });
+
+  it("still maps a typed TIER_FORBIDDEN envelope on any status", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(402, {
         success: false,
@@ -163,5 +177,119 @@ describe("export", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(stream.meta).toBeDefined();
+  });
+});
+
+describe("export — server envelope shape (exportController @ 633eb67)", () => {
+  // The real server nests the envelope fields: {"_meta": {...}} / {"_done": {...}}.
+  const REAL_META = JSON.stringify({
+    _meta: {
+      filters: { documentType: ["Regulation"], author: null, subdomain: null, language: "en", dateFrom: null, dateTo: null, fetchedSince: null },
+      totalMatching: 3,
+      streaming: 3,
+      truncated: false,
+      includeHtml: false,
+      includeContent: true,
+      exportedAt: "2026-10-26T08:00:00.000Z",
+    },
+  });
+  const REAL_DONE = JSON.stringify({ _done: { written: 2, truncated: false, skippedStubs: 1 } });
+
+  it("lifts the nested _meta / _done fields so stream.done.truncated works", async () => {
+    const fetchMock = fetchSequence(
+      ndjsonResponse([REAL_META, ROW_1, ROW_2, REAL_DONE].join("\n") + "\n", {
+        "x-export-total": "3",
+        "x-export-streaming": "3",
+        "x-export-truncated": "0",
+      }),
+    );
+
+    const stream = await client(fetchMock).export({ includeStubs: false });
+
+    expect(stream.meta?.totalMatching).toBe(3);
+    expect(stream.meta?.filters?.documentType).toEqual(["Regulation"]);
+    expect(stream.meta?._meta).toBeDefined(); // raw envelope still available
+
+    const rows: ExportRow[] = [];
+    for await (const row of stream) rows.push(row);
+
+    expect(rows).toHaveLength(2);
+    expect(stream.done?.written).toBe(2);
+    expect(stream.done?.truncated).toBe(false);
+    expect(stream.done?.skippedStubs).toBe(1);
+  });
+
+  it("reports the row cap from the nested _done", async () => {
+    const done = JSON.stringify({ _done: { written: 1, truncated: true, skippedStubs: 0 } });
+    const fetchMock = fetchSequence(ndjsonResponse([REAL_META, ROW_1, done].join("\n"), { "x-export-truncated": "1" }));
+
+    const stream = await client(fetchMock).export({ limit: 1 });
+    for await (const _row of stream) void _row;
+
+    expect(stream.done?.truncated).toBe(true);
+    expect(stream.headers.truncated).toBe(true);
+  });
+
+  it("sends includeStubs and comma-joins array filters", async () => {
+    const fetchMock = fetchSequence(ndjsonResponse([REAL_META, REAL_DONE].join("\n")));
+
+    await client(fetchMock).export({
+      documentType: ["Regulation", "Directive"],
+      author: "European Commission",
+      subdomain: ["legislation", "case-law"],
+      includeStubs: true,
+      fetchedSince: "2026-10-01T00:00:00Z",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0]! as unknown as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("documentType")).toBe("Regulation,Directive");
+    expect(parsed.searchParams.get("author")).toBe("European Commission");
+    expect(parsed.searchParams.get("subdomain")).toBe("legislation,case-law");
+    expect(parsed.searchParams.get("includeStubs")).toBe("true");
+    expect(parsed.searchParams.get("fetchedSince")).toBe("2026-10-01T00:00:00Z");
+    expect((init.headers as Record<string, string>)["accept"]).toContain("application/x-ndjson");
+  });
+
+  it("cancels the body when the consumer stops early", async () => {
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode([REAL_META, ROW_1, ROW_2].join("\n") + "\n"));
+        // never closes: simulates a long export still streaming
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response(body, { status: 200 }));
+
+    const stream = await client(fetchMock as unknown as typeof fetch).export();
+    for await (const row of stream) {
+      expect(row.celex).toBe("32016R0679");
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancel() releases the connection without iterating", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(REAL_META + "\n"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchMock = vi.fn(async () => new Response(body, { status: 200 }));
+
+    const stream = await client(fetchMock as unknown as typeof fetch).export();
+    expect(stream.meta?.totalMatching).toBe(3);
+    await stream.cancel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cancelled).toBe(true);
   });
 });

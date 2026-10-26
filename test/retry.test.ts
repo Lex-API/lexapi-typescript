@@ -200,3 +200,78 @@ describe("retry policy", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("read-only POST retries", () => {
+  it("retries an idempotent POST on 502/503/504 (5xx is refunded in full)", async () => {
+    for (const status of [502, 503, 504]) {
+      const fetchMock = fetchSequence(ERR(status), OK());
+      await expect(
+        httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+      ).resolves.toBeTruthy();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("does not retry an idempotent POST on 500 INTERNAL", async () => {
+    const fetchMock = fetchSequence(ERR(500, "INTERNAL"), OK());
+    await expect(
+      httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never retries an idempotent POST on network errors (it may have been billed)", async () => {
+    const fetchMock = fetchSequence(new TypeError("socket hang up"), OK());
+    await expect(
+      httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+    ).rejects.toThrow(NetworkError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors retryReadOnlyPosts: false", async () => {
+    const fetchMock = fetchSequence(ERR(503), OK());
+    await expect(
+      httpClient(fetchMock, { ...FAST_RETRY, retryReadOnlyPosts: false }).requestJson({
+        method: "POST",
+        path: "/search",
+        body: {},
+        idempotent: true,
+      }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks every read-only client method idempotent, and webhook writes not", async () => {
+    const client = (fetchMock: typeof fetch) =>
+      new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, retry: FAST_RETRY });
+
+    const reads: Array<(c: LexAPI) => Promise<unknown>> = [
+      (c) => c.search({ query: "x" }),
+      (c) => c.getDocument({ celexNumber: "32016R0679" }),
+      (c) => c.getDocumentsBatch({ celexNumbers: ["32016R0679"] }),
+      (c) => c.getDocumentByUrl({ url: "https://eur-lex.europa.eu/?uri=CELEX:32016R0679" }),
+      (c) => c.getDocumentMetadata({ celexNumber: "32016R0679" }),
+      (c) => c.resolve("32016R0679"),
+      (c) => c.extractCitations("32016R0679"),
+      (c) => c.semanticSearch({ query: "x" }),
+      (c) => c.semanticLegislationSearch({ query: "x", asOf: "2020-01-01" }),
+    ];
+    for (const call of reads) {
+      const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), OK());
+      await call(client(fetchMock));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+
+    const writes: Array<(c: LexAPI) => Promise<unknown>> = [
+      (c) => c.webhooks.create({ name: "n", url: "https://example.com", watchCelex: ["32008R1272"] }),
+      (c) => c.webhooks.update("id", { status: "ACTIVE" }),
+      (c) => c.webhooks.delete("id"),
+      (c) => c.webhooks.test("id"),
+    ];
+    for (const call of writes) {
+      const fetchMock = fetchSequence(ERR(502), OK());
+      await expect(call(client(fetchMock))).rejects.toThrow(UpstreamError);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+});

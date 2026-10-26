@@ -11,6 +11,7 @@ import {
   LexAPIError,
   NotFoundError,
   RateLimitedError,
+  ServiceUnavailableError,
   TierForbiddenError,
   TimeoutError,
   UpstreamError,
@@ -177,5 +178,85 @@ describe("normalizeRetryAfterSeconds", () => {
 
   it("clamps past values to zero", () => {
     expect(normalizeRetryAfterSeconds(Date.now() / 1000 - 100)).toBe(0);
+  });
+});
+
+describe("error context (body, headers, legacy details)", () => {
+  it("keeps legacy validation `details` (e.g. /search parameter errors)", async () => {
+    const error = await errorFrom(
+      jsonResponse(400, { error: "Invalid search parameters", details: ["month must be 1-12"] }),
+    );
+    expect(error).toBeInstanceOf(InvalidParamsError);
+    expect(error.details).toEqual(["month must be 1-12"]);
+  });
+
+  it("exposes the raw body for legacy-only fields (export tier gate upgradeUrl)", async () => {
+    const error = await errorFrom(
+      jsonResponse(403, {
+        error: "Bulk export is a BUSINESS-tier feature",
+        message: "Upgrade your plan to export the LexAPI corpus in bulk.",
+        upgradeUrl: "/pricing",
+      }),
+    );
+    expect(error).toBeInstanceOf(TierForbiddenError);
+    expect(error.message).toContain("BUSINESS-tier");
+    expect((error.body as { upgradeUrl?: string }).upgradeUrl).toBe("/pricing");
+  });
+
+  it("maps 503 to ServiceUnavailableError (derived code)", async () => {
+    const error = await errorFrom(new Response("Service Unavailable", { status: 503 }));
+    expect(error).toBeInstanceOf(ServiceUnavailableError);
+    expect(error.code).toBe("SERVICE_UNAVAILABLE");
+  });
+
+  it("exposes RateLimit-* headers on RateLimitedError", async () => {
+    const error = await errorFrom(
+      jsonResponse(
+        429,
+        {
+          error: "Rate limit exceeded",
+          message: "You can make up to 60 requests per minute on your current plan",
+          retryAfter: 42,
+        },
+        {
+          "retry-after": "42",
+          "ratelimit-limit": "60",
+          "ratelimit-remaining": "0",
+          "ratelimit-reset": "42",
+          "ratelimit-policy": "60;w=60",
+        },
+      ),
+    );
+    expect(error).toBeInstanceOf(RateLimitedError);
+    expect(error.retryAfter).toBe(42);
+    expect((error as RateLimitedError).rateLimit).toEqual({ limit: 60, remaining: 0, reset: 42, policy: "60;w=60" });
+    expect(error.headers?.rateLimit?.remaining).toBe(0);
+  });
+
+  it("types the CREDITS_EXHAUSTED details (operation / weight / available)", async () => {
+    const error = (await errorFrom(
+      jsonResponse(402, {
+        success: false,
+        error: {
+          code: "CREDITS_EXHAUSTED",
+          message: "Credit pool exhausted",
+          details: {
+            operation: "semantic_case_law",
+            weight: 5,
+            available: 2,
+            included: 30000,
+            topup: 0,
+            used: 29998,
+            resetsAt: "2026-07-01T00:00:00.000Z",
+          },
+        },
+      }),
+    )) as CreditsExhaustedError;
+    expect(error).toBeInstanceOf(CreditsExhaustedError);
+    expect(error.operation).toBe("semantic_case_law");
+    expect(error.weight).toBe(5);
+    expect(error.available).toBe(2);
+    expect(error.details?.used).toBe(29998);
+    expect(error.resetsAt).toBe("2026-07-01T00:00:00.000Z");
   });
 });

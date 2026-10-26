@@ -22,4 +22,4 @@ export function fetchSequence(...responses: Array<Response | Error>) {
 }
 
 /** Retry options that keep unit tests fast. */
-export const FAST_RETRY = { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5 };
+export const FAST_RETRY = { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5, retryReadOnlyPosts: true };
