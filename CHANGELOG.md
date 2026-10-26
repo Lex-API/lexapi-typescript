@@ -126,6 +126,12 @@ was audited against the spec **and** the server controllers.
   `undefined` and `resetsAt` from the body's `resetsAt`; it is never retried. `QUOTA_EXHAUSTED`
   joins `ErrorCode`. Servers without the `code` are still recognised by the old shape check.
   (PLAN.md §1.2/§1.3.)
+- Export parameters for API 2.3.0 (lex-api #303): `documentTypeCode` (a type family) and
+  `changedSince` (rows whose text changed); `fetchedSince` / `changedSince` also take a `Date`
+  (sent as UTC). A `limit` that is not a positive integer throws `RangeError` before the request
+  (the API answers 400). `ExportDoneInfo` types `truncatedBy` and `credits`. Docs describe the
+  per-row billing and the filter semantics of API 2.3.0. **Publish only after lex-api #303 is
+  deployed.**
 
 ### Changed
 

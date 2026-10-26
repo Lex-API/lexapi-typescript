@@ -12,21 +12,44 @@ import type { Language } from "./types.js";
 /** A list filter: an array, or a comma-separated string (`"regulation,directive"`). */
 export type ExportListFilter = string | ReadonlyArray<string>;
 
+/**
+ * Filters for `GET /export` (API 2.3.0, lex-api #303). List values are sent
+ * comma-separated and ORed.
+ */
 export interface ExportParams {
-  /** Document types (prose form as stored, e.g. `"Regulation"`), array or comma-separated. */
+  /**
+   * Document types: the stored label, matched exactly ignoring case
+   * (`"regulation"` matches `Regulation`, not `Implementing regulation`).
+   * For a whole family use `documentTypeCode`.
+   */
   documentType?: ExportListFilter;
-  /** Authors, array or comma-separated. */
+  /**
+   * Type families by the `documentTypeCode` each row carries: `"regulation"`
+   * includes implementing and delegated regulations. Combined with
+   * `documentType`, both must match.
+   */
+  documentTypeCode?: ExportListFilter;
+  /** Authors: whole stored values, ignoring case (a joint act's author string is one value). */
   author?: ExportListFilter;
   /** Subdomains (`legislation`, `case-law`, `treaties`, `preparatory`, `international`, `consolidated`, …). */
   subdomain?: ExportListFilter;
   /** Document language (default `en`). */
   language?: Language;
-  /** Earliest `dateOfDocument` to include (inclusive, `YYYY-MM-DD`). */
+  /** Earliest document date to include (inclusive, `YYYY-MM-DD`; anything else is a 400). */
   dateFrom?: string;
-  /** Latest `dateOfDocument` to include (inclusive, `YYYY-MM-DD`). */
+  /** Latest document date to include (inclusive, `YYYY-MM-DD`). */
   dateTo?: string;
-  /** Incremental sync: only rows whose `lastSeenAt` is at or after this ISO timestamp. */
-  fetchedSince?: string;
+  /**
+   * Rows whose `lastSeenAt` is at or after this time (any write to the row).
+   * An ISO 8601 date or a date-time WITH a timezone (the API answers 400 to
+   * one without), or a `Date` (sent as UTC).
+   */
+  fetchedSince?: string | Date;
+  /**
+   * Rows whose text changed (`contentChangedAt`) at or after this time — the
+   * cheapest incremental sync. Same format as `fetchedSince`.
+   */
+  changedSince?: string | Date;
   /** Include raw `htmlContent` / `htmlMetadata` per row (large). Default false. */
   includeHtml?: boolean;
   /** Set `false` to omit `parsedContent` from each row. Default true. */
@@ -37,7 +60,11 @@ export interface ExportParams {
    * `skippedStubs` on the trailer.
    */
   includeStubs?: boolean;
-  /** Max rows to stream. Clamped to the server's `EXPORT_MAX_ROWS` ceiling (default 50 000). */
+  /**
+   * Max rows to stream: a positive integer (anything else throws a
+   * `RangeError` before the request — the API answers 400). Clamped to the
+   * server's `EXPORT_MAX_ROWS` ceiling (default 50 000).
+   */
   limit?: number;
 }
 
@@ -123,6 +150,21 @@ export interface ExportDoneInfo {
   skippedStubs?: number;
   /** Exactly `false` marks an incomplete export (SDK contract §1.8); absent or `true` = complete. */
   complete?: boolean;
+  /** API 2.3.0: what cut the export short — `limit`, `max_rows`, or `null`. */
+  truncatedBy?: "limit" | "max_rows" | null;
+  /**
+   * API 2.3.0, credit plans: the pool after settlement, plus `reserved`,
+   * `charged` (max(written, 1)) and `refunded`; `refundPending: true` when
+   * the refund is applied later by the server's recovery sweep.
+   */
+  credits?: {
+    reserved?: number;
+    charged?: number;
+    refunded?: number;
+    refundPending?: boolean;
+    remaining?: number;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 

@@ -644,10 +644,15 @@ export class LexAPI {
 
   /**
    * `GET /export` — stream matching corpus rows as NDJSON (BUSINESS, SCALE
-   * and ENTERPRISE; lower tiers get 403 `TierForbiddenError`). For what an
-   * export costs see https://lex-api.com/pricing and the `credits` /
-   * `usage` figures on your next response. Metadata-only rows are skipped
-   * unless `includeStubs: true`.
+   * and ENTERPRISE; lower tiers get 403 `TierForbiddenError`). Metadata-only
+   * rows are skipped unless `includeStubs: true`.
+   *
+   * Billing (credit plans, API 2.3.0): 1 credit per row written, at least 1
+   * per export. The call is admitted for 1 credit, the matching rows are
+   * counted, and the rest of 1 credit per row it can return is reserved; a
+   * pool that cannot cover it throws `CreditsExhaustedError` before anything
+   * streams. Unwritten rows are refunded when the stream ends; the settled
+   * charge is `stream.done?.credits` (`charged`).
    *
    * Returns a single-pass async iterator over document rows. The leading
    * `_meta` envelope is parsed before this resolves (`stream.meta`); the
@@ -656,25 +661,31 @@ export class LexAPI {
    * cap instead of assuming the export was complete.
    *
    * ```ts
-   * const stream = await client.export({ documentType: "Regulation", limit: 1000 });
+   * const stream = await client.export({ documentTypeCode: "regulation", limit: 1000 });
    * console.log(stream.meta?.totalMatching, stream.headers.total);
    * for await (const row of stream) process(row.celex, row.parsedContent);
-   * if (stream.truncated) console.warn("row cap hit — resume with fetchedSince");
+   * if (stream.truncated) console.warn("row cap hit — narrow the filters or resume with changedSince");
    * ```
    */
   async export(params: ExportParams = {}, options?: CallOptions): Promise<ExportStream> {
+    // Mirrors the API's 400 exactly: a positive integer, nothing else.
+    if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 1)) {
+      throw new RangeError(`limit must be a positive integer, got ${String(params.limit)}`);
+    }
     const response = await this.http.requestRaw({
       method: "GET",
       path: "/export",
       accept: "application/x-ndjson, application/json",
       query: {
         documentType: listParam(params.documentType),
+        documentTypeCode: listParam(params.documentTypeCode),
         author: listParam(params.author),
         subdomain: listParam(params.subdomain),
         language: params.language,
         dateFrom: params.dateFrom,
         dateTo: params.dateTo,
-        fetchedSince: params.fetchedSince,
+        fetchedSince: timestampParam(params.fetchedSince),
+        changedSince: timestampParam(params.changedSince),
         includeHtml: params.includeHtml,
         includeContent: params.includeContent,
         includeStubs: params.includeStubs,
@@ -715,6 +726,11 @@ function edgeQuery(params: CitationEdgeParams): Record<string, string | number |
 }
 
 /** Comma-join list filters (the export endpoint accepts comma-separated or repeated values). */
+/** A `Date` is sent as its UTC ISO string; strings pass through for the server to validate. */
+function timestampParam(value: string | Date | undefined): string | undefined {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
 function listParam(value: string | ReadonlyArray<string> | undefined): string | undefined {
   if (value === undefined) return undefined;
   return typeof value === "string" ? value : value.join(",");
