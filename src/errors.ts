@@ -27,8 +27,17 @@ export type ErrorCode =
   | "UNAUTHORIZED"
   // Derived: 503 (deploy drain / temporary unavailability) has no typed code.
   | "SERVICE_UNAVAILABLE"
-  // Client-side transport failure (no HTTP response at all).
-  | "NETWORK_ERROR"
+  // SDK-side (SDK contract §1.3): transport failure — `NetworkError`.
+  | "CONNECTION_ERROR"
+  // SDK-side: the SDK's own response timeout (status 0) — `TimeoutError`;
+  // distinct from the server's `TIMEOUT` (504/524).
+  | "REQUEST_TIMEOUT"
+  // SDK-side: the caller's AbortSignal fired — `RequestAbortedError`.
+  | "ABORTED"
+  // SDK-side: a 2xx whose non-empty body is not JSON — `InvalidResponseError`.
+  | "INVALID_RESPONSE"
+  // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
+  | "INCOMPLETE_EXPORT"
   // Forward compatibility: unknown codes are kept as-is.
   | (string & {});
 
@@ -39,10 +48,11 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
   403: "TIER_FORBIDDEN",
   404: "NOT_FOUND",
   429: "RATE_LIMITED",
+  500: "INTERNAL",
   502: "UPSTREAM_ERROR",
   503: "SERVICE_UNAVAILABLE",
   504: "TIMEOUT",
-  // Cloudflare edge errors (non-JSON bodies): origin unreachable / timed out.
+  // Cloudflare edge errors (non-JSON bodies). SDK contract §1.3.
   520: "UPSTREAM_ERROR",
   521: "UPSTREAM_ERROR",
   522: "UPSTREAM_ERROR",
@@ -58,8 +68,49 @@ export interface LexAPIErrorContext {
   headers?: ResponseHeaders;
 }
 
+/**
+ * Brand stamped on every SDK error (registered symbol, so it is shared by the
+ * ESM and CommonJS builds — and by two installed copies of the package).
+ * Holds the error's class kinds, most specific first.
+ */
+const ERROR_KINDS = Symbol.for("@lexapi/client.errorKinds");
+
+function collectKinds(ctor: unknown): string[] {
+  const kinds: string[] = [];
+  let current: unknown = ctor;
+  while (typeof current === "function") {
+    const kind = (current as { kind?: unknown }).kind;
+    if (Object.prototype.hasOwnProperty.call(current, "kind") && typeof kind === "string") {
+      kinds.push(kind);
+    }
+    current = Object.getPrototypeOf(current);
+  }
+  return kinds;
+}
+
+/**
+ * `instanceof` that also works across the dual-package hazard: an error
+ * thrown by the CommonJS build (`require`) is still `instanceof` the ESM
+ * build's classes (`import`), because both check the shared brand. Classes
+ * you derive yourself fall back to the ordinary prototype check.
+ */
+function brandedHasInstance(ctor: { kind?: string }, value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (Function.prototype[Symbol.hasInstance].call(ctor, value)) return true;
+  if (!Object.prototype.hasOwnProperty.call(ctor, "kind")) return false;
+  const kinds = (value as Record<symbol, unknown>)[ERROR_KINDS];
+  return Array.isArray(kinds) && kinds.includes(ctor.kind);
+}
+
 /** Base class for every error thrown by the SDK. */
 export class LexAPIError extends Error {
+  /** Stable class tag used by the cross-build `instanceof` brand check. */
+  static readonly kind: string = "LexAPIError";
+
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return brandedHasInstance(this, value);
+  }
+
   /** Stable machine-readable code (`error.code`, or derived from the HTTP status for legacy bodies). */
   readonly code: ErrorCode;
   /** HTTP status. `0` for client-side failures (network error, client-side timeout). */
@@ -99,6 +150,7 @@ export class LexAPIError extends Error {
     this.retryAfter = retryAfter;
     this.body = context?.body;
     this.headers = context?.headers;
+    Object.defineProperty(this, ERROR_KINDS, { value: collectKinds(new.target), enumerable: false });
   }
 
   /**
@@ -111,7 +163,10 @@ export class LexAPIError extends Error {
     headerRetryAfter?: number,
     headers?: ResponseHeaders,
   ): LexAPIError {
-    let code: ErrorCode = STATUS_TO_CODE[status] ?? "INTERNAL";
+    // SDK contract §1.3: unmapped statuses are INTERNAL.
+    const statusCode = STATUS_TO_CODE[status];
+    let code: ErrorCode = statusCode ?? "INTERNAL";
+    let typedCode = false;
     let message = `HTTP ${status}`;
     let details: unknown;
     let retryAfter = headerRetryAfter;
@@ -123,21 +178,24 @@ export class LexAPIError extends Error {
       if (typeof err === "object" && err !== null) {
         // Typed envelope: {success: false, error: {code, message, details}}
         const e = err as Record<string, unknown>;
-        if (typeof e["code"] === "string") code = e["code"];
+        if (typeof e["code"] === "string") {
+          code = e["code"];
+          typedCode = true;
+        }
         if (typeof e["message"] === "string") message = e["message"];
         details = e["details"];
       } else if (typeof err === "string") {
-        // Legacy bare {error: "...", message?: "...", details?: [...]} —
-        // `error` is a short slug or the message itself; a sibling `message`
-        // adds detail; `details` (e.g. search / webhook validation lists) is
-        // kept so callers can see WHICH field was rejected.
+        // Legacy bare {error: "<text>", message?, details?}: the string is
+        // HUMAN TEXT, never a code (even when it looks like a slug) — the
+        // code comes from the status. `details` (validation lists) is kept.
         message =
           typeof record["message"] === "string" && record["message"] !== err
             ? `${err}: ${record["message"]}`
             : err;
         details = record["details"];
-      } else if (typeof record["message"] === "string") {
-        message = record["message"];
+      } else {
+        // No `error` member ({message, details}): keep both when present.
+        if (typeof record["message"] === "string") message = record["message"];
         details = record["details"];
       }
       // JSON retryAfter fallback — only on a 429, and only when the header
@@ -154,6 +212,15 @@ export class LexAPIError extends Error {
     }
 
     const context: LexAPIErrorContext = { body, ...(headers ? { headers } : {}) };
+    // An unmapped client status (409, 413, …) keeps code INTERNAL per the
+    // contract but is not presented as a server failure: base class.
+    if (!typedCode && statusCode === undefined && status < 500) {
+      return new LexAPIError(code, message, status, details, retryAfter, context);
+    }
+    // §1.2: a quota-exhausted 429 exposes no retry-after value.
+    if (code === "RATE_LIMITED" && isQuota429(body, headers)) {
+      return new RateLimitedError(message, status, details, undefined, context);
+    }
     switch (code) {
       case "NOT_FOUND":
         return new NotFoundError(message, status, details, retryAfter, context);
@@ -188,6 +255,7 @@ export class LexAPIError extends Error {
 
 /** 404 — document or resource missing (`NOT_FOUND`). */
 export class NotFoundError extends LexAPIError {
+  static override readonly kind: string = "NotFoundError";
   constructor(
     message: string,
     status = 404,
@@ -202,6 +270,7 @@ export class NotFoundError extends LexAPIError {
 
 /** 400 — CELEX failed validation (`INVALID_CELEX`). */
 export class InvalidCelexError extends LexAPIError {
+  static override readonly kind: string = "InvalidCelexError";
   constructor(
     message: string,
     status = 400,
@@ -216,6 +285,7 @@ export class InvalidCelexError extends LexAPIError {
 
 /** 400 — URL had no resolvable CELEX (`INVALID_URL`). */
 export class InvalidUrlError extends LexAPIError {
+  static override readonly kind: string = "InvalidUrlError";
   constructor(
     message: string,
     status = 400,
@@ -230,6 +300,7 @@ export class InvalidUrlError extends LexAPIError {
 
 /** 400 — missing or malformed params (`INVALID_PARAMS`). */
 export class InvalidParamsError extends LexAPIError {
+  static override readonly kind: string = "InvalidParamsError";
   constructor(
     message: string,
     status = 400,
@@ -244,6 +315,7 @@ export class InvalidParamsError extends LexAPIError {
 
 /** 401 — missing, invalid, or revoked API key. */
 export class AuthenticationError extends LexAPIError {
+  static override readonly kind: string = "AuthenticationError";
   constructor(
     message: string,
     status = 401,
@@ -262,6 +334,7 @@ export class AuthenticationError extends LexAPIError {
  * `Retry-After` header is authoritative and is what `retryAfter` reads first.
  */
 export class RateLimitedError extends LexAPIError {
+  static override readonly kind: string = "RateLimitedError";
   constructor(
     message: string,
     status = 429,
@@ -280,27 +353,24 @@ export class RateLimitedError extends LexAPIError {
 
   /**
    * `true` for a legacy-plan quota 429 (daily call quota, or the monthly
-   * semantic quota) rather than the per-minute limiter: the body carries a
-   * `usage` block with `resetsAt` and no `Retry-After` is sent. Waiting
-   * seconds cannot help — the SDK does not retry these. See `resetsAt`.
+   * semantic quota) rather than the per-minute limiter (SDK contract §1.2):
+   * the body carries `usage.resetsAt`, with neither a `Retry-After` header
+   * nor a `retryAfter` body field. It cannot succeed before `resetsAt`, so
+   * the SDK does not retry it and `retryAfter` is `undefined`.
    */
   get quotaExhausted(): boolean {
-    if (this.retryAfterFromHeader) return false;
-    return this.resetsAt !== undefined || /quota/i.test(readString(bodyField(this.body, "error")) ?? "");
+    return isQuota429(this.body, this.headers);
   }
 
   /** When a legacy quota resets (`usage.resetsAt` on quota 429s). */
   get resetsAt(): string | undefined {
     return readString(detailsField(bodyField(this.body, "usage"), "resetsAt"));
   }
-
-  private get retryAfterFromHeader(): boolean {
-    return this.headers?.retryAfter !== undefined;
-  }
 }
 
 /** 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade the plan. */
 export class TierForbiddenError extends LexAPIError {
+  static override readonly kind: string = "TierForbiddenError";
   constructor(
     message: string,
     status = 403,
@@ -338,6 +408,7 @@ export interface CreditsExhaustedDetails {
  * upgrade. A cheaper operation may still succeed — compare `weight` to `available`.
  */
 export class CreditsExhaustedError extends LexAPIError {
+  static override readonly kind: string = "CreditsExhaustedError";
   /** When the monthly credit allowance resets (ISO date-time), when the server said so. */
   readonly resetsAt: string | undefined;
   /** Typed view of `error.details` (operation, weight, available, included, topup, used, resetsAt). */
@@ -374,6 +445,7 @@ export class CreditsExhaustedError extends LexAPIError {
 
 /** 502 — EUR-Lex returned an error (`UPSTREAM_ERROR`). Retry-safe on GETs. */
 export class UpstreamError extends LexAPIError {
+  static override readonly kind: string = "UpstreamError";
   constructor(
     message: string,
     status = 502,
@@ -387,11 +459,13 @@ export class UpstreamError extends LexAPIError {
 }
 
 /**
- * `TIMEOUT` — either a server-reported 504 (upstream EUR-Lex fetch timed out,
- * spec-marked retry-safe) or a client-side timeout (`status === 0`) when the
- * configured `timeoutMs` elapsed before a response arrived.
+ * A timeout. Two cases, told apart by `code` / `status`:
+ * - `TIMEOUT` (504, 524): the server or Cloudflare gave up on the upstream.
+ * - `REQUEST_TIMEOUT` (`status === 0`): the SDK's own response timeout —
+ *   no bytes for `timeoutMs` (SDK contract §1.6).
  */
 export class TimeoutError extends LexAPIError {
+  static override readonly kind: string = "TimeoutError";
   constructor(
     message: string,
     status = 0,
@@ -399,7 +473,7 @@ export class TimeoutError extends LexAPIError {
     retryAfter?: number,
     context?: LexAPIErrorContext,
   ) {
-    super("TIMEOUT", message, status, details, retryAfter, context);
+    super(status === 0 ? "REQUEST_TIMEOUT" : "TIMEOUT", message, status, details, retryAfter, context);
     this.name = "TimeoutError";
   }
 }
@@ -409,6 +483,7 @@ export class TimeoutError extends LexAPIError {
  * Derived from the status (no typed code). Retried like 502/504.
  */
 export class ServiceUnavailableError extends LexAPIError {
+  static override readonly kind: string = "ServiceUnavailableError";
   constructor(
     message: string,
     status = 503,
@@ -423,6 +498,7 @@ export class ServiceUnavailableError extends LexAPIError {
 
 /** 500 — unexpected server failure (`INTERNAL`). Not retried by default. */
 export class InternalServerError extends LexAPIError {
+  static override readonly kind: string = "InternalServerError";
   constructor(
     message: string,
     status = 500,
@@ -437,13 +513,71 @@ export class InternalServerError extends LexAPIError {
 
 /** Transport-level failure: DNS, connection reset, etc. No HTTP response was received. */
 export class NetworkError extends LexAPIError {
+  static override readonly kind: string = "NetworkError";
   override readonly cause: unknown;
 
   constructor(message: string, cause?: unknown) {
-    super("NETWORK_ERROR", message, 0);
+    super("CONNECTION_ERROR", message, 0);
     this.name = "NetworkError";
     this.cause = cause;
   }
+}
+
+/** The caller's `AbortSignal` fired (status 0). Never retried. `cause` is the signal's reason. */
+export class RequestAbortedError extends LexAPIError {
+  static override readonly kind: string = "RequestAbortedError";
+  override readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super("ABORTED", message, 0);
+    this.name = "RequestAbortedError";
+    this.cause = cause;
+  }
+}
+
+/**
+ * A 2xx response whose body was not the JSON LexAPI sends (e.g. an HTML page
+ * from a proxy). `body` holds the first 500 characters of the raw text.
+ */
+export class InvalidResponseError extends LexAPIError {
+  static override readonly kind: string = "InvalidResponseError";
+
+  constructor(message: string, status: number, rawText?: string, context?: LexAPIErrorContext) {
+    super("INVALID_RESPONSE", message, status, undefined, undefined, {
+      ...context,
+      body: rawText === undefined ? undefined : rawText.slice(0, 500),
+    });
+    this.name = "InvalidResponseError";
+  }
+}
+
+/**
+ * An export stream ended (cleanly, at EOF) without its trailing `_done` line —
+ * the server stopped mid-export (SDK contract §1.8). Raised after the rows
+ * that did arrive were yielded; they are NOT a complete export.
+ */
+export class IncompleteExportError extends LexAPIError {
+  static override readonly kind: string = "IncompleteExportError";
+  /** Rows yielded before the stream ended. */
+  readonly rowsRead: number;
+
+  constructor(message: string, rowsRead: number) {
+    super("INCOMPLETE_EXPORT", message, 0);
+    this.name = "IncompleteExportError";
+    this.rowsRead = rowsRead;
+  }
+}
+
+/**
+ * `true` for any error thrown by this SDK — from either build (ESM or
+ * CommonJS) or another installed copy. Pass a class to narrow:
+ * `isLexAPIError(err, NotFoundError)`.
+ */
+export function isLexAPIError<T extends LexAPIError = LexAPIError>(
+  value: unknown,
+  errorClass?: abstract new (...args: never[]) => T,
+): value is T {
+  return value instanceof (errorClass ?? LexAPIError);
 }
 
 /**
@@ -471,6 +605,14 @@ function detailsField(details: unknown, key: string): unknown {
     return (details as Record<string, unknown>)[key];
   }
   return undefined;
+}
+
+/** SDK contract §1.2 quota-429 test. */
+function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolean {
+  const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
+  if (typeof resetsAt !== "string") return false;
+  if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;
+  return detailsField(body, "retryAfter") === undefined;
 }
 
 function bodyField(body: unknown, key: string): unknown {

@@ -19,15 +19,20 @@ export interface RateLimitInfo {
   policy?: string;
 }
 
-/** How a `/documentContent/batch` was served — the four counts partition the batch. */
+/**
+ * How a `/documentContent/batch` was served. Counts overlap and do not map
+ * one-to-one onto prices: `liveFetches` is every item that needed a fetch
+ * and was not served by Cellar or an OJ issue (so it includes failed and
+ * text-unavailable items), and `textUnavailable` overlaps the other buckets.
+ */
 export interface BatchSourceCounts {
-  /** Items served from the LexAPI corpus — settle at 1 credit (`X-Batch-Corpus-Hits`). */
+  /** Items served from the LexAPI corpus (`X-Batch-Corpus-Hits`). */
   corpusHits?: number;
-  /** Items answered by the Publications Office Cellar API — 4 credits (`X-Batch-Cellar-Served`). */
+  /** Items answered by the Publications Office Cellar API (`X-Batch-Cellar-Served`). */
   cellarServed?: number;
-  /** Items recovered from an Official Journal issue — 4 credits (`X-Batch-OJ-Recovered`). */
+  /** Items recovered from an Official Journal issue (`X-Batch-OJ-Recovered`). */
   ojRecovered?: number;
-  /** Items fetched live from EUR-Lex by browser — 5 credits (`X-Batch-Live-Fetches`). */
+  /** Items that needed a fetch not served by Cellar/OJ — includes failed and text-unavailable ones (`X-Batch-Live-Fetches`). */
   liveFetches?: number;
   /** Items returned with metadata but no text (`X-Batch-Text-Unavailable`). */
   textUnavailable?: number;
@@ -74,6 +79,18 @@ export interface ResponseHeaders {
   rateLimit?: RateLimitInfo;
   /** Raw `Retry-After` header (delta-seconds or HTTP-date), sent on per-minute 429s. */
   retryAfter?: string;
+  /**
+   * API contract version the server implements (`X-LexAPI-Version`, e.g.
+   * `2.1.0`). Sent on every response the LexAPI application itself produces
+   * (lex-api ≥ API 2.1.0) — its absence on an error means a proxy answered.
+   */
+  apiVersion?: string;
+  /** Deployed build (`X-LexAPI-Release`, e.g. `2.1.0+633eb67`) — quote it in bug reports. */
+  release?: string;
+  /** Rows kept by the `/documents/recent` lenient language filter (`X-Language-Partial-Kept`). */
+  languagePartialKept?: number;
+  /** Age in seconds of a cached answer (`X-Cache-Age`). */
+  cacheAge?: number;
 }
 
 /** Minimal `Headers` surface (works with polyfilled / injected fetch implementations). */
@@ -130,6 +147,10 @@ export function parseResponseHeaders(source: { headers: HeaderGetter } | HeaderG
       textUnavailable: int(h, "x-batch-text-unavailable"),
     }),
     retryAfter: str(h, "retry-after"),
+    apiVersion: str(h, "x-lexapi-version")?.trim() || undefined,
+    release: str(h, "x-lexapi-release"),
+    languagePartialKept: int(h, "x-language-partial-kept"),
+    cacheAge: int(h, "x-cache-age"),
     rateLimit: compact<RateLimitInfo>({
       limit: int(h, "ratelimit-limit"),
       remaining: int(h, "ratelimit-remaining"),

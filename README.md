@@ -10,7 +10,7 @@ Official TypeScript SDK for [LexAPI](https://lex-api.com/?ref=npm-sdk) — Europ
 npm install @lexapi/client
 ```
 
-Node ≥ 18 (native `fetch`); also works on Deno, Bun and edge runtimes. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
+Node ≥ 18 (native `fetch`); the built package is also smoke-tested on Bun and Deno in CI. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
 
 ## Quickstart
 
@@ -31,9 +31,10 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | Credits | Calls |
 | --- | --- |
 | 0 | `getInfo`; webhook management and deliveries |
-| 1 | `resolve`, `getCites`, `getCitedBy`, the version endpoints; per exported row |
+| 1 | `resolve`, `getCites`, `getCitedBy`, the version endpoints |
 | 3 per page | `search` (`maxPages`), `getRecentDocuments` (~10 results per page) — unfetched pages refunded |
-| 5 → 4 → 1 | `getDocument`, `getDocumentsBatch` (per item), `getDocumentByUrl`, `getDocumentMetadata`, `extractCitations` — 5 for a live browser fetch, settled to **4** when the Publications Office Cellar API answered, to **1** from the LexAPI corpus (`result.headers.source`) |
+| 5 → 4 → 1 | `getDocument`, `getDocumentsBatch` (per item), `getDocumentByUrl`, `getDocumentMetadata` — 5 for a live browser fetch, settled to **4** when the Publications Office Cellar API answered, to **1** from the LexAPI corpus (`result.headers.source`); a text-unavailable answer settles at 1 |
+| 5 → 1 | `extractCitations` — refunded to 1 when the document was `alreadyExtracted` |
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
@@ -67,11 +68,11 @@ console.log(headers?.source); // "corpus" (1 credit) | "cellar" | "cellar-oj" (4
 // Batch (POST /documentContent/batch) — per-CELEX errors don't abort the batch
 const batch = await client.getDocumentsBatch({ celexNumbers: ["32016R0679", "62018CJ0311"] });
 if (batch.trimmed) console.warn(`clamped to ${batch.trimmedTo}: ${batch.trimmedReason}`);
-batch.errors.forEach((e) => console.warn(`${e.celexNumber}: ${e.error}`));
-console.log(batch.textUnavailable, batch.headers?.batch); // { corpusHits, cellarServed, ojRecovered, liveFetches }
+batch.errors.forEach((e) => console.warn(`${e.celex}: ${e.error}`)); // { celex, error: <message> }
+console.log(batch.textUnavailable, batch.headers?.batch); // source counts — they overlap; see BatchSourceCounts
 
 // Recent documents, metadata-only reads, URL + identifier resolution
-const recent = await client.getRecentDocuments({ days: 7, documentType: ["regulation", "directive"] });
+const recent = await client.getRecentDocuments({ days: 7, documentType: "regulation" }); // one type; use search() for several
 const meta = await client.getDocumentMetadata({ celexNumber: "32016R0679" });
 const byUrl = await client.getDocumentByUrl({ url: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679" });
 const resolved = await client.resolve("ECLI:EU:C:2020:559"); // → { celex: "62018CJ0311", resolvedVia: "ecli-corpus" }
@@ -194,12 +195,12 @@ Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · S
 ### Receiving deliveries
 
 ```ts
-import { constructWebhookEvent } from "@lexapi/client";
+import { verifyWebhook } from "@lexapi/client";
 
 // Express: keep the RAW body — the signature is over the exact bytes sent.
 app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (req, res) => {
   try {
-    const event = await constructWebhookEvent(req.body, req.get("x-webhook-signature"), process.env.LEXAPI_WEBHOOK_SECRET!);
+    const event = await verifyWebhook(req.body, req.get("x-webhook-signature"), process.env.LEXAPI_WEBHOOK_SECRET!);
     // Verified signature + 5-minute replay window. Dedupe on event.delivery?.id (stable across retries).
     if (event.event === "watchlist.changes") {
       for (const c of event.data.changes) console.log(c.watchedCelex, c.relation, c.document.celex);
@@ -213,11 +214,11 @@ app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (r
 });
 ```
 
-`verifyWebhookSignature(rawBody, signature, secret)` is the signature-only check. Both use Web Crypto (constant-time comparison).
+`verifySignature(rawBody, signature, secret)` is the signature-only check. Both use Web Crypto (constant-time comparison); an empty `secret` throws `WebhookSignatureError("missing_secret")` (a configuration error, not a bad delivery).
 
 ## Corpus export (BUSINESS, SCALE, ENTERPRISE)
 
-`export()` streams NDJSON rows via the fetch body stream — constant memory regardless of result size. 1 credit per row; lower tiers get a 403 `TierForbiddenError`. Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)).
+`export()` streams NDJSON rows via the fetch body stream — constant memory regardless of result size. BUSINESS, SCALE and ENTERPRISE only; lower tiers get a 403 `TierForbiddenError`. For pricing see the [pricing page](https://lex-api.com/pricing?ref=npm-sdk) and the `credits` block on your next response. Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)).
 
 ```ts
 const stream = await client.export({ documentType: ["Regulation"], dateFrom: "2024-01-01", limit: 10_000 });
@@ -229,10 +230,10 @@ for await (const row of stream) {
 }
 
 console.log(stream.done?.written, stream.done?.skippedStubs);
-if (stream.done?.truncated) console.warn("row cap hit — narrow filters or resume via fetchedSince");
+if (stream.truncated) console.warn("row cap hit — narrow filters or resume via fetchedSince");
 ```
 
-The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass. Breaking out of the loop (or `stream.cancel()`) releases the connection. Metadata-only rows are skipped unless `includeStubs: true`.
+The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass (re-iterating a fully read stream yields nothing; iterating one you ended early raises `IncompleteExportError` — call `export()` again to re-read). Breaking out of the loop (or `stream.cancel()`, or the call's `signal`) releases the connection. **A stream that ends without its `_done` trailer throws `IncompleteExportError`** after yielding the rows that did arrive — the server stopped mid-export and they are not the whole set (`stream.complete` stays `false`; `stream.rowsRead` counts them). A dropped connection throws `NetworkError`, a stall longer than `timeoutMs` throws `TimeoutError`. Lines that are not JSON objects are counted in `stream.invalidLines`. For "did the row cap cut this export?" read `stream.truncated` — it resolves the header, `_meta` and `_done` signals in the right order. Metadata-only rows are skipped unless `includeStubs: true`.
 
 ## Point-in-time versions
 
@@ -272,22 +273,40 @@ Also: `searchSource`, `searchCache`, `warning`, `ignoredDocumentTypes`, `postFil
 const client = new LexAPI({
   apiKey: "lex_...",                     // or LEXAPI_API_KEY env var
   baseUrl: "https://lex-api.com/api/v1", // default
-  timeoutMs: 95_000,                     // per attempt (> the API's 90 s upstream budget); per-call: client.getInfo({ timeoutMs: 5_000 })
+  timeoutMs: 95_000,                     // per attempt, incl. the body; per-call: client.getInfo({ timeoutMs: 5_000 })
   retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 30_000, retryReadOnlyPosts: false },
   fetch: myFetch,                        // injectable transport (testing / polyfills)
   userAgentSuffix: "my-app/1.0",         // appended to `lexapi-typescript/<version>`
 });
 ```
 
-## Retries
+## Retries, timeouts and cancellation
 
-Failed requests are retried up to 3 times (configurable via `retry`) with exponential backoff + full jitter:
+The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [PLAN.md §1.2](PLAN.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):
 
-- **GET:** retried on 429, 502, 503, 504, Cloudflare 520–524 and transport-level network errors.
-- **POST / PUT / DELETE:** retried on 429 only. Opt in with `retry: { retryReadOnlyPosts: true }` to also retry the read-only POSTs (search, document reads, batch, by-URL, metadata, resolve, citation extraction, semantic search) on 502/503/504 — the API refunds 5xx in full, so such a retry is not double-billed. Network errors and 520–524 on POST are never retried (the request may already have reached the API and been charged); webhook writes never retry on 5xx.
-- **Never retried:** 500 `INTERNAL`, every other 4xx (402 cannot succeed until the pool resets), and legacy-plan quota 429s (`RateLimitedError.quotaExhausted` — daily / monthly-semantic quota, see `resetsAt`).
-- **Server-directed waits win:** the `Retry-After` header (any status); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` body field (epoch-guarded). `RateLimit-*` is sent on every response, so it never drives the wait for a 5xx.
-- The default per-attempt timeout is 95 s — above the API's 90 s upstream budget, so a slow live fetch ends in the server's typed, refunded 504. Client-side timeouts throw `TimeoutError` (status 0) and are not retried.
+| Failure | GET, billed | GET, free (`getInfo`, webhook reads) | Read-only POST | Mutating call |
+|---|---|---|---|---|
+| 429, not a quota | retry | retry | retry | retry |
+| 429 reporting an exhausted quota (`RateLimitedError.quotaExhausted`) | no | no | no | no |
+| Never reached the server (DNS failure, connection refused/unreachable, connect timeout; Cloudflare 521/522/523) | retry | retry | retry | retry |
+| App-origin 502 / 503 / 504 | retry | retry | only with `retry: { retryReadOnlyPosts: true }` | no |
+| Proxy-origin 502 / 503 / 504, 520, 524 | no | retry | no | no |
+| Any other transport error (reset, connection closed — `fetch` cannot tell before-response from mid-response — read error, `REQUEST_TIMEOUT`) | no | retry | no | no |
+| 400 / 401 / 402 / 403 / 404 / 500 and anything else | no | no | no | no |
+
+- **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
+- **App-origin** = the response carries a non-empty `X-LexAPI-Version` header or a `RateLimit-Limit` header (the API's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone is not enough. Anything else is treated as a proxy answer: the API may have charged the call and not refunded it, so a billed call is not retried.
+- **Wait:** `Retry-After` on any status (an empty or unparseable value counts as absent); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap; numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`.
+
+**Timeout:** `timeoutMs` (default 95 s) is an *inactivity* limit per attempt: the longest the SDK waits for the next bytes — until the response head, then between body chunks (the timer restarts on every chunk), for JSON bodies and export streams alike. It is not a deadline for the whole call. On expiry you get `TimeoutError` with `code: "REQUEST_TIMEOUT"` (status 0). `fetch` cannot time the connect phase separately, so it counts inside the first window. 95 s lets the API's own 90 s limit on one live EUR-Lex fetch reach you as a typed, refunded 504; a request needing several upstream fetches can still exceed it.
+
+**Cancellation:** every method takes `{ signal }`. Aborting cancels the in-flight request, any retry wait and an export stream (the connection is released), and rejects with `RequestAbortedError` (`code: "ABORTED"`, `cause` = the signal's reason).
+
+```ts
+const controller = new AbortController();
+req.on("close", () => controller.abort());
+await client.semanticSearch({ query: "gdpr" }, { signal: controller.signal });
+```
 
 ## Typed errors
 
@@ -319,8 +338,14 @@ try {
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
-| `TimeoutError` | `TIMEOUT` | 504; Cloudflare 524; 0 for a client-side timeout |
-| `NetworkError` | `NETWORK_ERROR` | 0 (no response) |
+| `TimeoutError` | `TIMEOUT` (504, 524) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
+| `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
+| `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |
+| `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx whose body was not JSON (e.g. a proxy HTML page) |
+| `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without its `_done` trailer (`rowsRead`) |
+| `LexAPIError` (base) | `INTERNAL` | any other status (e.g. 409, 413), with `status` kept |
+
+**`instanceof` across builds.** The package ships an ESM and a CommonJS build; in a process that loads both (a CommonJS dependency wrapping the SDK inside an ESM app, Next.js, …) they are two copies of every class. The error classes carry a shared brand (`Symbol.for`), so `err instanceof NotFoundError` is still true for an error thrown by the other copy. `isLexAPIError(err)` / `isLexAPIError(err, NotFoundError)` does the same as a function.
 
 Both the typed envelope (`{success: false, error: {code, message, details}}`) and the legacy bare `{error, message, details?}` shape (still used by 429s, API-key 401s, `/search` and webhook validation, the export tier gate and semantic upstream errors) are parsed; unknown codes stay on the base `LexAPIError` with the raw code string.
 

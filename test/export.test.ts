@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { LexAPI, LexAPIError, TierForbiddenError, type ExportRow } from "../src/index.js";
+import { IncompleteExportError, LexAPI, TierForbiddenError, type ExportRow } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
 function client(fetchMock: typeof fetch) {
@@ -118,27 +118,47 @@ describe("export", () => {
     expect(stream.done?.["streamed"]).toBe(0);
   });
 
-  it("is single-pass: a second iteration throws", async () => {
+  it("is single-pass (§1.8): re-iterating a fully read stream yields nothing and does not raise", async () => {
     const text = [META_LINE, ROW_1, DONE_LINE].join("\n");
     const fetchMock = fetchSequence(ndjsonResponse(text));
 
     const stream = await client(fetchMock).export();
     for await (const _row of stream) void _row;
 
-    await expect(async () => {
-      for await (const _row of stream) void _row;
-    }).rejects.toThrow(/single-pass/);
+    const again: ExportRow[] = [];
+    for await (const row of stream) again.push(row);
+    expect(again).toHaveLength(0);
   });
 
-  it("throws a typed error on malformed NDJSON lines", async () => {
-    const text = [META_LINE, "{not json", DONE_LINE].join("\n");
+  it("§1.8: iterating a stream ended before its _done (break, cancel) raises IncompleteExportError", async () => {
+    const text = [META_LINE, ROW_1, ROW_2, DONE_LINE].join("\n");
+
+    const broken = await client(fetchSequence(ndjsonResponse(text))).export();
+    for await (const _row of broken) break;
+    await expect(async () => {
+      for await (const _row of broken) void _row;
+    }).rejects.toThrow(IncompleteExportError);
+
+    const cancelled = await client(fetchSequence(ndjsonResponse(text))).export();
+    await cancelled.cancel();
+    await expect(async () => {
+      for await (const _row of cancelled) void _row;
+    }).rejects.toThrow(IncompleteExportError);
+    expect(cancelled.complete).toBe(false);
+  });
+
+  it("counts lines that are not JSON objects in invalidLines instead of yielding or dropping them (§1.8)", async () => {
+    const text = [META_LINE, "{not json", "[1,2]", ROW_1, DONE_LINE].join("\n");
     const fetchMock = fetchSequence(ndjsonResponse(text));
 
     const stream = await client(fetchMock).export();
+    const rows: ExportRow[] = [];
+    for await (const row of stream) rows.push(row);
 
-    await expect(async () => {
-      for await (const _row of stream) void _row;
-    }).rejects.toThrow(LexAPIError);
+    expect(rows).toHaveLength(1);
+    expect(stream.invalidLines).toBe(2);
+    expect(stream.complete).toBe(true);
+    expect(stream.rowsRead).toBe(1);
   });
 
   it("maps the tier gate (legacy-shape 403, as the server sends it) to TierForbiddenError", async () => {
@@ -169,7 +189,7 @@ describe("export", () => {
   it("retries the GET on 503 before the stream starts", async () => {
     const text = [META_LINE, DONE_LINE].join("\n");
     const fetchMock = fetchSequence(
-      jsonResponse(503, { success: false, error: { code: "UPSTREAM_ERROR", message: "busy" } }),
+      jsonResponse(503, { success: false, error: { code: "UPSTREAM_ERROR", message: "busy" } }, { "ratelimit-limit": "60" }),
       ndjsonResponse(text),
     );
 

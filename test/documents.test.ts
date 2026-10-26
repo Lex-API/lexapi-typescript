@@ -136,7 +136,7 @@ describe("search", () => {
   });
 
   it("retries search on 502 when retryReadOnlyPosts is opted in (5xx is refunded)", async () => {
-    const upstream = jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "EUR-Lex down" } });
+    const upstream = jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "EUR-Lex down" } }, { "ratelimit-limit": "60" });
     const fetchMock = fetchSequence(upstream, jsonResponse(200, SEARCH_BODY));
     const optedIn = new LexAPI({
       apiKey: "lex_test_key",
@@ -607,7 +607,7 @@ describe("text availability, language labels and source headers (2026-08 → 202
     });
   });
 
-  it("sends multi-value recent filters as repeated query params", async () => {
+  it("sends one recent documentType and multi-value author filters as repeated params", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(
         200,
@@ -621,15 +621,15 @@ describe("text availability, language labels and source headers (2026-08 → 202
     );
 
     const result = await client(fetchMock).getRecentDocuments({
-      documentType: ["regulation", "directive"],
-      author: ["commission"],
+      documentType: "regulation",
+      author: ["commission", "council"],
       subdomain: "LEGISLATION",
       language: "fr",
     });
 
     const url = new URL(lastCall(fetchMock)[0]);
-    expect(url.searchParams.getAll("documentType")).toEqual(["regulation", "directive"]);
-    expect(url.searchParams.getAll("author")).toEqual(["commission"]);
+    expect(url.searchParams.getAll("documentType")).toEqual(["regulation"]);
+    expect(url.searchParams.getAll("author")).toEqual(["commission", "council"]);
     expect(url.searchParams.get("subdomain")).toBe("LEGISLATION");
     expect(result.languageFilter?.partialMetadataKept).toBe(2);
     expect(result.headers?.languageFilter).toBe("FR");

@@ -21,6 +21,10 @@ export {
   TimeoutError,
   InternalServerError,
   NetworkError,
+  RequestAbortedError,
+  InvalidResponseError,
+  IncompleteExportError,
+  isLexAPIError,
   normalizeRetryAfterSeconds,
   type ErrorCode,
   type LexAPIErrorContext,
@@ -35,10 +39,10 @@ export {
 } from "./headers.js";
 export { WebhooksAPI } from "./webhooks.js";
 export {
-  computeWebhookSignature,
-  verifyWebhookSignature,
-  constructWebhookEvent,
-  WebhookVerificationError,
+  computeSignature,
+  verifySignature,
+  verifyWebhook,
+  WebhookSignatureError,
   WEBHOOK_SIGNATURE_HEADER,
   WEBHOOK_DELIVERY_HEADER,
   WEBHOOK_ID_HEADER,
@@ -46,6 +50,7 @@ export {
   type VerifyWebhookOptions,
 } from "./webhookSignature.js";
 export type {
+  ExportStreamOptions,
   ExportParams,
   ExportListFilter,
   ExportRow,

@@ -35,7 +35,7 @@ describe("getCreditUsage", () => {
     });
 
     expect(usage).toEqual({
-      unitsCharged: undefined,
+      unitsCharged: 0,
       creditsRemaining: 97,
       resetsAt: "2026-07-03T00:00:00.000Z",
     });
@@ -43,7 +43,7 @@ describe("getCreditUsage", () => {
 
   it("tolerates both blocks being absent", () => {
     expect(getCreditUsage({})).toEqual({
-      unitsCharged: undefined,
+      unitsCharged: 0,
       creditsRemaining: undefined,
       resetsAt: undefined,
     });

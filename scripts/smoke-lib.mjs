@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 
 export async function runSmoke(lib, label) {
-  const { LexAPI, VERSION, CreditsExhaustedError, verifyWebhookSignature, AS_OF_REASONS } = lib;
+  const { LexAPI, VERSION, CreditsExhaustedError, verifySignature, AS_OF_REASONS } = lib;
   const calls = [];
   const fetchStub = async (url, init) => {
     calls.push({ url, init });
@@ -30,6 +30,7 @@ export async function runSmoke(lib, label) {
 
   const client = new LexAPI({ apiKey: "lex_smoke", fetch: fetchStub, retry: { maxRetries: 0 } });
 
+  assert.ok(!JSON.stringify(client).includes("lex_smoke"), "API key leaked via JSON.stringify");
   const info = await client.getInfo();
   assert.equal(info.service, "LexAPI");
   assert.equal(info.headers.rateLimit.remaining, 59);
@@ -46,10 +47,28 @@ export async function runSmoke(lib, label) {
     return true;
   });
 
+  // Timeout and cancellation work on this runtime.
+  const stalled = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+  const slow = new LexAPI({ apiKey: "lex_smoke", fetch: stalled, timeoutMs: 50, retry: { maxRetries: 0 } });
+  await assert.rejects(() => slow.getInfo(), (err) => err instanceof lib.TimeoutError);
+  const controller = new AbortController();
+  const pending = slow.getInfo({ signal: controller.signal, timeoutMs: 10_000 });
+  controller.abort();
+  await assert.rejects(() => pending, (err) => err instanceof lib.RequestAbortedError);
+
   const body = JSON.stringify({ event: "webhook.test", timestamp: new Date().toISOString() });
   const sig = createHmac("sha256", "secret").update(body).digest("hex");
-  assert.equal(await verifyWebhookSignature(body, sig, "secret"), true);
+  assert.equal(await verifySignature(body, sig, "secret"), true);
   assert.equal(AS_OF_REASONS.length, 19);
 
-  console.log(`smoke:dist ${label} OK on Node ${process.version} (@lexapi/client ${VERSION})`);
+  console.log(`smoke:dist ${label} OK on ${runtime()} (@lexapi/client ${VERSION})`);
+}
+
+function runtime() {
+  if (typeof globalThis.Bun !== "undefined") return `Bun ${globalThis.Bun.version}`;
+  if (typeof globalThis.Deno !== "undefined") return `Deno ${globalThis.Deno.version.deno}`;
+  return `Node ${process.version}`;
 }

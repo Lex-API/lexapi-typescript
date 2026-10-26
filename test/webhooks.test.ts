@@ -98,14 +98,16 @@ describe("webhooks CRUD", () => {
     expect(result.webhook.status).toBe("ACTIVE");
   });
 
-  it("deletes a webhook (a bodiless 204 resolves to undefined) and maps re-delete 404", async () => {
+  it("deletes a webhook (a bodiless 204 resolves to an empty object, §1.3) and maps re-delete 404", async () => {
     const fetchMock = fetchSequence(
       new Response(null, { status: 204 }),
       jsonResponse(404, { success: false, error: { code: "NOT_FOUND", message: "Webhook not found" } }),
     );
     const c = client(fetchMock);
 
-    await expect(c.webhooks.delete("cm5abc123")).resolves.toBeUndefined();
+    const deleted = await c.webhooks.delete("cm5abc123");
+    expect(typeof deleted).toBe("object");
+    expect(deleted?.success).toBeUndefined();
     const [, init] = lastCall(fetchMock);
     expect(init.method).toBe("DELETE");
 

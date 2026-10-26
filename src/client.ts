@@ -55,10 +55,11 @@ export interface LexAPIOptions {
   /** API base URL. Defaults to production (`https://lex-api.com/api/v1`). */
   baseUrl?: string;
   /**
-   * Per-request timeout in milliseconds (per attempt). Default 95_000 —
-   * above the API's 90 s upstream hard timeout, so a slow live fetch ends in
-   * the server's typed (and refunded) 504 instead of a client-side abort,
-   * and below Cloudflare's 100 s proxy timeout.
+   * Per-attempt timeout in milliseconds, covering the response body (for
+   * `export`: an idle timeout per read). Default 95_000 — enough for a
+   * single live EUR-Lex fetch (the API caps each at 90 s, then answers with
+   * a typed, refunded 504), and below Cloudflare's 100 s proxy timeout. A
+   * request that needs several upstream fetches can still exceed it.
    */
   timeoutMs?: number;
   /** Injectable fetch (used for testing / polyfills). Defaults to global fetch. */
@@ -71,8 +72,13 @@ export interface LexAPIOptions {
 
 /** Per-call overrides accepted by every SDK method. */
 export interface CallOptions {
-  /** Override the client-level timeout for this call only. */
+  /** Override the client-level timeout for this call only (per attempt, covering the response body). */
   timeoutMs?: number;
+  /**
+   * Cancel the call: aborts the in-flight request, any retry wait and (for
+   * `export`) the stream. Rejects with `RequestAbortedError`; never retried.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -119,6 +125,16 @@ export class LexAPI {
     this.webhooks = new WebhooksAPI(this.http);
   }
 
+  /** Redacted view for `JSON.stringify` — never includes the API key. */
+  toJSON(): Record<string, unknown> {
+    return { client: "LexAPI", http: this.http.toJSON() };
+  }
+
+  /** Redacted view for `util.inspect` / `console.log` — never includes the API key. */
+  [Symbol.for("nodejs.util.inspect.custom")](): string {
+    return `LexAPI { baseUrl: '${this.http.baseUrl}', apiKey: '[redacted]' }`;
+  }
+
   /** Perform a JSON request and attach the parsed response headers (+ legacy header fields). */
   private async call<T extends object>(
     options: RequestOptions,
@@ -136,7 +152,9 @@ export class LexAPI {
     return this.call<InfoResponse>({
       method: "GET",
       path: "/info",
+      free: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -164,6 +182,7 @@ export class LexAPI {
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -191,6 +210,7 @@ export class LexAPI {
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -198,7 +218,7 @@ export class LexAPI {
    * `POST /documentContent/batch` — fetch multiple documents in one request.
    *
    * **Cost: 5 credits per processed item, settled by source** (corpus 1,
-   * Cellar / OJ 4, browser 5 — `headers.batch` has the exact split). The
+   * Cellar / OJ 4, browser 5; `headers.batch` has the source counts). The
    * batch is clamped to the tier ceiling (FREE=1, STARTER=5,
    * PROFESSIONAL=20, BUSINESS+=50); trimmed items are not charged. Clamping
    * is surfaced: `trimmed` / `trimmedTo` / `trimmedReason` and `xWarning`.
@@ -215,6 +235,7 @@ export class LexAPI {
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -224,8 +245,10 @@ export class LexAPI {
    *
    * **Cost: 3 credits per result page** (~10 results each, tier-capped);
    * unfiltered requests are answered from Cellar in one query
-   * (`headers.source === "cellar"`) and settle at a single page. Array
-   * filters are sent as repeated query parameters. `languageFilter`
+   * (`headers.source === "cellar"`) and settle at a single page. `author`
+   * / `subdomain` arrays are sent as repeated query parameters;
+   * `documentType` takes ONE type — the endpoint has no multi-type fan-out
+   * (use `search` for that). `languageFilter`
    * reports rows dropped by the language post-filter.
    */
   async getRecentDocuments(
@@ -245,6 +268,7 @@ export class LexAPI {
         limit: params.limit,
       },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -263,6 +287,7 @@ export class LexAPI {
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -281,6 +306,7 @@ export class LexAPI {
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -297,6 +323,7 @@ export class LexAPI {
       body: { identifier },
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -320,6 +347,7 @@ export class LexAPI {
       path: `/documents/${encodeURIComponent(celex)}/versions`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -339,6 +367,7 @@ export class LexAPI {
       path: `/documents/${encodeURIComponent(celex)}/versions/${version}`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     }, { corpusVersion: true });
   }
 
@@ -359,6 +388,7 @@ export class LexAPI {
       path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     }, { corpusVersion: true });
   }
 
@@ -378,8 +408,8 @@ export class LexAPI {
       method: "POST",
       path: "/citations/extract",
       body: { celexNumber },
-      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -398,6 +428,7 @@ export class LexAPI {
       path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
       query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -417,12 +448,16 @@ export class LexAPI {
       path: `/citations/cited-by/${encodeURIComponent(celexNumber)}`,
       query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
-   * Walk every page of `getCites` (offset in edges). Each page costs
-   * 1 credit. A target's edges can straddle a page boundary, so the same
+   * Walk every page of `getCites` (offset in edge rows) until a short or
+   * empty page (SDK contract §1.4). Each page is a billed call (1 credit).
+   * Edges are ordered by extraction time only, so edges extracted at the
+   * same instant or during the walk can shift: an edge may repeat or be
+   * missed. A target's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages — merge by
    * `celexNumber` if you need one group per document.
    */
@@ -433,14 +468,15 @@ export class LexAPI {
   ): AsyncGenerator<CitesResponse, void> {
     yield* paginateEdges(
       (p) => this.getCites(celexNumber, p, options),
-      (page) => page.cites.length,
+      (page) => page.cites.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
       params,
     );
   }
 
   /**
-   * Walk every page of `getCitedBy` (offset in edges). Each page costs
-   * 1 credit. A source's edges can straddle a page boundary, so the same
+   * Walk every page of `getCitedBy` (offset in edge rows) until a short or
+   * empty page (SDK contract §1.4). Each page is a billed call (1 credit);
+   * edges may repeat or be missed if extractions happen during the walk. A source's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages.
    */
   async *paginateCitedBy(
@@ -450,7 +486,7 @@ export class LexAPI {
   ): AsyncGenerator<CitedByResponse, void> {
     yield* paginateEdges(
       (p) => this.getCitedBy(celexNumber, p, options),
-      (page) => page.citedBy.length,
+      (page) => page.citedBy.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
       params,
     );
   }
@@ -478,6 +514,7 @@ export class LexAPI {
         language: params.language,
       },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -498,6 +535,7 @@ export class LexAPI {
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
       query: { maxDepth: params.maxDepth, language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -517,6 +555,7 @@ export class LexAPI {
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
       query: { limit: params.limit, language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -526,6 +565,7 @@ export class LexAPI {
       method: "GET",
       path: "/citations/stats",
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -560,6 +600,7 @@ export class LexAPI {
       body: semanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -595,6 +636,7 @@ export class LexAPI {
       body: semanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -602,20 +644,22 @@ export class LexAPI {
 
   /**
    * `GET /export` — stream matching corpus rows as NDJSON (BUSINESS, SCALE
-   * and ENTERPRISE; lower tiers get 403 `TierForbiddenError`). 1 credit per
-   * row returned. Metadata-only rows are skipped unless `includeStubs: true`.
+   * and ENTERPRISE; lower tiers get 403 `TierForbiddenError`). For what an
+   * export costs see https://lex-api.com/pricing and the `credits` /
+   * `usage` figures on your next response. Metadata-only rows are skipped
+   * unless `includeStubs: true`.
    *
    * Returns a single-pass async iterator over document rows. The leading
    * `_meta` envelope is parsed before this resolves (`stream.meta`); the
    * trailing `_done` line is exposed as `stream.done` after iteration —
-   * check `done.truncated` / `headers.truncated` to detect the server row
+   * check `stream.truncated` (header → `_meta` → `_done`) to detect the server row
    * cap instead of assuming the export was complete.
    *
    * ```ts
    * const stream = await client.export({ documentType: "Regulation", limit: 1000 });
    * console.log(stream.meta?.totalMatching, stream.headers.total);
    * for await (const row of stream) process(row.celex, row.parsedContent);
-   * if (stream.done?.truncated) console.warn("row cap hit — resume with fetchedSince");
+   * if (stream.truncated) console.warn("row cap hit — resume with fetchedSince");
    * ```
    */
   async export(params: ExportParams = {}, options?: CallOptions): Promise<ExportStream> {
@@ -637,8 +681,12 @@ export class LexAPI {
         limit: params.limit,
       },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
-    return createExportStream(response);
+    return createExportStream(response, {
+      idleTimeoutMs: options?.timeoutMs ?? this.http.timeoutMs,
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
   }
 }
 
@@ -672,9 +720,9 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
   return typeof value === "string" ? value : value.join(",");
 }
 
-async function* paginateEdges<T extends { totalCitations?: number; limit?: number }>(
+async function* paginateEdges<T extends { limit?: number }>(
   fetchPage: (params: CitationEdgeParams) => Promise<T>,
-  groupsIn: (page: T) => number,
+  rawRowsIn: (page: T) => number,
   params: CitationEdgeParams,
 ): AsyncGenerator<T, void> {
   const limit = params.limit ?? 100;
@@ -682,10 +730,14 @@ async function* paginateEdges<T extends { totalCitations?: number; limit?: numbe
   for (;;) {
     const page = await fetchPage({ ...params, limit, offset });
     yield page;
-    // Offsets count edges; advance by the page size the server applied.
-    offset += page.limit && page.limit > 0 ? page.limit : limit;
-    if (groupsIn(page) === 0) return;
-    if (page.totalCitations !== undefined && offset >= page.totalCitations) return;
+    // SDK contract §1.4: offsets count edge rows; advance by the sum of the
+    // page's citationCounts and stop at the first page shorter than the page
+    // size. (`totalCitations` counts distinct document pairs — raw rows can
+    // outnumber it — so it never ends the walk.)
+    const pageLimit = page.limit && page.limit > 0 ? page.limit : limit;
+    const rows = rawRowsIn(page);
+    offset += rows;
+    if (rows === 0 || rows < pageLimit) return;
   }
 }
 

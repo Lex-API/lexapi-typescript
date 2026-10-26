@@ -21,7 +21,8 @@ import type {
  * and deliveries cost no credits.
  *
  * Write calls (create / update / delete / test) are never retried on 5xx or
- * network errors — only on 429.
+ * on network errors after the connection was made — only on 429 and on
+ * connect-phase failures (nothing reached the API).
  */
 export class WebhooksAPI {
   private readonly http: HttpClient;
@@ -44,17 +45,20 @@ export class WebhooksAPI {
     return this.call<WebhookListResponse>({
       method: "GET",
       path: "/webhooks",
+      free: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /webhooks` — needs `searchCriteria`, `watchCelex`, or both. If
    * `secret` is omitted the server generates one and returns it in this
-   * response ONLY — store it. Rejected with 400 (`InvalidParamsError`, with
-   * a `details` list) for unsupported criteria, a watch list above the plan
-   * limit, or when the tier webhook ceiling is reached (FREE=0, STARTER=2,
-   * PROFESSIONAL=10, BUSINESS=50, SCALE=100, ENTERPRISE=100).
+   * response ONLY — store it. Rejected with 400 (`InvalidParamsError`):
+   * unsupported criteria or a watch list above the plan limit carry a
+   * `details` list; the tier webhook ceiling (FREE=0, STARTER=2,
+   * PROFESSIONAL=10, BUSINESS=50, SCALE=100, ENTERPRISE=100) has no
+   * `details` — read `current` / `limit` from `error.body`.
    */
   async create(request: WebhookCreateRequest, options?: CallOptions): Promise<WebhookCreateResponse> {
     return this.call<WebhookCreateResponse>({
@@ -62,6 +66,7 @@ export class WebhooksAPI {
       path: "/webhooks",
       body: request,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -70,7 +75,9 @@ export class WebhooksAPI {
     return this.call<WebhookResponse>({
       method: "GET",
       path: `/webhooks/${encodeURIComponent(id)}`,
+      free: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -78,8 +85,9 @@ export class WebhooksAPI {
    * `PUT /webhooks/{id}` — partial update; only supplied fields change.
    * `watchCelex` replaces the whole list; `searchCriteria: null` removes the
    * criteria (one of the two must remain). Setting `status: "ACTIVE"`
-   * resets `consecutiveFailures` and re-queues deliveries from the last 7
-   * days that ran out of retries (count in `requeuedDeliveries`).
+   * resets `consecutiveFailures`; moving a `FAILED` or `PAUSED` webhook to
+   * `ACTIVE` also re-queues its deliveries from the last 7 days that ran out
+   * of retries (count in `requeuedDeliveries`, 0 otherwise).
    */
   async update(
     id: string,
@@ -91,19 +99,22 @@ export class WebhooksAPI {
       path: `/webhooks/${encodeURIComponent(id)}`,
       body: request,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `DELETE /webhooks/{id}` — permanently deletes the webhook and its
    * delivery history. Resolves with the server's `{ success, message }`
-   * (or `undefined` on a bodiless 204); a repeat delete throws `NotFoundError`.
+   * (an empty object plus `headers` on a bodiless 204); a repeat delete
+   * throws `NotFoundError`.
    */
   async delete(id: string, options?: CallOptions): Promise<WebhookDeleteResponse | undefined> {
     return this.call<WebhookDeleteResponse>({
       method: "DELETE",
       path: `/webhooks/${encodeURIComponent(id)}`,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -118,6 +129,7 @@ export class WebhooksAPI {
       method: "POST",
       path: `/webhooks/${encodeURIComponent(id)}/test`,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -130,15 +142,19 @@ export class WebhooksAPI {
     return this.call<WebhookDeliveriesResponse>({
       method: "GET",
       path: `/webhooks/${encodeURIComponent(id)}/deliveries`,
+      free: true,
       query: { limit: params.limit, offset: params.offset },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * Walk the whole delivery history page by page (`limit` per page, default
-   * 50), starting at `offset`. Stops when `total` is reached or a page
-   * comes back empty.
+   * 50), starting at `offset`, newest first (SDK contract §1.4). Each
+   * delivery is yielded at most once (deduplicated on `id`): a delivery
+   * created during the walk shifts later pages by one. Stops on an empty page
+   * or when the offset reaches `total`. Pages are free (0 credits).
    *
    * ```ts
    * for await (const page of client.webhooks.paginateDeliveries(id)) {
@@ -153,10 +169,17 @@ export class WebhooksAPI {
   ): AsyncGenerator<WebhookDeliveriesResponse, void> {
     const limit = params.limit ?? 50;
     let offset = params.offset ?? 0;
+    const seen = new Set<string>();
     for (;;) {
       const page = await this.deliveries(id, { limit, offset }, options);
-      yield page;
       const count = page.deliveries.length;
+      const fresh = page.deliveries.filter((d) => {
+        if (typeof d.id !== "string") return true;
+        if (seen.has(d.id)) return false;
+        seen.add(d.id);
+        return true;
+      });
+      yield { ...page, deliveries: fresh };
       offset += count;
       if (count === 0 || (page.total !== undefined && offset >= page.total)) return;
     }

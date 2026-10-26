@@ -11,8 +11,8 @@ import type { WebhookPayload } from "./types.js";
  * The signature covers only the body and there is no nonce, so also enforce
  * a freshness window on the signed `timestamp` and dedupe on `delivery.id`.
  *
- * Uses the Web Crypto API (`crypto.subtle`), available in Node ≥ 18, Deno,
- * Bun, and edge runtimes — no dependency.
+ * Uses the Web Crypto API (`crypto.subtle`), available in Node ≥ 18, Deno
+ * and Bun — no dependency.
  */
 
 /** Header names LexAPI sends on deliveries (lower-case, as most frameworks expose them). */
@@ -32,14 +32,41 @@ export interface VerifyWebhookOptions {
   now?: number;
 }
 
-/** Thrown by {@link constructWebhookEvent} when a delivery fails verification. */
-export class WebhookVerificationError extends Error {
-  readonly reason: "missing_signature" | "invalid_signature" | "malformed_body" | "stale_timestamp";
+const VERIFICATION_BRAND = Symbol.for("@lexapi/client.webhookSignatureError");
 
-  constructor(reason: WebhookVerificationError["reason"], message: string) {
+/**
+ * Thrown by {@link verifyWebhook} when a delivery fails verification,
+ * and by every helper when the `secret` is empty (`missing_secret`).
+ * `instanceof` works across the ESM and CommonJS builds (shared brand).
+ */
+export class WebhookSignatureError extends Error {
+  readonly reason:
+    | "missing_secret"
+    | "missing_signature"
+    | "invalid_signature"
+    | "malformed_body"
+    | "stale_timestamp";
+
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    if (typeof value !== "object" || value === null) return false;
+    if (Function.prototype[Symbol.hasInstance].call(this, value)) return true;
+    return this === WebhookSignatureError && (value as Record<symbol, unknown>)[VERIFICATION_BRAND] === true;
+  }
+
+  constructor(reason: WebhookSignatureError["reason"], message: string) {
     super(message);
-    this.name = "WebhookVerificationError";
+    this.name = "WebhookSignatureError";
     this.reason = reason;
+    Object.defineProperty(this, VERIFICATION_BRAND, { value: true, enumerable: false });
+  }
+}
+
+function assertSecret(secret: string): void {
+  if (typeof secret !== "string" || secret.length === 0) {
+    throw new WebhookSignatureError(
+      "missing_secret",
+      "Webhook secret is empty — pass the secret returned when the webhook was created",
+    );
   }
 }
 
@@ -88,7 +115,8 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /** Compute the expected `X-Webhook-Signature` (hex HMAC-SHA256) for a raw body. */
-export async function computeWebhookSignature(rawBody: WebhookBody, secret: string): Promise<string> {
+export async function computeSignature(rawBody: WebhookBody, secret: string): Promise<string> {
+  assertSecret(secret);
   const subtle = await getSubtle();
   const key = await subtle.importKey(
     "raw",
@@ -103,28 +131,32 @@ export async function computeWebhookSignature(rawBody: WebhookBody, secret: stri
 /**
  * `true` when `signature` (the `X-Webhook-Signature` header) is the
  * HMAC-SHA256 of `rawBody` under `secret`. Constant-time comparison.
- * Signature only — use {@link constructWebhookEvent} to also check freshness.
+ * Signature only — use {@link verifyWebhook} to also check freshness.
+ * Throws `WebhookSignatureError("missing_secret")` for an empty secret
+ * (a configuration error, not a bad delivery).
  */
-export async function verifyWebhookSignature(
+export async function verifySignature(
   rawBody: WebhookBody,
   signature: string | null | undefined,
   secret: string,
 ): Promise<boolean> {
-  if (!signature) return false;
-  const expected = await computeWebhookSignature(rawBody, secret);
-  return timingSafeEqual(expected, signature.trim().toLowerCase());
+  // §1.9: a missing, empty, non-ASCII or non-hex header is a plain failure.
+  const candidate = typeof signature === "string" ? signature.trim().toLowerCase() : "";
+  const expected = await computeSignature(rawBody, secret); // validates the secret first
+  if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
+  return timingSafeEqual(expected, candidate);
 }
 
 /**
  * Verify a delivery and parse it into a typed {@link WebhookPayload}
- * (switch on `event`). Throws {@link WebhookVerificationError} on a missing
+ * (switch on `event`). Throws {@link WebhookSignatureError} on a missing
  * or invalid signature, a non-JSON body, or a `timestamp` outside
  * `toleranceMs` (default 5 minutes).
  *
  * ```ts
  * app.post("/lexapi-webhook", express.raw({ type: "application/json" }), async (req, res) => {
  *   try {
- *     const event = await constructWebhookEvent(req.body, req.get("x-webhook-signature"), secret);
+ *     const event = await verifyWebhook(req.body, req.get("x-webhook-signature"), secret);
  *     if (event.event === "watchlist.changes") handle(event.data.changes);
  *     res.sendStatus(200);
  *   } catch {
@@ -133,31 +165,32 @@ export async function verifyWebhookSignature(
  * });
  * ```
  */
-export async function constructWebhookEvent(
+export async function verifyWebhook(
   rawBody: WebhookBody,
   signature: string | null | undefined,
   secret: string,
   options: VerifyWebhookOptions = {},
 ): Promise<WebhookPayload> {
+  assertSecret(secret);
   if (!signature) {
-    throw new WebhookVerificationError("missing_signature", "Missing X-Webhook-Signature header");
+    throw new WebhookSignatureError("missing_signature", "Missing X-Webhook-Signature header");
   }
-  if (!(await verifyWebhookSignature(rawBody, signature, secret))) {
-    throw new WebhookVerificationError("invalid_signature", "X-Webhook-Signature does not match the body");
+  if (!(await verifySignature(rawBody, signature, secret))) {
+    throw new WebhookSignatureError("invalid_signature", "X-Webhook-Signature does not match the body");
   }
   let payload: WebhookPayload;
   try {
     const text = typeof rawBody === "string" ? rawBody : new TextDecoder().decode(toBytes(rawBody));
     payload = JSON.parse(text) as WebhookPayload;
   } catch {
-    throw new WebhookVerificationError("malformed_body", "Webhook body is not valid JSON");
+    throw new WebhookSignatureError("malformed_body", "Webhook body is not valid JSON");
   }
   const toleranceMs = options.toleranceMs ?? 300_000;
   if (toleranceMs > 0) {
     const sentAt = Date.parse(String((payload as { timestamp?: unknown }).timestamp));
     const now = options.now ?? Date.now();
     if (Number.isNaN(sentAt) || Math.abs(now - sentAt) > toleranceMs) {
-      throw new WebhookVerificationError(
+      throw new WebhookSignatureError(
         "stale_timestamp",
         `Webhook timestamp is outside the ${toleranceMs} ms tolerance window`,
       );

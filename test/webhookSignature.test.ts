@@ -2,10 +2,10 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
-  WebhookVerificationError,
-  computeWebhookSignature,
-  constructWebhookEvent,
-  verifyWebhookSignature,
+  WebhookSignatureError,
+  computeSignature,
+  verifyWebhook,
+  verifySignature,
   type WebhookPayload,
 } from "../src/index.js";
 
@@ -34,27 +34,27 @@ const SIGNATURE = createHmac("sha256", SECRET).update(RAW).digest("hex");
 
 describe("webhook signature verification", () => {
   it("computes the same hex HMAC-SHA256 as the server (node:crypto reference)", async () => {
-    expect(await computeWebhookSignature(RAW, SECRET)).toBe(SIGNATURE);
+    expect(await computeSignature(RAW, SECRET)).toBe(SIGNATURE);
   });
 
   it("verifies string, Uint8Array and ArrayBuffer bodies", async () => {
     const bytes = new TextEncoder().encode(RAW);
-    expect(await verifyWebhookSignature(RAW, SIGNATURE, SECRET)).toBe(true);
-    expect(await verifyWebhookSignature(bytes, SIGNATURE, SECRET)).toBe(true);
-    expect(await verifyWebhookSignature(bytes.buffer.slice(0), SIGNATURE, SECRET)).toBe(true);
-    expect(await verifyWebhookSignature(Buffer.from(RAW), SIGNATURE.toUpperCase(), SECRET)).toBe(true);
+    expect(await verifySignature(RAW, SIGNATURE, SECRET)).toBe(true);
+    expect(await verifySignature(bytes, SIGNATURE, SECRET)).toBe(true);
+    expect(await verifySignature(bytes.buffer.slice(0), SIGNATURE, SECRET)).toBe(true);
+    expect(await verifySignature(Buffer.from(RAW), SIGNATURE.toUpperCase(), SECRET)).toBe(true);
   });
 
   it("rejects tampered bodies, wrong secrets and missing signatures", async () => {
-    expect(await verifyWebhookSignature(RAW.replace("32008R1272", "32006R1907"), SIGNATURE, SECRET)).toBe(false);
-    expect(await verifyWebhookSignature(RAW, SIGNATURE, "other-secret")).toBe(false);
-    expect(await verifyWebhookSignature(RAW, undefined, SECRET)).toBe(false);
+    expect(await verifySignature(RAW.replace("32008R1272", "32006R1907"), SIGNATURE, SECRET)).toBe(false);
+    expect(await verifySignature(RAW, SIGNATURE, "other-secret")).toBe(false);
+    expect(await verifySignature(RAW, undefined, SECRET)).toBe(false);
     // a re-serialised (pretty-printed) body no longer matches the signed bytes
-    expect(await verifyWebhookSignature(JSON.stringify(PAYLOAD, null, 2), SIGNATURE, SECRET)).toBe(false);
+    expect(await verifySignature(JSON.stringify(PAYLOAD, null, 2), SIGNATURE, SECRET)).toBe(false);
   });
 
-  it("constructWebhookEvent returns a typed, discriminated payload", async () => {
-    const event: WebhookPayload = await constructWebhookEvent(RAW, SIGNATURE, SECRET, { now: NOW + 1_000 });
+  it("verifyWebhook returns a typed, discriminated payload", async () => {
+    const event: WebhookPayload = await verifyWebhook(RAW, SIGNATURE, SECRET, { now: NOW + 1_000 });
     expect(event.event).toBe("watchlist.changes");
     if (event.event === "watchlist.changes") {
       expect(event.data.changes[0]?.relation).toBe("consolidated_version");
@@ -62,23 +62,23 @@ describe("webhook signature verification", () => {
     }
   });
 
-  it("constructWebhookEvent enforces the replay window", async () => {
-    const error = await constructWebhookEvent(RAW, SIGNATURE, SECRET, { now: NOW + 10 * 60_000 }).catch(
+  it("verifyWebhook enforces the replay window", async () => {
+    const error = await verifyWebhook(RAW, SIGNATURE, SECRET, { now: NOW + 10 * 60_000 }).catch(
       (e: unknown) => e,
     );
-    expect(error).toBeInstanceOf(WebhookVerificationError);
-    expect((error as WebhookVerificationError).reason).toBe("stale_timestamp");
+    expect(error).toBeInstanceOf(WebhookSignatureError);
+    expect((error as WebhookSignatureError).reason).toBe("stale_timestamp");
 
     // toleranceMs: 0 disables the window
-    await expect(constructWebhookEvent(RAW, SIGNATURE, SECRET, { toleranceMs: 0 })).resolves.toBeTruthy();
+    await expect(verifyWebhook(RAW, SIGNATURE, SECRET, { toleranceMs: 0 })).resolves.toBeTruthy();
   });
 
-  it("constructWebhookEvent names the failure", async () => {
+  it("verifyWebhook names the failure", async () => {
     const reasons = await Promise.all([
-      constructWebhookEvent(RAW, null, SECRET).catch((e: WebhookVerificationError) => e.reason),
-      constructWebhookEvent(RAW, "deadbeef", SECRET).catch((e: WebhookVerificationError) => e.reason),
-      constructWebhookEvent("not json", createHmac("sha256", SECRET).update("not json").digest("hex"), SECRET).catch(
-        (e: WebhookVerificationError) => e.reason,
+      verifyWebhook(RAW, null, SECRET).catch((e: WebhookSignatureError) => e.reason),
+      verifyWebhook(RAW, "deadbeef", SECRET).catch((e: WebhookSignatureError) => e.reason),
+      verifyWebhook("not json", createHmac("sha256", SECRET).update("not json").digest("hex"), SECRET).catch(
+        (e: WebhookSignatureError) => e.reason,
       ),
     ]);
     expect(reasons).toEqual(["missing_signature", "invalid_signature", "malformed_body"]);

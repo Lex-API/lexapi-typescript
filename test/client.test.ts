@@ -93,7 +93,7 @@ describe("LexAPI request construction", () => {
     expect(() => new LexAPI({})).toThrow(/apiKey/);
   });
 
-  it("throws a TimeoutError when the request exceeds timeoutMs (and does not retry)", async () => {
+  it("throws a TimeoutError (REQUEST_TIMEOUT) on a billed call and does not retry it", async () => {
     const fetchMock = vi.fn(
       (_url: unknown, init?: RequestInit) =>
         new Promise<Response>((_, reject) => {
@@ -104,10 +104,10 @@ describe("LexAPI request construction", () => {
     );
     const client = new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, timeoutMs: 10 });
 
-    const error = await client.getInfo().catch((e: unknown) => e);
+    const error = await client.getCitationStats().catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(TimeoutError);
-    expect((error as TimeoutError).code).toBe("TIMEOUT");
+    expect((error as TimeoutError).code).toBe("REQUEST_TIMEOUT");
     expect((error as TimeoutError).status).toBe(0);
     expect(fetchMock).toHaveBeenCalledOnce();
   });

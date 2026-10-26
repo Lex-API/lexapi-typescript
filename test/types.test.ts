@@ -35,3 +35,11 @@ describe("public types", () => {
     expectTypeOf<WebhookPayload["event"]>().toEqualTypeOf<"documents.new" | "watchlist.changes" | "webhook.test">();
   });
 });
+
+describe("review S7", () => {
+  it("getRecentDocuments takes a single documentType (the endpoint has no multi-type fan-out)", () => {
+    expectTypeOf<import("../src/index.js").RecentDocumentsParams["documentType"]>().toEqualTypeOf<
+      import("../src/index.js").DocumentType | undefined
+    >();
+  });
+});

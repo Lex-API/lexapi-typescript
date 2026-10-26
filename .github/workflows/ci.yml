@@ -51,3 +51,35 @@ jobs:
           node-version: 18
       - name: Smoke-test the built bundles on Node 18
         run: node scripts/smoke-dist.mjs && node scripts/smoke-dist.cjs
+
+  runtime-bun:
+    # README claims Bun support — exercise the built bundles there.
+    needs: lint-test-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Smoke-test the built bundles on Bun
+        run: bun scripts/smoke-dist.mjs && bun scripts/smoke-dist.cjs
+
+  runtime-deno:
+    # README claims Deno support — exercise the built ESM bundle there.
+    needs: lint-test-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Smoke-test the built ESM bundle on Deno
+        run: deno run --allow-read --allow-env scripts/smoke-dist.mjs

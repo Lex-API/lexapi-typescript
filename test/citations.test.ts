@@ -232,7 +232,7 @@ describe("getCitationPath / getRelatedDocuments / getCitationStats", () => {
 describe("citation GET retry semantics", () => {
   it("retries GET /citations/stats on 502", async () => {
     const fetchMock = fetchSequence(
-      jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "flaky" } }),
+      jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "flaky" } }, { "ratelimit-limit": "60" }),
       jsonResponse(200, { success: true, stats: { totalCitations: 0, uniqueSourceDocuments: 0, uniqueTargetDocuments: 0, mostCited: [], mostCiting: [] } }),
     );
 
@@ -337,17 +337,17 @@ describe("citations — 2026-10 additions", () => {
     expect(relatedUrl.searchParams.get("language")).toBe("it");
   });
 
-  it("paginates cited-by in edge offsets until totalCitations is reached", async () => {
-    const page = (celex: string, offset: number) =>
+  it("paginates cited-by in raw-row offsets until a short page", async () => {
+    const page = (celex: string, offset: number, rows: number) =>
       jsonResponse(200, {
         success: true,
         targetDocument: "32016R0679",
         totalCitations: 5,
         limit: 2,
         offset,
-        citedBy: [{ celexNumber: celex, citationCount: 2, citations: [] }],
+        citedBy: [{ celexNumber: celex, citationCount: rows, citations: [] }],
       });
-    const fetchMock = fetchSequence(page("A", 0), page("B", 2), page("C", 4));
+    const fetchMock = fetchSequence(page("A", 0, 2), page("B", 2, 2), page("C", 4, 1));
 
     const seen: string[] = [];
     for await (const p of client(fetchMock).paginateCitedBy("32016R0679", { limit: 2 })) {
@@ -359,9 +359,30 @@ describe("citations — 2026-10 additions", () => {
     expect(offsets).toEqual(["0", "2", "4"]);
   });
 
+  it("keeps paginating past totalCitations when raw rows outnumber distinct pairs (review S8)", async () => {
+    // 150 raw rows forming 90 distinct pairs: totalCitations (90) < limit (100),
+    // but the first page is full (100 raw rows), so a second page exists.
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true, targetDocument: "X", totalCitations: 90, limit: 100, offset: 0,
+        citedBy: [{ celexNumber: "A", citationCount: 60 }, { celexNumber: "B", citationCount: 40 }],
+      }),
+      jsonResponse(200, {
+        success: true, targetDocument: "X", totalCitations: 90, limit: 100, offset: 100,
+        citedBy: [{ celexNumber: "B", citationCount: 50 }],
+      }),
+    );
+
+    const pages: number[] = [];
+    for await (const p of client(fetchMock).paginateCitedBy("X")) pages.push(p.citedBy.length);
+
+    expect(pages).toEqual([2, 1]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("stops paginating cites on an empty page", async () => {
     const fetchMock = fetchSequence(
-      jsonResponse(200, { success: true, sourceDocument: "X", limit: 100, offset: 0, cites: [{ celexNumber: "Y" }] }),
+      jsonResponse(200, { success: true, sourceDocument: "X", limit: 100, offset: 0, cites: [{ celexNumber: "Y", citationCount: 100 }] }),
       jsonResponse(200, { success: true, sourceDocument: "X", limit: 100, offset: 100, cites: [] }),
     );
 

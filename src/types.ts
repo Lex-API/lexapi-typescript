@@ -130,6 +130,8 @@ export interface UsageInfo {
   unit?: "credits" | "calls";
   /** When the counter resets (ISO date-time). */
   resetsAt?: string | null;
+  /** Legacy daily-call plans only: calls this request counted (always 1). */
+  unitsCharged?: number;
 }
 
 /**
@@ -241,14 +243,17 @@ export interface Article {
  */
 export interface Section {
   type: "chapter" | "section";
-  number: string;
-  title: string;
+  /** `null` for an unnumbered section heading. */
+  number: string | null;
+  /** `null` when the heading has no title text. */
+  title: string | null;
   articleRange?: [string, string] | null;
 }
 
 /** Preamble recital — also the element type of `paragraphs[]` (numbered prose). */
 export interface Recital {
-  number: number;
+  /** `null` when the recital's number could not be read from the markup. */
+  number: number | null;
   text: string;
 }
 
@@ -400,6 +405,8 @@ export interface Document extends DocumentMetadata {
   textAvailability?: TextAvailability;
   urls?: DocumentUrls;
   fetchedAt?: string;
+  /** Monotonic corpus version of this CELEX (corpus-served documents). */
+  version?: number;
 }
 
 /**
@@ -436,8 +443,8 @@ export interface SearchResult {
   title?: string;
   /** Legacy field. Same value as `celex`. May be `""` for rare listings without a parseable CELEX. */
   celexNumber?: string;
-  /** Canonical CELEX alias. */
-  celex?: string;
+  /** Canonical CELEX alias. `null` for rare listings without a parseable CELEX. */
+  celex?: string | null;
   /** Legacy field. Same value as `documentType`. */
   form?: string | null;
   documentType?: string | null;
@@ -445,6 +452,11 @@ export interface SearchResult {
   date?: string;
   dateOfDocument?: string | null;
   dateOfDocumentISO?: string | null;
+  /** Qualifier EUR-Lex appends to the date (e.g. `"Date of signature"`). */
+  dateType?: string | null;
+  ecli?: string | null;
+  /** EUR-Lex internal reference number, when listed. */
+  internalNumber?: string | null;
   author?: string | null;
   /**
    * Upper-case 2-letter ISO codes the document is published in. Empty `[]`
@@ -585,12 +597,17 @@ export interface DocumentContentBatchRequest {
   articleId?: string;
 }
 
-/** One failed CELEX from a batch fetch. */
+/** One failed CELEX from a batch fetch — as the server sends it: `{ celex, error }`. */
 export interface BatchDocumentError {
-  celexNumber?: string;
-  /** Short error slug (upstream timeouts arrive as `"FetchTimeoutError" | "TIMEOUT"`). */
+  /** The CELEX that failed. */
+  celex?: string;
+  /** Free-text failure message (not a stable slug). */
   error?: string;
+  /** @deprecated Never sent by the server — read `celex`. */
+  celexNumber?: string;
+  /** @deprecated Never sent by the server — read `error`. */
   message?: string;
+  [key: string]: unknown;
 }
 
 export interface DocumentContentBatchResponse extends CreditedResponse, WithResponseHeaders {
@@ -626,8 +643,11 @@ export interface DocumentContentBatchResponse extends CreditedResponse, WithResp
 export interface RecentDocumentsParams {
   /** How many days back from today to include. Default 7. */
   days?: number;
-  /** One type or several (sent as repeated query parameters). */
-  documentType?: OneOrMany<DocumentType>;
+  /**
+   * ONE document type. The endpoint applies only the first type of a list
+   * (no fan-out, unlike `/search`), so the SDK accepts a single value.
+   */
+  documentType?: DocumentType;
   author?: OneOrMany<Author>;
   domain?: Domain;
   subdomain?: OneOrMany<Subdomain>;
@@ -780,7 +800,11 @@ export interface RelationSync {
 
 /** Edge shape emitted on fresh extraction. */
 export interface CitationEdgeSummary {
+  /** The citing document. */
+  sourceCelex?: string;
   targetCelex?: string;
+  /** Whether the edge was found pointing out of (`outbound`) or into (`inbound`) the extracted document. */
+  direction?: "outbound" | "inbound" | (string & {});
   citationType?: CitationType;
   /** Surrounding text around the citation on the source metadata page, when available. */
   contextSnippet?: string | null;
@@ -796,7 +820,7 @@ export interface CitationExtractResponse extends CreditedResponse, WithResponseH
   };
   /** Number of citation edges persisted (or already on file). */
   citationCount?: number;
-  /** Edges that were just extracted. Empty array when `alreadyExtracted: true`. */
+  /** Edges that were just extracted. Omitted when `alreadyExtracted: true`. */
   citations?: CitationEdgeSummary[];
   /** True when the document had already been processed (settles at 1 credit). */
   alreadyExtracted?: boolean;
@@ -814,7 +838,12 @@ export interface CitingDocumentGroup {
   celexNumber?: string;
   title?: string | null;
   titleSource?: TitleSource;
+  /** Edges of this source in THIS page (raw citation rows). */
   citationCount?: number;
+  /** A `…_RES` variant of the source was collapsed into this group. */
+  hasResume?: boolean;
+  /** A `…_SUM` variant of the source was collapsed into this group. */
+  hasSummary?: boolean;
   citations?: CitationEdgeDetail[];
 }
 
@@ -945,6 +974,10 @@ export interface CitationStatsResponse extends CreditedResponse, WithResponseHea
     /** Top-10 documents with the most outbound citations. */
     mostCiting: CitationStatsTopCiting[];
   };
+  /** When these (cached) statistics were computed. */
+  cachedAt?: string;
+  /** How long the statistics are cached, in seconds. */
+  cacheTtlSeconds?: number;
 }
 
 export interface CitationPathNode {
@@ -1470,8 +1503,9 @@ export interface WebhookCreateRequest {
  * Partial update — only the supplied fields are changed. `watchCelex`
  * replaces the whole list; `searchCriteria: null` removes the criteria (one
  * of the two must remain). Setting `status` to `ACTIVE` resets
- * `consecutiveFailures` and re-queues deliveries from the last 7 days that
- * ran out of retries (`requeuedDeliveries`).
+ * `consecutiveFailures`; moving a `FAILED`/`PAUSED` webhook to `ACTIVE`
+ * also re-queues its deliveries from the last 7 days that ran out of
+ * retries (`requeuedDeliveries`).
  */
 export interface WebhookUpdateRequest {
   name?: string;
