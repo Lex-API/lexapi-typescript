@@ -133,8 +133,6 @@ One model, per attempt:
 
 ### 1.10 Language-specific names
 
-Names marked *(to add)* do not exist yet in that SDK; when it implements the rule it uses that name.
-
 | Concept | Python (`lexapi-client`) | TypeScript (`@lexapi/client`) |
 |---|---|---|
 | Read-only-POST opt-in (§1.2) | `RetryConfig(retry_read_only_posts=True)` | `retry.retryReadOnlyPosts: true` |
