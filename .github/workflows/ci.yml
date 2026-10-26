@@ -6,21 +6,48 @@ on:
   pull_request:
 
 jobs:
-  lint-test:
+  lint-test-build:
+    # Dev toolchain (vitest 4, tsup 8) needs Node >= 20.
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [18, 22]
+        node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
       - name: Install
-        run: npm install
-      - name: Lint
+        run: npm ci
+      - name: Typecheck
         run: npm run lint
       - name: Test
         run: npm test
       - name: Build
         run: npm run build
+      - name: Smoke-test the built bundles (ESM + CJS)
+        run: npm run smoke:dist
+      - uses: actions/upload-artifact@v4
+        if: matrix.node-version == 22
+        with:
+          name: dist
+          path: dist
+
+  runtime-node18:
+    # The package supports Node >= 18 at runtime (engines). The dev toolchain
+    # can't run there, so exercise the bundles built above on Node 18 directly.
+    needs: lint-test-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Smoke-test the built bundles on Node 18
+        run: node scripts/smoke-dist.mjs && node scripts/smoke-dist.cjs
