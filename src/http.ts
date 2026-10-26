@@ -1,13 +1,24 @@
 import {
+  InvalidResponseError,
   LexAPIError,
   NetworkError,
+  RateLimitedError,
+  RequestAbortedError,
   TimeoutError,
   normalizeRetryAfterSeconds,
 } from "./errors.js";
+import { parseResponseHeaders } from "./headers.js";
 import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
-export const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * 95 s per attempt: above the 90 s hard timeout the API puts on a single live
+ * EUR-Lex fetch (so such a fetch ends in the server's typed, refunded 504
+ * rather than a client abort that may still be billed), and below
+ * Cloudflare's 100 s proxy timeout. A request that runs several upstream
+ * fetches (Cellar, then the browser; a batch) can still exceed it.
+ */
+export const DEFAULT_TIMEOUT_MS = 95_000;
 
 /** Retry policy knobs (SDK contract §1.2). */
 export interface RetryOptions {
@@ -17,6 +28,17 @@ export interface RetryOptions {
   baseDelayMs?: number;
   /** Cap on any single wait (computed or server-directed). Default 30 000 ms. */
   maxDelayMs?: number;
+  /**
+   * SDK contract §1.2 opt-in (default `false`): also retry the eight
+   * read-only POSTs (`search`, `getDocument`, `getDocumentsBatch`,
+   * `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`,
+   * `semanticLegislationSearch`) on an **app-origin** 502/503/504 — those
+   * are refunded in full, so the retry is billing-safe. App-origin = a
+   * non-empty `X-LexAPI-Version` or a `RateLimit-Limit` header; anything
+   * else is treated as a proxy answer and never retried on a billed call. Never applies to mutating calls (webhook
+   * writes, `extractCitations`).
+   */
+  retryReadOnlyPosts?: boolean;
 }
 
 export interface HttpClientOptions {
@@ -28,19 +50,145 @@ export interface HttpClientOptions {
   userAgentSuffix?: string | undefined;
 }
 
-export type QueryParams = Record<string, string | number | boolean | undefined>;
+/** Query values; arrays are sent as repeated parameters (`?a=x&a=y`). */
+export type QueryParams = Record<
+  string,
+  string | number | boolean | undefined | ReadonlyArray<string | number | boolean>
+>;
 
 export interface RequestOptions {
   method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
   query?: QueryParams;
   body?: unknown;
-  /** Per-call timeout override. */
+  /** Per-call timeout override (per attempt, covering the response body). */
   timeoutMs?: number | undefined;
+  /** Caller cancellation: aborts the in-flight attempt and any retry wait. */
+  signal?: AbortSignal | undefined;
+  /** `Accept` header override (default `application/json`). */
+  accept?: string;
+  /**
+   * One of the eight read-only POSTs of SDK contract §1.2 — retried on
+   * app-origin 502/503/504 when `retryReadOnlyPosts` is on.
+   */
+  idempotent?: boolean;
+  /**
+   * A free operation (0 credits: `/info`, webhook reads). A retry cannot
+   * charge, so proxy-origin 5xx/520/524 and post-send transport errors are
+   * retried too (SDK contract §1.2).
+   */
+  free?: boolean;
 }
 
-/** Statuses the SDK retries (429 rate limit, 502/503/504 transient upstream). */
-const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+/** Context handed to a success handler; the attempt's inactivity timer is still running. */
+export interface AttemptContext {
+  /** Aborts when the attempt times out or the caller aborts. */
+  signal: AbortSignal;
+  /** The response (inactivity) timeout in ms. */
+  timeoutMs: number;
+  /** Restart the inactivity timer — call on every body chunk. */
+  touch: () => void;
+}
+
+/**
+ * Transport failures where the request PROVABLY NEVER REACHED THE SERVER
+ * (SDK contract §1.2). Every one happens before undici writes a single
+ * request byte: undici only writes the request after the TCP connect (and,
+ * for HTTPS, the TLS handshake) has completed.
+ *
+ * - DNS: `ENOTFOUND`, `EAI_AGAIN` (getaddrinfo — before any socket exists).
+ * - TCP connect: `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, and undici's
+ *   `UND_ERR_CONNECT_TIMEOUT`.
+ * - TLS handshake: X.509 certificate-verification codes (raised only while
+ *   verifying the server certificate during the handshake) and the
+ *   handshake-alert / protocol-negotiation `ERR_SSL_*` codes listed below
+ *   (raised only before the handshake completes). Post-handshake TLS
+ *   errors (bad record MAC, decryption failures) are deliberately absent.
+ *
+ * `ETIMEDOUT` is ambiguous on its own (it is also a TCP retransmission
+ * timeout on an established connection, i.e. possibly after send), so it
+ * counts only when the error says `syscall: "connect"` — Node's connect
+ * timeout, e.g. under `autoSelectFamily` (often inside an `AggregateError`).
+ *
+ * `fetch` cannot tell a connection closed before the response from one
+ * closed mid-response (a reset, "other side closed"), so those are NOT
+ * never-reached: on a billed call they surface as `NetworkError`.
+ */
+const NEVER_REACHED_CODES = new Set([
+  // DNS
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  // TCP connect
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  // TLS certificate verification (handshake)
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_REVOKED",
+  "CERT_UNTRUSTED",
+  "CERT_REJECTED",
+  "CERT_SIGNATURE_FAILURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "HOSTNAME_MISMATCH",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  // TLS handshake alerts / protocol negotiation
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+  "ERR_SSL_UNSUPPORTED_PROTOCOL",
+  "ERR_SSL_NO_PROTOCOLS_AVAILABLE",
+  "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+  "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION",
+  "ERR_SSL_TLSV1_ALERT_UNKNOWN_CA",
+  "ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE",
+  "ERR_SSL_SSLV3_ALERT_CERTIFICATE_EXPIRED",
+]);
+
+/** Codes that are connect-phase only when the error carries `syscall: "connect"`. */
+const CONNECT_SYSCALL_CODES = new Set(["ETIMEDOUT"]);
+
+/** Cloudflare: web server down / connection timed out / origin unreachable — never reached the app. */
+const NEVER_REACHED_STATUSES = new Set([521, 522, 523]);
+/** Statuses whose retry depends on origin (app vs proxy). */
+const ORIGIN_DEPENDENT_STATUSES = new Set([502, 503, 504]);
+/** Proxy-only statuses (Cloudflare unknown error / origin timeout): the app may have charged. */
+const PROXY_STATUSES = new Set([520, 524]);
+
+/** `true` when a transport error (or one of its causes) carries a never-reached-the-app code. */
+export function isNeverReachedError(error: unknown, depth = 0): boolean {
+  if (depth > 6 || typeof error !== "object" || error === null) return false;
+  const { code, syscall, cause, errors } = error as {
+    code?: unknown;
+    syscall?: unknown;
+    cause?: unknown;
+    errors?: unknown;
+  };
+  if (typeof code === "string") {
+    if (NEVER_REACHED_CODES.has(code)) return true;
+    if (CONNECT_SYSCALL_CODES.has(code) && syscall === "connect") return true;
+  }
+  // AggregateError (happy-eyeballs connect): never-reached only if EVERY attempt was.
+  if (Array.isArray(errors) && errors.length > 0 && errors.every((e) => isNeverReachedError(e, depth + 1))) {
+    return true;
+  }
+  return isNeverReachedError(cause, depth + 1);
+}
+
+/**
+ * App-origin response (SDK contract §1.2): it carries a non-empty
+ * `X-LexAPI-Version` header (every app response, lex-api #299 on) or a
+ * `RateLimit-Limit` header (the app's per-key rate limiter sets `RateLimit-*`
+ * on every billable app response; proxies never do). A JSON body with an
+ * `error` member is NOT enough on its own. Anything else is treated as
+ * proxy-origin — unknown origin is never assumed to be the app.
+ */
+export function isAppOrigin(error: LexAPIError): boolean {
+  return error.headers?.apiVersion !== undefined || error.headers?.rateLimit?.limit !== undefined;
+}
 
 /**
  * Browsers forbid setting the `User-Agent` header (and this SDK is
@@ -51,62 +199,102 @@ function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof document !== "undefined";
 }
 
+const INSPECT = Symbol.for("nodejs.util.inspect.custom");
+
 /**
  * Single request core used by every SDK method.
  *
- * - `x-api-key` auth + `User-Agent: lexapi-typescript/<version>` on every request
- *   (UA omitted on browser runtimes, where it cannot be set).
- * - Timeout per attempt via `AbortController`.
- * - Retries: up to `maxRetries` (default 3) on 429/502/503/504 and on
- *   transport-level network errors, with exponential backoff + full jitter.
- *   Server-directed waits win over computed backoff, resolved in order:
- *   `Retry-After` header → `RateLimit-Reset` header → JSON `retryAfter` body
- *   field (epoch-guarded — the field was buggy epoch-seconds until a pending
- *   server fix, which is why the HEADER is authoritative) → backoff.
- * - Non-idempotent methods (anything but GET) are retried ONLY on 429 —
- *   never on 5xx or network errors, where the request may have been applied.
+ * - `x-api-key` auth + `User-Agent: lexapi-typescript/<version>` on every
+ *   request (UA omitted on browser runtimes, where it cannot be set). The key
+ *   lives in a private field and never appears in `util.inspect`,
+ *   `console.log` or `JSON.stringify` output.
+ * - One inactivity timeout per attempt (SDK contract §1.6): it runs until
+ *   the response head arrives and restarts on every body chunk, for JSON
+ *   bodies and export streams alike.
+ * - Caller `AbortSignal`: aborts the attempt and any retry wait; throws
+ *   `RequestAbortedError`, never retried.
+ * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
+ *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
+ * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
+ *   `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is
+ *   never read.
  */
 export class HttpClient {
-  private readonly opts: HttpClientOptions;
+  readonly #apiKey: string;
+  private readonly opts: Omit<HttpClientOptions, "apiKey">;
   private readonly userAgent: string;
 
   constructor(opts: HttpClientOptions) {
-    this.opts = opts;
+    const { apiKey, ...rest } = opts;
+    this.#apiKey = apiKey;
+    this.opts = rest;
     this.userAgent = opts.userAgentSuffix
       ? `lexapi-typescript/${VERSION} ${opts.userAgentSuffix}`
       : `lexapi-typescript/${VERSION}`;
   }
 
-  /** Perform a request and parse the JSON body (204 yields `undefined`). */
+  /** API base URL. */
+  get baseUrl(): string {
+    return this.opts.baseUrl;
+  }
+
+  /** Client-level per-attempt timeout (ms). */
+  get timeoutMs(): number {
+    return this.opts.timeoutMs;
+  }
+
+  /** Redacted view for `JSON.stringify` — never includes the API key. */
+  toJSON(): Record<string, unknown> {
+    return { baseUrl: this.opts.baseUrl, apiKey: "[redacted]" };
+  }
+
+  /** Redacted view for `util.inspect` / `console.log`. */
+  [INSPECT](): string {
+    return `HttpClient { baseUrl: '${this.opts.baseUrl}', apiKey: '[redacted]' }`;
+  }
+
+  /** Perform a request and parse the JSON body (204 / empty body yields `{}`). */
   async requestJson<T>(options: RequestOptions): Promise<T> {
     const { data } = await this.requestJsonWithResponse<T>(options);
     return data;
   }
 
-  /** Like `requestJson`, but also exposes the raw `Response` (for header signals). */
+  /**
+   * Like `requestJson`, but also exposes the raw `Response` (for header
+   * signals). The body is read inside the attempt, under its timeout.
+   */
   async requestJsonWithResponse<T>(options: RequestOptions): Promise<{ data: T; response: Response }> {
-    const response = await this.requestRaw(options);
-    if (response.status === 204) {
-      return { data: undefined as T, response };
-    }
-    return { data: (await response.json()) as T, response };
+    return this.execute(options, async (response, ctx) => ({
+      data: (await readJsonBody(response, ctx.touch)) as T,
+      response,
+    }));
   }
 
   /**
    * Perform a request and return the raw successful `Response` without
-   * consuming the body (used by streaming endpoints such as `/export`).
-   * Non-2xx responses are parsed and thrown as typed errors; the retry
-   * policy applies before the first body byte is consumed.
+   * consuming the body (streaming endpoints such as `/export`). The attempt
+   * timeout covers only the response headers; the caller applies its own
+   * idle timeout to body reads. Non-2xx responses are parsed and thrown as
+   * typed errors; the retry policy applies before the first body byte.
    */
   async requestRaw(options: RequestOptions): Promise<Response> {
-    const { method, path, query, body } = options;
+    return this.execute(options, async (response) => response);
+  }
+
+  private async execute<R>(
+    options: RequestOptions,
+    onSuccess: (response: Response, ctx: AttemptContext) => Promise<R>,
+  ): Promise<R> {
+    const { method, path, query, body, signal } = options;
     const url = `${this.opts.baseUrl}${path}${buildQuery(query)}`;
     const timeoutMs = options.timeoutMs ?? this.opts.timeoutMs;
-    const { maxRetries, baseDelayMs, maxDelayMs } = this.opts.retry;
+    const { maxRetries, baseDelayMs, maxDelayMs, retryReadOnlyPosts } = this.opts.retry;
+    const isGet = method === "GET";
+    const free = isGet && options.free === true;
 
     const headers: Record<string, string> = {
-      "x-api-key": this.opts.apiKey,
-      accept: "application/json",
+      "x-api-key": this.#apiKey,
+      accept: options.accept ?? "application/json",
     };
     if (!isBrowserRuntime()) {
       headers["user-agent"] = this.userAgent;
@@ -118,104 +306,179 @@ export class HttpClient {
     }
 
     for (let attempt = 0; ; attempt++) {
-      let response: Response;
+      throwIfAborted(signal, method, path);
+
+      // §1.6: one inactivity timer per attempt — runs until the response
+      // head arrives, then restarts on every body chunk (`touch`).
+      const controller = new AbortController();
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const touch = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs);
+      };
+      touch();
+      const onAbort = (): void => controller.abort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      let error: LexAPIError;
+      let response: Response | undefined;
+      let retryTransport = false;
       try {
-        response = await this.fetchWithTimeout(url, {
+        response = await this.opts.fetchFn(url, {
           method,
           headers,
           ...(serializedBody !== undefined ? { body: serializedBody } : {}),
-          timeoutMs,
+          signal: controller.signal,
         });
-      } catch (cause) {
-        if (cause instanceof TimeoutError) throw cause; // client-side timeout: not retried
-        // Transport-level network error. Only safe to retry idempotent GETs —
-        // a non-GET may have been applied server-side before the connection died.
-        if (attempt < maxRetries && method === "GET") {
-          await sleep(fullJitterBackoff(attempt, baseDelayMs, maxDelayMs));
-          continue;
+        touch();
+        if (response.ok) {
+          return await onSuccess(response, { signal: controller.signal, timeoutMs, touch });
         }
-        throw new NetworkError(`Network error calling ${method} ${path}`, cause);
+        error = await parseErrorResponse(response, touch);
+      } catch (cause) {
+        if (signal?.aborted) {
+          throw new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason);
+        }
+        if (cause instanceof LexAPIError && !timedOut) throw cause; // e.g. InvalidResponseError
+        const failure = timedOut
+          ? new TimeoutError(`No response bytes for ${timeoutMs}ms (${method} ${path})`, 0)
+          : new NetworkError(
+              response === undefined
+                ? `Network error calling ${method} ${path}`
+                : `Connection lost while reading the response to ${method} ${path}`,
+              cause,
+            );
+        // §1.2: never reached the app → any method; after send → free calls only.
+        const neverReached = !timedOut && response === undefined && isNeverReachedError(cause);
+        retryTransport = attempt < maxRetries && (neverReached || free);
+        if (!retryTransport) throw failure;
+        error = failure;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
       }
 
-      if (response.ok) return response;
-
-      const error = await parseErrorResponse(response);
-      const retryable =
-        RETRYABLE_STATUSES.has(response.status) &&
-        (method === "GET" || response.status === 429);
-      if (attempt < maxRetries && retryable) {
-        const serverWaitSeconds = serverDirectedWaitSeconds(response, error);
+      if (retryTransport) {
+        await sleep(fullJitterBackoff(attempt, baseDelayMs, maxDelayMs), signal, method, path);
+        continue;
+      }
+      if (attempt < maxRetries && shouldRetryStatus(error, { isGet, free, readOnly: options.idempotent === true && retryReadOnlyPosts })) {
         const waitMs =
-          serverWaitSeconds !== undefined
-            ? Math.min(serverWaitSeconds * 1000, maxDelayMs)
+          error.retryAfter !== undefined
+            ? Math.min(error.retryAfter * 1000, maxDelayMs)
             : fullJitterBackoff(attempt, baseDelayMs, maxDelayMs);
-        await sleep(waitMs);
+        await sleep(waitMs, signal, method, path);
         continue;
       }
       throw error;
     }
   }
+}
 
-  private async fetchWithTimeout(
-    url: string,
-    init: { method: string; headers: Record<string, string>; body?: string; timeoutMs: number },
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), init.timeoutMs);
-    try {
-      return await this.opts.fetchFn(url, {
-        method: init.method,
-        headers: init.headers,
-        ...(init.body !== undefined ? { body: init.body } : {}),
-        signal: controller.signal,
-      });
-    } catch (cause) {
-      if (controller.signal.aborted) {
-        throw new TimeoutError(`Request timed out after ${init.timeoutMs}ms`, 0);
-      }
-      throw cause;
-    } finally {
-      clearTimeout(timer);
-    }
+/** SDK contract §1.2 decision table for an HTTP error response. */
+function shouldRetryStatus(
+  error: LexAPIError,
+  call: { isGet: boolean; free: boolean; readOnly: boolean },
+): boolean {
+  const status = error.status;
+  if (status === 429) return !(error instanceof RateLimitedError && error.quotaExhausted);
+  if (NEVER_REACHED_STATUSES.has(status)) return true;
+  if (ORIGIN_DEPENDENT_STATUSES.has(status)) {
+    if (isAppOrigin(error)) return call.isGet || call.readOnly;
+    return call.free;
+  }
+  if (PROXY_STATUSES.has(status)) return call.free;
+  return false;
+}
+
+/** Read a body as text, restarting the inactivity timer on every chunk. */
+async function readBodyText(response: Response, touch?: () => void): Promise<string> {
+  if (response.body === null || touch === undefined) return response.text();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    touch();
+    parts.push(decoder.decode(value, { stream: true }));
+  }
+  parts.push(decoder.decode());
+  return parts.join("");
+}
+
+/**
+ * Read a JSON body (SDK contract §1.3): a 204 or an empty body is a
+ * successful empty object; a non-empty non-JSON body is `InvalidResponseError`.
+ */
+async function readJsonBody(response: Response, touch?: () => void): Promise<unknown> {
+  if (response.status === 204) return {};
+  const text = await readBodyText(response, touch);
+  if (text.trim() === "") return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new InvalidResponseError(
+      `Expected a JSON body (HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "none"})`,
+      response.status,
+      text,
+      { headers: parseResponseHeaders(response) },
+    );
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, method: string, path: string): void {
+  if (signal?.aborted) {
+    throw new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason);
   }
 }
 
 /** Parse a non-2xx response into the typed error hierarchy. */
-export async function parseErrorResponse(response: Response): Promise<LexAPIError> {
+export async function parseErrorResponse(response: Response, touch?: () => void): Promise<LexAPIError> {
   let body: unknown;
   try {
-    body = await response.json();
-  } catch {
+    const text = await readBodyText(response, touch);
+    body = text.trim() === "" ? undefined : (JSON.parse(text) as unknown);
+  } catch (cause) {
+    // A body that is not JSON (proxy HTML/text) leaves `body` undefined; an
+    // aborted or broken read (timeout / caller abort / reset) propagates.
+    if (!(cause instanceof SyntaxError)) throw cause;
     body = undefined;
   }
-  return LexAPIError.fromResponse(response.status, body, headerRetryAfterSeconds(response));
+  // §1.2 retry-after resolution, steps 1–2 (step 3, the JSON field, is
+  // applied in fromResponse on a 429; a quota 429 drops the value).
+  const hint =
+    headerRetryAfterSeconds(response) ??
+    (response.status === 429 ? resetHeaderSeconds(response, "ratelimit-reset") : undefined);
+  return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response));
 }
 
-/** `Retry-After` header — delta-seconds or an HTTP-date. */
+/**
+ * `Retry-After` header — delta-seconds or an HTTP-date (§1.2). Empty or
+ * unparseable values count as absent; numbers go through the epoch guard.
+ */
 function headerRetryAfterSeconds(response: Response): number | undefined {
-  const header = response.headers.get("retry-after");
-  if (header === null) return undefined;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  const raw = response.headers.get("retry-after");
+  if (raw === null) return undefined;
+  const header = raw.trim();
+  if (header === "") return undefined;
+  if (/^\d+(\.\d+)?$/.test(header)) return normalizeRetryAfterSeconds(Number(header));
+  if (/^[-+]?\d/.test(header)) return undefined;
   const date = Date.parse(header);
   if (!Number.isNaN(date)) return Math.max(0, Math.round((date - Date.now()) / 1000));
   return undefined;
 }
 
-/**
- * Server-directed wait, resolved in the SDK contract's precedence order:
- * `Retry-After` header → `RateLimit-Reset` header (draft IETF delta-seconds)
- * → JSON `retryAfter` body field (already epoch-normalized on the error).
- */
-function serverDirectedWaitSeconds(response: Response, error: LexAPIError): number | undefined {
-  const header = headerRetryAfterSeconds(response);
-  if (header !== undefined) return header;
-  const rateLimitReset = response.headers.get("ratelimit-reset");
-  if (rateLimitReset !== null) {
-    const seconds = Number(rateLimitReset);
-    if (Number.isFinite(seconds)) return normalizeRetryAfterSeconds(seconds);
-  }
-  return error.retryAfter;
+function resetHeaderSeconds(response: Response, name: string): number | undefined {
+  const raw = response.headers.get(name);
+  if (raw === null || raw.trim() === "") return undefined;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return normalizeRetryAfterSeconds(seconds);
 }
 
 /** Full-jitter exponential backoff: `random() * min(cap, base * 2^attempt)`. */
@@ -223,15 +486,37 @@ function fullJitterBackoff(attempt: number, baseDelayMs: number, maxDelayMs: num
   return Math.random() * Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Sleep that a caller's `AbortSignal` interrupts (rejecting with `RequestAbortedError`). */
+function sleep(ms: number, signal: AbortSignal | undefined, method: string, path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new RequestAbortedError(`Request ${method} ${path} was aborted during a retry wait`, signal?.reason));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export function buildQuery(query?: QueryParams): string {
   if (!query) return "";
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined) params.set(key, String(value));
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value as ReadonlyArray<string | number | boolean>) {
+        params.append(key, String(item));
+      }
+    } else {
+      params.set(key, String(value));
+    }
   }
   const qs = params.toString();
   return qs ? `?${qs}` : "";

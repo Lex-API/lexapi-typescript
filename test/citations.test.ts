@@ -232,7 +232,7 @@ describe("getCitationPath / getRelatedDocuments / getCitationStats", () => {
 describe("citation GET retry semantics", () => {
   it("retries GET /citations/stats on 502", async () => {
     const fetchMock = fetchSequence(
-      jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "flaky" } }),
+      jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "flaky" } }, { "ratelimit-limit": "60" }),
       jsonResponse(200, { success: true, stats: { totalCitations: 0, uniqueSourceDocuments: 0, uniqueTargetDocuments: 0, mostCited: [], mostCiting: [] } }),
     );
 
@@ -248,5 +248,147 @@ describe("citation GET retry semantics", () => {
 
     await expect(client(fetchMock).extractCitations("32016R0679")).rejects.toThrow(RateLimitedError);
     expect(fetchMock).toHaveBeenCalledTimes(1 + FAST_RETRY.maxRetries);
+  });
+});
+
+describe("citations — 2026-10 additions", () => {
+  it("types corrigendum edges, titleSource and relationSync on cited-by, and forwards language", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        targetDocument: "32008R1272",
+        totalCitations: 2,
+        uniqueDocuments: 2,
+        limit: 100,
+        offset: 0,
+        citedBy: [
+          {
+            celexNumber: "32008R1272R(01)",
+            title: "Rectificatif",
+            titleSource: "citation-source",
+            citationCount: 1,
+            citations: [{ citationType: "corrigendum", contextSnippet: null }],
+          },
+        ],
+        relationSync: { source: "cellar", status: "pending", syncedAt: "2026-10-07T09:12:00.000Z" },
+      }),
+    );
+
+    const result = await client(fetchMock).getCitedBy("32008R1272", { citationType: "corrigendum", language: "fr" });
+
+    const url = new URL(lastCall(fetchMock)[0]);
+    expect(url.searchParams.get("citationType")).toBe("corrigendum");
+    expect(url.searchParams.get("language")).toBe("fr");
+    expect(result.citedBy[0]?.citations?.[0]?.citationType).toBe("corrigendum");
+    expect(result.citedBy[0]?.titleSource).toBe("citation-source");
+    expect(result.relationSync?.status).toBe("pending");
+  });
+
+  it("surfaces relationSync with a skipped reason on the network", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        document: "62018CJ0311",
+        network: { celexNumber: "62018CJ0311", citesCount: 0, citedByCount: 0, cites: [], citedBy: [] },
+        paging: { limit: 100, offset: 0, citesTotal: 0, citedByTotal: 0 },
+        relationSync: { source: "cellar", status: "skipped", reason: "not-applicable", syncedAt: null },
+      }),
+    );
+
+    const result = await client(fetchMock).getCitationNetwork("62018CJ0311", { language: "de" });
+
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("language")).toBe("de");
+    expect(result.relationSync).toEqual({ source: "cellar", status: "skipped", reason: "not-applicable", syncedAt: null });
+  });
+
+  it("forwards language on path and related, and types titleSource", async () => {
+    const pathMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        from: "32016R0679",
+        to: "31995L0046",
+        found: true,
+        pathLength: 1,
+        maxDepth: 4,
+        path: [
+          { celexNumber: "32016R0679", title: "GDPR", titleSource: "corpus" },
+          { celexNumber: "31995L0046", title: "Directive 95/46/EC", titleSource: "corpus-fallback-lang" },
+        ],
+      }),
+    );
+    const path = await client(pathMock).getCitationPath("32016R0679", "31995L0046", { maxDepth: 4, language: "it" });
+    const pathUrl = new URL(lastCall(pathMock)[0]);
+    expect(pathUrl.searchParams.get("maxDepth")).toBe("4");
+    expect(pathUrl.searchParams.get("language")).toBe("it");
+    expect(path.path[1]?.titleSource).toBe("corpus-fallback-lang");
+
+    const relatedMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        celexNumber: "32016R0679",
+        method: "bibliographic-coupling",
+        count: 1,
+        related: [{ celexNumber: "32016L0680", sharedCount: 9, titleSource: "corpus" }],
+      }),
+    );
+    await client(relatedMock).getRelatedDocuments("32016R0679", { limit: 5, language: "it" });
+    const relatedUrl = new URL(lastCall(relatedMock)[0]);
+    expect(relatedUrl.searchParams.get("limit")).toBe("5");
+    expect(relatedUrl.searchParams.get("language")).toBe("it");
+  });
+
+  it("paginates cited-by in raw-row offsets until a short page", async () => {
+    const page = (celex: string, offset: number, rows: number) =>
+      jsonResponse(200, {
+        success: true,
+        targetDocument: "32016R0679",
+        totalCitations: 5,
+        limit: 2,
+        offset,
+        citedBy: [{ celexNumber: celex, citationCount: rows, citations: [] }],
+      });
+    const fetchMock = fetchSequence(page("A", 0, 2), page("B", 2, 2), page("C", 4, 1));
+
+    const seen: string[] = [];
+    for await (const p of client(fetchMock).paginateCitedBy("32016R0679", { limit: 2 })) {
+      seen.push(...p.citedBy.map((g) => g.celexNumber!));
+    }
+
+    expect(seen).toEqual(["A", "B", "C"]);
+    const offsets = fetchMock.mock.calls.map((c) => new URL((c as unknown as [string])[0]).searchParams.get("offset"));
+    expect(offsets).toEqual(["0", "2", "4"]);
+  });
+
+  it("keeps paginating past totalCitations when raw rows outnumber distinct pairs (review S8)", async () => {
+    // 150 raw rows forming 90 distinct pairs: totalCitations (90) < limit (100),
+    // but the first page is full (100 raw rows), so a second page exists.
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true, targetDocument: "X", totalCitations: 90, limit: 100, offset: 0,
+        citedBy: [{ celexNumber: "A", citationCount: 60 }, { celexNumber: "B", citationCount: 40 }],
+      }),
+      jsonResponse(200, {
+        success: true, targetDocument: "X", totalCitations: 90, limit: 100, offset: 100,
+        citedBy: [{ celexNumber: "B", citationCount: 50 }],
+      }),
+    );
+
+    const pages: number[] = [];
+    for await (const p of client(fetchMock).paginateCitedBy("X")) pages.push(p.citedBy.length);
+
+    expect(pages).toEqual([2, 1]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops paginating cites on an empty page", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, { success: true, sourceDocument: "X", limit: 100, offset: 0, cites: [{ celexNumber: "Y", citationCount: 100 }] }),
+      jsonResponse(200, { success: true, sourceDocument: "X", limit: 100, offset: 100, cites: [] }),
+    );
+
+    let pages = 0;
+    for await (const _p of client(fetchMock).paginateCites("32016R0679")) pages++;
+
+    expect(pages).toBe(2);
   });
 });

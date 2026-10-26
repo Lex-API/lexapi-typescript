@@ -2,15 +2,18 @@ import {
   DEFAULT_BASE_URL,
   DEFAULT_TIMEOUT_MS,
   HttpClient,
+  type RequestOptions,
   type RetryOptions,
 } from "./http.js";
 import { createExportStream, type ExportParams, type ExportStream } from "./export.js";
+import { parseResponseHeaders } from "./headers.js";
 import { WebhooksAPI } from "./webhooks.js";
 import type {
   CitationEdgeParams,
   CitationExtractResponse,
   CitationNetworkParams,
   CitationNetworkResponse,
+  CitationPathParams,
   CitationPathResponse,
   CitationStatsResponse,
   CitedByResponse,
@@ -28,14 +31,16 @@ import type {
   InfoResponse,
   RecentDocumentsParams,
   RecentDocumentsResponse,
+  RelatedDocumentsParams,
   RelatedDocumentsResponse,
   ResolveResponse,
   SearchRequest,
   SearchResponse,
   SemanticCaseLawSearchOptions,
   SemanticCaseLawSearchResponse,
+  SemanticLegislationSearchOptions,
   SemanticLegislationSearchResponse,
-  SemanticSearchOptions,
+  VersionParams,
 } from "./types.js";
 
 export { DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./http.js";
@@ -49,11 +54,17 @@ export interface LexAPIOptions {
   apiKey?: string;
   /** API base URL. Defaults to production (`https://lex-api.com/api/v1`). */
   baseUrl?: string;
-  /** Per-request timeout in milliseconds (per attempt). Default 60_000. */
+  /**
+   * Per-attempt timeout in milliseconds, covering the response body (for
+   * `export`: an idle timeout per read). Default 95_000 — enough for a
+   * single live EUR-Lex fetch (the API caps each at 90 s, then answers with
+   * a typed, refunded 504), and below Cloudflare's 100 s proxy timeout. A
+   * request that needs several upstream fetches can still exceed it.
+   */
   timeoutMs?: number;
   /** Injectable fetch (used for testing / polyfills). Defaults to global fetch. */
   fetch?: typeof fetch;
-  /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap. */
+  /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap; read-only POST 5xx retries are opt-in. */
   retry?: RetryOptions;
   /** Optional suffix appended to the `User-Agent` header. */
   userAgentSuffix?: string;
@@ -61,8 +72,13 @@ export interface LexAPIOptions {
 
 /** Per-call overrides accepted by every SDK method. */
 export interface CallOptions {
-  /** Override the client-level timeout for this call only. */
+  /** Override the client-level timeout for this call only (per attempt, covering the response body). */
   timeoutMs?: number;
+  /**
+   * Cancel the call: aborts the in-flight request, any retry wait and (for
+   * `export`) the stream. Rejects with `RequestAbortedError`; never retried.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -70,6 +86,10 @@ export interface CallOptions {
  *
  * Server-side only: API keys are secrets and browsers additionally forbid
  * setting the `User-Agent` header this SDK sends.
+ *
+ * Every JSON result carries the raw `subscription` / `usage` / `credits`
+ * blocks plus an SDK-added `headers` object (`X-Source`, rate limits,
+ * `X-Warning`, …) — see `ResponseHeaders`.
  *
  * ```ts
  * const client = new LexAPI({ apiKey: "lex_..." }); // or set LEXAPI_API_KEY
@@ -98,10 +118,30 @@ export class LexAPI {
         maxRetries: options.retry?.maxRetries ?? 3,
         baseDelayMs: options.retry?.baseDelayMs ?? 500,
         maxDelayMs: options.retry?.maxDelayMs ?? 30_000,
+        retryReadOnlyPosts: options.retry?.retryReadOnlyPosts ?? false,
       },
       userAgentSuffix: options.userAgentSuffix,
     });
     this.webhooks = new WebhooksAPI(this.http);
+  }
+
+  /** Redacted view for `JSON.stringify` — never includes the API key. */
+  toJSON(): Record<string, unknown> {
+    return { client: "LexAPI", http: this.http.toJSON() };
+  }
+
+  /** Redacted view for `util.inspect` / `console.log` — never includes the API key. */
+  [Symbol.for("nodejs.util.inspect.custom")](): string {
+    return `LexAPI { baseUrl: '${this.http.baseUrl}', apiKey: '[redacted]' }`;
+  }
+
+  /** Perform a JSON request and attach the parsed response headers (+ legacy header fields). */
+  private async call<T extends object>(
+    options: RequestOptions,
+    extra: { corpusVersion?: boolean } = {},
+  ): Promise<T> {
+    const { data, response } = await this.http.requestJsonWithResponse<T>(options);
+    return withHeaders(data, response, extra.corpusVersion === true);
   }
 
   /**
@@ -109,85 +149,113 @@ export class LexAPI {
    * Free operation (0 credits); useful as a connection probe.
    */
   async getInfo(options?: CallOptions): Promise<InfoResponse> {
-    return this.http.requestJson<InfoResponse>({
+    return this.call<InfoResponse>({
       method: "GET",
       path: "/info",
+      free: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /search` — search EUR-Lex with structured filters.
    *
+   * **Cost: 3 credits per result page** (`maxPages`, tier-clamped), charged
+   * upfront and refunded for pages never fetched; a search that fails
+   * before its first page is refunded in full. Identical searches within
+   * 60 minutes are served from a result cache (`headers.searchCache: "hit"`,
+   * same price) — pass `fresh: true` to force a re-fetch.
+   *
    * At least one filter is required. Truncation and partial-result signals
-   * are surfaced on the response rather than hidden: check `truncated` /
-   * `truncatedAt` / `truncatedReason` (tier-capped pagination), `partial` /
-   * `partialReason` (an upstream page timed out), `postFilteredBy`
-   * (controller-side post-filter dropped rows — `"date"` means raising
-   * `maxPages` widens recall), `ignoredDocumentTypes`, and `xWarning`
-   * (the `X-Warning` response header, e.g. `maxPages` tier clamping).
+   * are surfaced, not hidden: `truncated` / `truncatedAt` / `truncatedReason`
+   * (tier-capped pagination), `partial` / `partialReason` (an upstream page
+   * timed out, or `source: "corpus"` — EUR-Lex unreachable, answered from
+   * the corpus mirror), `postFilteredBy` (`"date"` → raise `maxPages`),
+   * `ignoredDocumentTypes`, `hint` (zero results → try semantic search), and
+   * `xWarning` (the `X-Warning` header, e.g. `maxPages` clamped).
    */
   async search(request: SearchRequest, options?: CallOptions): Promise<SearchResponse> {
-    const { data, response } = await this.http.requestJsonWithResponse<SearchResponse>({
+    return this.call<SearchResponse>({
       method: "POST",
       path: "/search",
       body: request,
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
-    return withHeaderSignals(data, response);
   }
 
   /**
    * `POST /documentContent` — fetch a single fully-parsed document by CELEX.
    *
-   * Corpus-first with live-scrape fallback (`bypassCorpus: true` forces a
-   * live read). Use `include`/`fields`/`articleId` to trim the payload.
+   * **Cost: 5 credits, settled by source** — 1 from the LexAPI corpus
+   * (`headers.source === "corpus"`), 4 from the Publications Office Cellar
+   * API (`"cellar"` / `"cellar-oj"`), 5 for a browser fetch (`"live"`).
+   *
+   * Check `document.textAvailability.available` before reading
+   * `document.content`: a document whose text EUR-Lex does not publish is a
+   * 200 with metadata and `content: null` (billed 1 credit), with the reason
+   * and — for base acts — a pointer to the consolidated version. Use
+   * `language` / `acceptLanguages` for other renditions and
+   * `include`/`fields`/`articleId` to trim the payload.
    */
   async getDocument(
     request: DocumentContentRequest,
     options?: CallOptions,
   ): Promise<DocumentContentResponse> {
-    return this.http.requestJson<DocumentContentResponse>({
+    return this.call<DocumentContentResponse>({
       method: "POST",
       path: "/documentContent",
       body: request,
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /documentContent/batch` — fetch multiple documents in one request.
    *
-   * The batch is clamped to the tier ceiling (FREE=1, STARTER=5,
-   * PROFESSIONAL=20, BUSINESS=50). Clamping is surfaced, not silent: check
-   * `trimmed` / `trimmedTo` / `trimmedReason` on the body and `xWarning`
-   * (the `X-Warning` header). Per-CELEX failures are collected in `errors`
-   * instead of aborting the batch.
+   * **Cost: 5 credits per processed item, settled by source** (corpus 1,
+   * Cellar / OJ 4, browser 5; `headers.batch` has the source counts). The
+   * batch is clamped to the tier ceiling (FREE=1, STARTER=5,
+   * PROFESSIONAL=20, BUSINESS+=50); trimmed items are not charged. Clamping
+   * is surfaced: `trimmed` / `trimmedTo` / `trimmedReason` and `xWarning`.
+   * Per-CELEX failures are collected in `errors`; text-unavailable items
+   * stay in `documents` (counted in `textUnavailable`).
    */
   async getDocumentsBatch(
     request: DocumentContentBatchRequest,
     options?: CallOptions,
   ): Promise<DocumentContentBatchResponse> {
-    const { data, response } = await this.http.requestJsonWithResponse<DocumentContentBatchResponse>({
+    return this.call<DocumentContentBatchResponse>({
       method: "POST",
       path: "/documentContent/batch",
       body: request,
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
-    return withHeaderSignals(data, response);
   }
 
   /**
    * `GET /documents/recent` — recently-published documents (last `days`
-   * days, default 7). Page fetching is tier-clamped like `/search`;
-   * `xWarning` carries the `X-Warning` header when clamping fired, and
-   * `languageFilter` reports rows dropped by the language post-filter.
+   * days, default 7; up to `limit`, default 50).
+   *
+   * **Cost: 3 credits per result page** (~10 results each, tier-capped);
+   * unfiltered requests are answered from Cellar in one query
+   * (`headers.source === "cellar"`) and settle at a single page. `author`
+   * arrays are sent as repeated query parameters; `documentType` and
+   * `subdomain` take ONE value — EUR-Lex applies only the first of several
+   * on this path (use `search` for multi-type / multi-subdomain queries). `languageFilter`
+   * reports rows dropped by the language post-filter.
    */
   async getRecentDocuments(
     params: RecentDocumentsParams = {},
     options?: CallOptions,
   ): Promise<RecentDocumentsResponse> {
-    const { data, response } = await this.http.requestJsonWithResponse<RecentDocumentsResponse>({
+    return this.call<RecentDocumentsResponse>({
       method: "GET",
       path: "/documents/recent",
       query: {
@@ -200,61 +268,70 @@ export class LexAPI {
         limit: params.limit,
       },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
-    return withHeaderSignals(data, response);
   }
 
   /**
-   * `POST /documents/url` — fetch a document by any EUR-Lex URL. The
-   * response is shaped like `getDocument` plus `sourceUrl` and
-   * `extractedCelex` echo-backs.
+   * `POST /documents/url` — fetch a document by any EUR-Lex URL. Shaped like
+   * `getDocument` plus `sourceUrl` and `extractedCelex` echo-backs. Same
+   * settle-by-source pricing (corpus 1, Cellar 4, browser 5).
    */
   async getDocumentByUrl(
     request: DocumentByUrlRequest,
     options?: CallOptions,
   ): Promise<DocumentByUrlResponse> {
-    return this.http.requestJson<DocumentByUrlResponse>({
+    return this.call<DocumentByUrlResponse>({
       method: "POST",
       path: "/documents/url",
       body: request,
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /documents/metadata` — metadata only (title, dates, ECLI/ELI,
-   * keywords, subjects). Skips the body parse: significantly faster and
-   * cheaper than `getDocument`.
+   * keywords, subjects, URLs). Skips the body parse: faster than
+   * `getDocument`. **Cost: 5 credits, settled by source** (corpus 1, Cellar 4).
    */
   async getDocumentMetadata(
     request: DocumentMetadataRequest,
     options?: CallOptions,
   ): Promise<DocumentMetadataResponse> {
-    return this.http.requestJson<DocumentMetadataResponse>({
+    return this.call<DocumentMetadataResponse>({
       method: "POST",
       path: "/documents/metadata",
       body: request,
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /resolve` — resolve any legal identifier (bare CELEX, EUR-Lex
    * URL, ELI URI, or ECLI) to the canonical CELEX plus access URLs.
+   * 1 credit. ECLIs (and unmappable ELIs) resolve via the corpus
+   * (`resolvedVia: "ecli-corpus"` / `"eli-corpus"`).
    */
   async resolve(identifier: string, options?: CallOptions): Promise<ResolveResponse> {
-    return this.http.requestJson<ResolveResponse>({
+    return this.call<ResolveResponse>({
       method: "POST",
       path: "/resolve",
       body: { identifier },
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   // ── Point-in-time versions ────────────────────────────────────────
-  // Requires lex-api PR #72 deployed. Versions are LexAPI observation
-  // snapshots (content-hash changes between fetches), NOT legal in-force
-  // reconstructions; history begins at first ingestion.
+  // Versions are LexAPI observation snapshots (content-hash changes between
+  // fetches), NOT legal in-force reconstructions; history begins at first
+  // ingestion. For the text in force on a date, use a consolidated CELEX or
+  // semanticLegislationSearch({ asOf }).
 
   /**
    * `GET /documents/{celex}/versions` — version history, newest first,
@@ -262,14 +339,15 @@ export class LexAPI {
    */
   async listDocumentVersions(
     celex: string,
-    params: { language?: string } = {},
+    params: VersionParams = {},
     options?: CallOptions,
   ): Promise<DocumentVersionsResponse> {
-    return this.http.requestJson<DocumentVersionsResponse>({
+    return this.call<DocumentVersionsResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -281,16 +359,16 @@ export class LexAPI {
   async getDocumentVersion(
     celex: string,
     version: number,
-    params: { language?: string } = {},
+    params: VersionParams = {},
     options?: CallOptions,
   ): Promise<DocumentVersionResponse> {
-    const { data, response } = await this.http.requestJsonWithResponse<DocumentVersionResponse>({
+    return this.call<DocumentVersionResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions/${version}`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
-    });
-    return withCorpusVersion(data, response);
+      signal: options?.signal,
+    }, { corpusVersion: true });
   }
 
   /**
@@ -302,16 +380,16 @@ export class LexAPI {
   async getDocumentAtDate(
     celex: string,
     date: string,
-    params: { language?: string } = {},
+    params: VersionParams = {},
     options?: CallOptions,
   ): Promise<DocumentVersionResponse> {
-    const { data, response } = await this.http.requestJsonWithResponse<DocumentVersionResponse>({
+    return this.call<DocumentVersionResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
-    });
-    return withCorpusVersion(data, response);
+      signal: options?.signal,
+    }, { corpusVersion: true });
   }
 
   // ── Citations ─────────────────────────────────────────────────────
@@ -319,58 +397,103 @@ export class LexAPI {
   /**
    * `POST /citations/extract` — crawl a document's EUR-Lex metadata page
    * for citations and persist them into the graph. Idempotent: an already
-   * processed document returns immediately with `alreadyExtracted: true`.
+   * processed document returns `alreadyExtracted: true`. 5 credits,
+   * refunded to 1 on `alreadyExtracted`.
    */
   async extractCitations(
     celexNumber: string,
     options?: CallOptions,
   ): Promise<CitationExtractResponse> {
-    return this.http.requestJson<CitationExtractResponse>({
+    return this.call<CitationExtractResponse>({
       method: "POST",
       path: "/citations/extract",
       body: { celexNumber },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `GET /citations/cites/{celexNumber}` — documents this one cites
    * (outbound edges), grouped by target. The document must first have been
-   * crawled via `extractCitations` to appear here.
+   * crawled via `extractCitations` to appear here. 1 credit.
    */
   async getCites(
     celexNumber: string,
     params: CitationEdgeParams = {},
     options?: CallOptions,
   ): Promise<CitesResponse> {
-    return this.http.requestJson<CitesResponse>({
+    return this.call<CitesResponse>({
       method: "GET",
       path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
-      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `GET /citations/cited-by/{celexNumber}` — documents that cite this one
-   * (inbound edges), grouped by source.
+   * (inbound edges), grouped by source. 1 credit. For legislation, inbound
+   * amendment / corrigendum / repeal edges are refreshed from Cellar when
+   * older than 7 days (waits ≤ ~2.5 s) — see `relationSync`.
    */
   async getCitedBy(
     celexNumber: string,
     params: CitationEdgeParams = {},
     options?: CallOptions,
   ): Promise<CitedByResponse> {
-    return this.http.requestJson<CitedByResponse>({
+    return this.call<CitedByResponse>({
       method: "GET",
       path: `/citations/cited-by/${encodeURIComponent(celexNumber)}`,
-      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
+   * Walk every page of `getCites` (offset in edge rows) until a short or
+   * empty page (SDK contract §1.4). Each page is a billed call (1 credit).
+   * Edges are ordered by extraction time only, so edges extracted at the
+   * same instant or during the walk can shift: an edge may repeat or be
+   * missed. A target's edges can straddle a page boundary, so the same
+   * `celexNumber` may appear in two consecutive pages — merge by
+   * `celexNumber` if you need one group per document.
+   */
+  async *paginateCites(
+    celexNumber: string,
+    params: CitationEdgeParams = {},
+    options?: CallOptions,
+  ): AsyncGenerator<CitesResponse, void> {
+    yield* paginateEdges(
+      (p) => this.getCites(celexNumber, p, options),
+      (page) => page.cites.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
+      params,
+    );
+  }
+
+  /**
+   * Walk every page of `getCitedBy` (offset in edge rows) until a short or
+   * empty page (SDK contract §1.4). Each page is a billed call (1 credit);
+   * edges may repeat or be missed if extractions happen during the walk. A source's edges can straddle a page boundary, so the same
+   * `celexNumber` may appear in two consecutive pages.
+   */
+  async *paginateCitedBy(
+    celexNumber: string,
+    params: CitationEdgeParams = {},
+    options?: CallOptions,
+  ): AsyncGenerator<CitedByResponse, void> {
+    yield* paginateEdges(
+      (p) => this.getCitedBy(celexNumber, p, options),
+      (page) => page.citedBy.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
+      params,
+    );
+  }
+
+  /**
    * `GET /citations/network/{celexNumber}` — inbound and outbound
-   * neighbourhood in one call, paginated per direction.
+   * neighbourhood in one call, paginated per direction. 20 credits.
    *
    * If the server-side wall-clock budget expires the endpoint still
    * returns 200 with `partial: true`, an EMPTY `network`, and `null`
@@ -381,58 +504,68 @@ export class LexAPI {
     params: CitationNetworkParams = {},
     options?: CallOptions,
   ): Promise<CitationNetworkResponse> {
-    return this.http.requestJson<CitationNetworkResponse>({
+    return this.call<CitationNetworkResponse>({
       method: "GET",
       path: `/citations/network/${encodeURIComponent(celexNumber)}`,
-      query: { citationType: params.citationType, limit: params.limit, offset: params.offset },
+      query: {
+        citationType: params.citationType,
+        limit: params.limit,
+        offset: params.offset,
+        language: params.language,
+      },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `GET /citations/path/{from}/{to}` — shortest citation path (BFS over
-   * outbound edges). `found: false` is a graceful HTTP 200, not an error.
-   * Default `maxDepth` 3 (max 8); the visited set is bounded to 5000 nodes.
+   * outbound edges). 20 credits. `found: false` is a graceful HTTP 200,
+   * not an error. Default `maxDepth` 3 (max 8); the visited set is bounded
+   * to 5000 nodes.
    */
   async getCitationPath(
     from: string,
     to: string,
-    params: { maxDepth?: number } = {},
+    params: CitationPathParams = {},
     options?: CallOptions,
   ): Promise<CitationPathResponse> {
-    return this.http.requestJson<CitationPathResponse>({
+    return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
-      query: { maxDepth: params.maxDepth },
+      query: { maxDepth: params.maxDepth, language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `GET /citations/related/{celexNumber}` — bibliographic-coupling
    * neighbours (documents sharing the most outbound citation targets with
-   * the seed). Returns a graceful empty list with `message` when the seed
-   * has no outbound citations to couple on.
+   * the seed). 20 credits. Returns a graceful empty list with `message`
+   * when the seed has no outbound citations to couple on.
    */
   async getRelatedDocuments(
     celexNumber: string,
-    params: { limit?: number } = {},
+    params: RelatedDocumentsParams = {},
     options?: CallOptions,
   ): Promise<RelatedDocumentsResponse> {
-    return this.http.requestJson<RelatedDocumentsResponse>({
+    return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
-      query: { limit: params.limit },
+      query: { limit: params.limit, language: params.language },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
-  /** `GET /citations/stats` — global citation graph statistics. */
+  /** `GET /citations/stats` — global citation graph statistics. 20 credits. */
   async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse> {
-    return this.http.requestJson<CitationStatsResponse>({
+    return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -444,104 +577,122 @@ export class LexAPI {
    * keyword matching is literal.
    *
    * **Billing:** 5 credits per call — **15 credits with `hyde: true`**
-   * (HyDE query rewriting: an LLM drafts the passage a relevant judgment
-   * would contain and retrieval fuses both rankings; ~1–3 s extra
-   * latency). HyDE is best-effort: on LLM failure the search falls back
-   * to plain retrieval, the response reports `hyde: false`, and the
-   * 10-credit premium is **refunded automatically** — verify via
-   * `credits.operation_weight`.
+   * (HyDE query rewriting; ~1–3 s extra latency). HyDE is best-effort: on
+   * LLM failure the search falls back to plain retrieval, the response
+   * reports `hyde: false`, and the 10-credit premium is **refunded
+   * automatically**.
    *
-   * The response exposes `hint` (present only on low-confidence,
-   * best-effort result sets — its presence is itself the signal), `hyde`
-   * (whether HyDE actually ran), and `hypotheticalDocument` (the drafted
-   * passage, present only when HyDE ran).
-   *
-   * Fewer results than `limit`? The upstream's ~0.7 default relevance
-   * floor cut in — pass `minScore: 0.5` (or `0`) to widen recall.
+   * Hits carry a ~600-char `snippet` by default; `includeText: true`
+   * returns the full text instead. `hint` is present only on
+   * low-confidence result sets. Fewer results than `limit`? The ~0.7
+   * default relevance floor cut in — pass `minScore: 0.5` (or `0`).
    *
    * Persistent document identity is `(metadata.celex_id,
-   * metadata.document_type)`; `case_id` is snapshot-scoped and does not
-   * survive index rebuilds.
+   * metadata.document_type)`; `case_id` is snapshot-scoped.
    */
   async semanticSearch(
     request: SemanticCaseLawSearchOptions,
     options?: CallOptions,
   ): Promise<SemanticCaseLawSearchResponse> {
-    return this.http.requestJson<SemanticCaseLawSearchResponse>({
+    return this.call<SemanticCaseLawSearchResponse>({
       method: "POST",
       path: "/search/semantic",
       body: semanticWireBody(request),
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   /**
    * `POST /legislation/semantic` — embedding-based semantic search over EU
    * legislation; results are article-level matches (`article_ref`,
-   * `law_id`, `law_title`, `score`).
+   * `law_id`, `law_title`, `score`). `limit` is never above 50 here.
    *
-   * Costs 5 credits. The `hyde` option is case-law only and is therefore
-   * not accepted here (the server ignores it on this endpoint). The same
-   * ~0.7 default relevance floor applies — lower `minScore` to widen
-   * recall; `hint` is present only on low-confidence result sets.
+   * **Consolidated texts:** when an act and its consolidated version match
+   * the same article you get ONE hit — the consolidated article, labelled
+   * `consolidated` / `consolidatedAsOf` / `baseCelex` / `consolidatedNote`,
+   * with the authentic act's own match under `baseAct`. Consolidated texts
+   * are not authentic; cite `baseCelex`.
+   *
+   * **`asOf` (YYYY-MM-DD):** each hit answers with the version in force on
+   * that date (`asOfResolved`, `asOfVersion`, `matchedVersion`); a hit that
+   * cannot be answered keeps its latest text with `asOfResolved: false` and
+   * an `asOfReason`. The response adds `asOf` and `asOfSummary`.
+   *
+   * **Cost:** 5 credits for the search; with `asOf`, each live fetch of a
+   * version the corpus does not hold reserves 5 and settles by outcome
+   * (Cellar 4, browser 5, no text 1, failed 0) — at most 3 per request by
+   * default. Corpus reads are free; an unaffordable fetch is skipped
+   * (`insufficient_credits`), never a 402. The `hyde` option is case-law only.
    */
   async semanticLegislationSearch(
-    request: SemanticSearchOptions,
+    request: SemanticLegislationSearchOptions,
     options?: CallOptions,
   ): Promise<SemanticLegislationSearchResponse> {
-    return this.http.requestJson<SemanticLegislationSearchResponse>({
+    return this.call<SemanticLegislationSearchResponse>({
       method: "POST",
       path: "/legislation/semantic",
       body: semanticWireBody(request),
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
   // ── Export ────────────────────────────────────────────────────────
 
   /**
-   * `GET /export` — stream matching corpus rows as NDJSON (BUSINESS tier;
-   * 402 `TierForbidden`/`CreditsExhausted`-style envelope otherwise).
+   * `GET /export` — stream matching corpus rows as NDJSON (BUSINESS, SCALE
+   * and ENTERPRISE; lower tiers get 403 `TierForbiddenError`). For what an
+   * export costs see https://lex-api.com/pricing and the `credits` /
+   * `usage` figures on your next response. Metadata-only rows are skipped
+   * unless `includeStubs: true`.
    *
    * Returns a single-pass async iterator over document rows. The leading
    * `_meta` envelope is parsed before this resolves (`stream.meta`); the
-   * trailing `_done` line is exposed as `stream.done` after iteration
-   * finishes — check `done.truncated` / `headers.truncated` to detect the
-   * server row cap (`X-Export-Truncated: 1`) instead of assuming the
-   * export was complete.
+   * trailing `_done` line is exposed as `stream.done` after iteration —
+   * check `stream.truncated` (header → `_meta` → `_done`) to detect the server row
+   * cap instead of assuming the export was complete.
    *
    * ```ts
-   * const stream = await client.export({ documentType: "regulation", limit: 1000 });
-   * console.log(stream.meta, stream.headers.total);
+   * const stream = await client.export({ documentType: "Regulation", limit: 1000 });
+   * console.log(stream.meta?.totalMatching, stream.headers.total);
    * for await (const row of stream) process(row.celex, row.parsedContent);
-   * if (stream.done?.truncated) console.warn("row cap hit — paginate with fetchedSince");
+   * if (stream.truncated) console.warn("row cap hit — resume with fetchedSince");
    * ```
    */
   async export(params: ExportParams = {}, options?: CallOptions): Promise<ExportStream> {
     const response = await this.http.requestRaw({
       method: "GET",
       path: "/export",
+      accept: "application/x-ndjson, application/json",
       query: {
-        documentType: params.documentType,
-        author: params.author,
-        subdomain: params.subdomain,
+        documentType: listParam(params.documentType),
+        author: listParam(params.author),
+        subdomain: listParam(params.subdomain),
         language: params.language,
         dateFrom: params.dateFrom,
         dateTo: params.dateTo,
         fetchedSince: params.fetchedSince,
         includeHtml: params.includeHtml,
         includeContent: params.includeContent,
+        includeStubs: params.includeStubs,
         limit: params.limit,
       },
       timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
-    return createExportStream(response);
+    return createExportStream(response, {
+      idleTimeoutMs: options?.timeoutMs ?? this.http.timeoutMs,
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
   }
 }
 
 /** Map camel-cased SDK semantic options to the wire shape (`min_score`, `include: ["text"]`). */
 function semanticWireBody(
-  request: SemanticSearchOptions & { hyde?: boolean },
+  request: SemanticCaseLawSearchOptions & SemanticLegislationSearchOptions,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -550,29 +701,58 @@ function semanticWireBody(
   if (request.includeText) body["include"] = ["text"];
   if (request.filters !== undefined) body["filters"] = request.filters;
   if (request.hyde !== undefined) body["hyde"] = request.hyde;
+  if (request.asOf !== undefined) body["asOf"] = request.asOf;
   return body;
 }
 
-/**
- * Merge header-only signals into the parsed body so callers can't miss
- * them: `X-Warning` announces tier clamping (maxPages / batch size).
- */
-function withHeaderSignals<T extends object>(data: T, response: Response): T {
-  const warning = response.headers.get("x-warning");
-  if (warning !== null && typeof data === "object" && data !== null) {
-    return { ...data, xWarning: warning };
-  }
-  return data;
+function edgeQuery(params: CitationEdgeParams): Record<string, string | number | undefined> {
+  return {
+    citationType: params.citationType,
+    limit: params.limit,
+    offset: params.offset,
+    language: params.language,
+  };
 }
 
-function withCorpusVersion<T extends { corpusVersion?: number }>(
-  data: T,
-  response: Response,
-): T {
-  const raw = response.headers.get("x-corpus-version");
-  const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
-  if (!Number.isNaN(parsed)) {
-    return { ...data, corpusVersion: parsed };
+/** Comma-join list filters (the export endpoint accepts comma-separated or repeated values). */
+function listParam(value: string | ReadonlyArray<string> | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "string" ? value : value.join(",");
+}
+
+async function* paginateEdges<T extends { limit?: number }>(
+  fetchPage: (params: CitationEdgeParams) => Promise<T>,
+  rawRowsIn: (page: T) => number,
+  params: CitationEdgeParams,
+): AsyncGenerator<T, void> {
+  const limit = params.limit ?? 100;
+  let offset = params.offset ?? 0;
+  for (;;) {
+    const page = await fetchPage({ ...params, limit, offset });
+    yield page;
+    // SDK contract §1.4: offsets count edge rows; advance by the sum of the
+    // page's citationCounts and stop at the first page shorter than the page
+    // size. (`totalCitations` counts distinct document pairs — raw rows can
+    // outnumber it — so it never ends the walk.)
+    const pageLimit = page.limit && page.limit > 0 ? page.limit : limit;
+    const rows = rawRowsIn(page);
+    offset += rows;
+    if (rows === 0 || rows < pageLimit) return;
   }
-  return data;
+}
+
+/**
+ * Attach parsed response headers (`headers`) and the legacy header-derived
+ * fields (`xWarning`, `corpusVersion`) to a JSON body so callers can't miss
+ * header-only signals.
+ */
+function withHeaders<T extends object>(data: T, response: Response, corpusVersion: boolean): T {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return data;
+  const headers = parseResponseHeaders(response);
+  const out: Record<string, unknown> = { ...data, headers };
+  if (headers.warning !== undefined) out["xWarning"] = headers.warning;
+  if (corpusVersion && headers.corpusVersion !== undefined) {
+    out["corpusVersion"] = headers.corpusVersion;
+  }
+  return out as T;
 }

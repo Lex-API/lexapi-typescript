@@ -122,7 +122,7 @@ describe("search", () => {
     expect(result.xWarning).toBe("maxPages clamped to 5 for tier STARTER");
   });
 
-  it("retries on 429 but not on 502 (non-idempotent POST)", async () => {
+  it("retries on 429 but not on 502 by default (non-GET; SDK contract §1.2)", async () => {
     const rateLimited = jsonResponse(429, { success: false, error: { code: "RATE_LIMITED", message: "slow down" } });
     const ok = jsonResponse(200, SEARCH_BODY);
     const fetchMock = fetchSequence(rateLimited, ok);
@@ -133,6 +133,74 @@ describe("search", () => {
     const fetchMock2 = fetchSequence(upstream, ok);
     await expect(client(fetchMock2).search({ query: "GDPR" })).rejects.toThrow(UpstreamError);
     expect(fetchMock2).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries search on 502 when retryReadOnlyPosts is opted in (5xx is refunded)", async () => {
+    const upstream = jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "EUR-Lex down" } }, { "ratelimit-limit": "60" });
+    const fetchMock = fetchSequence(upstream, jsonResponse(200, SEARCH_BODY));
+    const optedIn = new LexAPI({
+      apiKey: "lex_test_key",
+      fetch: fetchMock,
+      retry: { ...FAST_RETRY, retryReadOnlyPosts: true },
+    });
+    await expect(optedIn.search({ query: "GDPR" })).resolves.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends fresh and surfaces hint, cache and source headers", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          ...SEARCH_BODY,
+          totalResults: 0,
+          resultCount: 0,
+          results: [],
+          hint: "No results. EUR-Lex keyword search is literal — try fewer terms, or use semantic search",
+        },
+        {
+          "x-search-source": "soap",
+          "x-search-cache": "bypass",
+          "x-ignored-documenttypes": "frobnicate,other",
+          "x-documenttype-fanout": "4",
+          "ratelimit-limit": "60",
+          "ratelimit-remaining": "59",
+          "ratelimit-reset": "42",
+          "ratelimit-policy": "60;w=60",
+        },
+      ),
+    );
+
+    const result = await client(fetchMock).search({ query: "*", year: 2024, fresh: true });
+
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string)).toEqual({ query: "*", year: 2024, fresh: true });
+    expect(result.hint).toContain("semantic search");
+    expect(result.headers?.searchSource).toBe("soap");
+    expect(result.headers?.searchCache).toBe("bypass");
+    expect(result.headers?.ignoredDocumentTypes).toEqual(["frobnicate", "other"]);
+    expect(result.headers?.documentTypeFanOut).toBe(4);
+    expect(result.headers?.rateLimit).toEqual({ limit: 60, remaining: 59, reset: 42, policy: "60;w=60" });
+  });
+
+  it("surfaces the labelled corpus fallback (source: corpus, partial)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          ...SEARCH_BODY,
+          partial: true,
+          partialReason: "EUR-Lex is unreachable (...); served from the LexAPI corpus mirror instead.",
+          source: "corpus",
+        },
+        { "x-search-source": "corpus", "x-search-cache": "miss" },
+      ),
+    );
+
+    const result = await client(fetchMock).search({ query: "GDPR" });
+
+    expect(result.source).toBe("corpus");
+    expect(result.partial).toBe(true);
+    expect(result.headers?.searchSource).toBe("corpus");
   });
 });
 
@@ -347,5 +415,243 @@ describe("resolve", () => {
     );
 
     await expect(client(fetchMock).resolve("ECLI:EU:C:1900:1")).rejects.toThrow(NotFoundError);
+  });
+});
+
+describe("text availability, language labels and source headers (2026-08 → 2026-10 API)", () => {
+  it("returns content: null with a textAvailability verdict and consolidated pointers", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          success: true,
+          document: {
+            ...DOCUMENT,
+            celex: "32008R1272",
+            content: null,
+            textAvailability: {
+              available: false,
+              reason: "too_large",
+              retryable: false,
+              availableLanguages: null,
+              source: "parse-worker",
+              latestConsolidated: { celex: "02008R1272-20260701", date: "2026-07-01", source: "cellar" },
+              upcomingConsolidated: { celex: "02008R1272-20270101", date: "2027-01-01", source: "cellar" },
+            },
+          },
+        },
+        { "x-text-available": "false", "x-source": "live", "x-language": "en" },
+      ),
+    );
+
+    const { document, headers } = await client(fetchMock).getDocument({ celexNumber: "32008R1272" });
+
+    expect(document.content).toBeNull();
+    expect(document.textAvailability?.available).toBe(false);
+    expect(document.textAvailability?.reason).toBe("too_large");
+    expect(document.textAvailability?.availableLanguages).toBeNull();
+    expect(document.textAvailability?.latestConsolidated?.celex).toBe("02008R1272-20260701");
+    expect(document.textAvailability?.upcomingConsolidated?.date).toBe("2027-01-01");
+    expect(headers?.textAvailable).toBe(false);
+    expect(headers?.source).toBe("live");
+  });
+
+  it("sends acceptLanguages and surfaces the fallback labels, titleLanguage and source headers", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          success: true,
+          document: {
+            ...DOCUMENT,
+            celex: "62019TJ0123",
+            language: "fr",
+            languageRequested: "en",
+            languageFallback: "fr",
+            title: "Arrêt du Tribunal",
+            titleLanguage: "fr",
+            textAvailability: { available: true },
+          },
+        },
+        {
+          "x-source": "cellar",
+          "x-language": "fr",
+          "x-language-fallback": "fr",
+          "x-corpus-version": "3",
+          "x-corpus-fetchedat": "2026-10-01T00:00:00.000Z",
+          "x-cache": "miss",
+        },
+      ),
+    );
+
+    const result = await client(fetchMock).getDocument({
+      celexNumber: "62019TJ0123",
+      language: "en",
+      acceptLanguages: ["fr", "de"],
+    });
+
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string)).toEqual({
+      celexNumber: "62019TJ0123",
+      language: "en",
+      acceptLanguages: ["fr", "de"],
+    });
+    expect(result.document.languageFallback).toBe("fr");
+    expect(result.document.titleLanguage).toBe("fr");
+    expect(result.headers).toMatchObject({
+      source: "cellar",
+      language: "fr",
+      languageFallback: "fr",
+      corpusVersion: 3,
+      corpusFetchedAt: "2026-10-01T00:00:00.000Z",
+      cache: "miss",
+    });
+  });
+
+  it("accepts acceptLanguages: 'any' on the batch endpoint and surfaces textUnavailable + source split", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          success: true,
+          requested: 3,
+          processed: 3,
+          successful: 3,
+          failed: 0,
+          textUnavailable: 1,
+          documents: [
+            { ...DOCUMENT, titleLanguage: "en" },
+            { ...DOCUMENT, celex: "62018CJ0311" },
+            { ...DOCUMENT, celex: "32019D0003(01)", content: null, textAvailability: { available: false, reason: "not_in_language", availableLanguages: ["es", "it"] } },
+          ],
+          errors: [],
+        },
+        {
+          "x-batch-corpus-hits": "1",
+          "x-batch-cellar-served": "1",
+          "x-batch-oj-recovered": "0",
+          "x-batch-live-fetches": "1",
+          "x-batch-text-unavailable": "1",
+        },
+      ),
+    );
+
+    const result = await client(fetchMock).getDocumentsBatch({
+      celexNumbers: ["32016R0679", "62018CJ0311", "32019D0003(01)"],
+      acceptLanguages: "any",
+    });
+
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string).acceptLanguages).toBe("any");
+    expect(result.textUnavailable).toBe(1);
+    expect(result.documents[0]?.titleLanguage).toBe("en");
+    expect(result.documents[2]?.textAvailability?.availableLanguages).toEqual(["es", "it"]);
+    expect(result.headers?.batch).toEqual({
+      corpusHits: 1,
+      cellarServed: 1,
+      ojRecovered: 0,
+      liveFetches: 1,
+      textUnavailable: 1,
+    });
+  });
+
+  it("returns titleLanguage and consolidated hints on metadata", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          success: true,
+          metadata: {
+            celex: "32006R1907",
+            celexNumber: "32006R1907",
+            title: "Regulation (EC) No 1907/2006 (REACH)",
+            titleLanguage: "en",
+            author: null,
+            latestConsolidated: { celex: "02006R1907-20260622", date: "2026-06-22", source: "cellar" },
+            newestConsolidated: { celex: "02006R1907-20260622", date: "2026-06-22", source: "cellar", availableLanguages: ["et"] },
+            urls: { html: "h", metadata: "m", pdf: "p", xml: "x" },
+          },
+        },
+        { "x-source": "corpus", "x-corpus-version": "2" },
+      ),
+    );
+
+    const result = await client(fetchMock).getDocumentMetadata({ celexNumber: "32006R1907", bypassCorpus: false });
+
+    expect(result.metadata.titleLanguage).toBe("en");
+    expect(result.metadata.author).toBeNull();
+    expect(result.metadata.latestConsolidated?.celex).toBe("02006R1907-20260622");
+    expect(result.metadata.newestConsolidated?.availableLanguages).toEqual(["et"]);
+    expect(result.headers?.source).toBe("corpus");
+    // corpusVersion is only lifted to the top level on the version endpoints
+    expect((result as { corpusVersion?: number }).corpusVersion).toBeUndefined();
+    expect(result.headers?.corpusVersion).toBe(2);
+  });
+
+  it("forwards bypassCorpus on getDocumentByUrl", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        sourceUrl: "https://eur-lex.europa.eu/eli/reg/2016/679/oj",
+        extractedCelex: "32016R0679",
+        document: DOCUMENT,
+      }),
+    );
+
+    await client(fetchMock).getDocumentByUrl({
+      url: "https://eur-lex.europa.eu/eli/reg/2016/679/oj",
+      bypassCorpus: true,
+    });
+
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string)).toEqual({
+      url: "https://eur-lex.europa.eu/eli/reg/2016/679/oj",
+      bypassCorpus: true,
+    });
+  });
+
+  it("sends one recent documentType and multi-value author filters as repeated params", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        200,
+        {
+          success: true,
+          results: [],
+          languageFilter: { requested: "FR", kept: 8, beforeFilter: 10, partialMetadataKept: 2 },
+        },
+        { "x-source": "live", "x-language-filter": "FR", "x-language-kept": "8/10" },
+      ),
+    );
+
+    const result = await client(fetchMock).getRecentDocuments({
+      documentType: "regulation",
+      author: ["commission", "council"],
+      subdomain: "LEGISLATION",
+      language: "fr",
+    });
+
+    const url = new URL(lastCall(fetchMock)[0]);
+    expect(url.searchParams.getAll("documentType")).toEqual(["regulation"]);
+    expect(url.searchParams.getAll("author")).toEqual(["commission", "council"]);
+    expect(url.searchParams.get("subdomain")).toBe("LEGISLATION");
+    expect(result.languageFilter?.partialMetadataKept).toBe(2);
+    expect(result.headers?.languageFilter).toBe("FR");
+    expect(result.headers?.languageKept).toBe("8/10");
+  });
+
+  it("types corpus-backed resolution paths (ecli-corpus / eli-corpus)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true,
+        identifier: "ECLI:EU:C:2020:559",
+        identifierType: "ecli",
+        resolvedVia: "ecli-corpus",
+        celex: "62018CJ0311",
+        urls: { metadata: "m", html: "h", pdf: "p", xml: "x" },
+        credits: { operation_weight: 1, remaining: 99 },
+      }),
+    );
+
+    const result = await client(fetchMock).resolve("ECLI:EU:C:2020:559");
+
+    expect(result.resolvedVia).toBe("ecli-corpus");
+    expect(result.credits?.operation_weight).toBe(1);
   });
 });

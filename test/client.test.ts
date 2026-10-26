@@ -93,7 +93,7 @@ describe("LexAPI request construction", () => {
     expect(() => new LexAPI({})).toThrow(/apiKey/);
   });
 
-  it("throws a TimeoutError when the request exceeds timeoutMs (and does not retry)", async () => {
+  it("throws a TimeoutError (REQUEST_TIMEOUT) on a billed call and does not retry it", async () => {
     const fetchMock = vi.fn(
       (_url: unknown, init?: RequestInit) =>
         new Promise<Response>((_, reject) => {
@@ -104,10 +104,10 @@ describe("LexAPI request construction", () => {
     );
     const client = new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, timeoutMs: 10 });
 
-    const error = await client.getInfo().catch((e: unknown) => e);
+    const error = await client.getCitationStats().catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(TimeoutError);
-    expect((error as TimeoutError).code).toBe("TIMEOUT");
+    expect((error as TimeoutError).code).toBe("REQUEST_TIMEOUT");
     expect((error as TimeoutError).status).toBe(0);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -127,5 +127,24 @@ describe("LexAPI request construction", () => {
 
     expect(error).toBeInstanceOf(TimeoutError);
     expect((error as LexAPIError).message).toContain("10ms");
+  });
+});
+
+describe("defaults", () => {
+  it("uses a 95 s per-attempt timeout (above the API's 90 s upstream budget)", async () => {
+    const { DEFAULT_TIMEOUT_MS } = await import("../src/index.js");
+    expect(DEFAULT_TIMEOUT_MS).toBe(95_000);
+  });
+
+  it("percent-encodes path segments but keeps CELEX characters like R(01)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(200, { success: true, targetDocument: "x", citedBy: [] }));
+    const client = new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock });
+
+    await client.getCitedBy("32008R1272R(01)");
+    await client.getCitedBy("a/b?c#d");
+
+    const urls = fetchMock.mock.calls.map((c) => (c as unknown as [string])[0]);
+    expect(urls[0]).toBe("https://lex-api.com/api/v1/citations/cited-by/32008R1272R(01)");
+    expect(urls[1]).toBe("https://lex-api.com/api/v1/citations/cited-by/a%2Fb%3Fc%23d");
   });
 });
