@@ -9,6 +9,8 @@
  * base `LexAPIError` (forward compatibility).
  */
 
+import type { RateLimitInfo, ResponseHeaders } from "./headers.js";
+
 /** Stable error codes from the OpenAPI `ErrorResponse.error.code` enum. */
 export type ErrorCode =
   | "NOT_FOUND"
@@ -23,6 +25,8 @@ export type ErrorCode =
   | "INTERNAL"
   // Derived (not in the envelope enum): 401 has no typed code in the spec.
   | "UNAUTHORIZED"
+  // Derived: 503 (deploy drain / temporary unavailability) has no typed code.
+  | "SERVICE_UNAVAILABLE"
   // Client-side transport failure (no HTTP response at all).
   | "NETWORK_ERROR"
   // Forward compatibility: unknown codes are kept as-is.
@@ -36,8 +40,17 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
   404: "NOT_FOUND",
   429: "RATE_LIMITED",
   502: "UPSTREAM_ERROR",
+  503: "SERVICE_UNAVAILABLE",
   504: "TIMEOUT",
 };
+
+/** Extra context attached to errors built from an HTTP response. */
+export interface LexAPIErrorContext {
+  /** The parsed JSON error body, verbatim (e.g. legacy `upgradeUrl`, `current`/`limit`). */
+  body?: unknown;
+  /** Parsed response headers (rate limits, source, …). */
+  headers?: ResponseHeaders;
+}
 
 /** Base class for every error thrown by the SDK. */
 export class LexAPIError extends Error {
@@ -55,6 +68,14 @@ export class LexAPIError extends Error {
    * normalized to a delta).
    */
   readonly retryAfter: number | undefined;
+  /**
+   * The parsed JSON error body, verbatim. Useful for legacy-shape fields the
+   * typed properties don't cover (`upgradeUrl` on tier gates, `current` /
+   * `limit` on the webhook ceiling, `usage` on legacy quota 429s).
+   */
+  readonly body: unknown;
+  /** Parsed response headers, when the error came from an HTTP response. */
+  readonly headers: ResponseHeaders | undefined;
 
   constructor(
     code: ErrorCode,
@@ -62,6 +83,7 @@ export class LexAPIError extends Error {
     status: number,
     details?: unknown,
     retryAfter?: number,
+    context?: LexAPIErrorContext,
   ) {
     super(`[${code}] ${message} (HTTP ${status})`);
     this.name = "LexAPIError";
@@ -69,13 +91,20 @@ export class LexAPIError extends Error {
     this.status = status;
     this.details = details;
     this.retryAfter = retryAfter;
+    this.body = context?.body;
+    this.headers = context?.headers;
   }
 
   /**
    * Build the most specific error subclass for a non-2xx response.
    * Accepts both the typed envelope and the legacy bare `{error, message}` shape.
    */
-  static fromResponse(status: number, body: unknown, headerRetryAfter?: number): LexAPIError {
+  static fromResponse(
+    status: number,
+    body: unknown,
+    headerRetryAfter?: number,
+    headers?: ResponseHeaders,
+  ): LexAPIError {
     let code: ErrorCode = STATUS_TO_CODE[status] ?? "INTERNAL";
     let message = `HTTP ${status}`;
     let details: unknown;
@@ -92,14 +121,18 @@ export class LexAPIError extends Error {
         if (typeof e["message"] === "string") message = e["message"];
         details = e["details"];
       } else if (typeof err === "string") {
-        // Legacy bare {error: "...", message?: "..."} — `error` is a short
-        // slug or the message itself; a sibling `message` adds detail.
+        // Legacy bare {error: "...", message?: "...", details?: [...]} —
+        // `error` is a short slug or the message itself; a sibling `message`
+        // adds detail; `details` (e.g. search / webhook validation lists) is
+        // kept so callers can see WHICH field was rejected.
         message =
           typeof record["message"] === "string" && record["message"] !== err
             ? `${err}: ${record["message"]}`
             : err;
+        details = record["details"];
       } else if (typeof record["message"] === "string") {
         message = record["message"];
+        details = record["details"];
       }
       // JSON retryAfter fallback — only when the header didn't provide one.
       if (retryAfter === undefined) {
@@ -113,96 +146,175 @@ export class LexAPIError extends Error {
         readString(usageField(record, "resetsAt"));
     }
 
+    const context: LexAPIErrorContext = { body, ...(headers ? { headers } : {}) };
     switch (code) {
       case "NOT_FOUND":
-        return new NotFoundError(message, status, details, retryAfter);
+        return new NotFoundError(message, status, details, retryAfter, context);
       case "INVALID_CELEX":
-        return new InvalidCelexError(message, status, details, retryAfter);
+        return new InvalidCelexError(message, status, details, retryAfter, context);
       case "INVALID_URL":
-        return new InvalidUrlError(message, status, details, retryAfter);
+        return new InvalidUrlError(message, status, details, retryAfter, context);
       case "INVALID_PARAMS":
-        return new InvalidParamsError(message, status, details, retryAfter);
+        return new InvalidParamsError(message, status, details, retryAfter, context);
       case "RATE_LIMITED":
-        return new RateLimitedError(message, status, details, retryAfter);
+        return new RateLimitedError(message, status, details, retryAfter, context);
       case "TIER_FORBIDDEN":
-        return new TierForbiddenError(message, status, details, retryAfter);
+        return new TierForbiddenError(message, status, details, retryAfter, context);
       case "CREDITS_EXHAUSTED":
-        return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt);
+        return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
       case "UPSTREAM_ERROR":
-        return new UpstreamError(message, status, details, retryAfter);
+        return new UpstreamError(message, status, details, retryAfter, context);
       case "TIMEOUT":
-        return new TimeoutError(message, status, details, retryAfter);
+        return new TimeoutError(message, status, details, retryAfter, context);
       case "UNAUTHORIZED":
-        return new AuthenticationError(message, status, details, retryAfter);
+        return new AuthenticationError(message, status, details, retryAfter, context);
+      case "SERVICE_UNAVAILABLE":
+        return new ServiceUnavailableError(message, status, details, retryAfter, context);
       case "INTERNAL":
-        return new InternalServerError(message, status, details, retryAfter);
+        return new InternalServerError(message, status, details, retryAfter, context);
       default:
         // Unknown code: keep the raw string, never crash (forward compat).
-        return new LexAPIError(code, message, status, details, retryAfter);
+        return new LexAPIError(code, message, status, details, retryAfter, context);
     }
   }
 }
 
 /** 404 — document or resource missing (`NOT_FOUND`). */
 export class NotFoundError extends LexAPIError {
-  constructor(message: string, status = 404, details?: unknown, retryAfter?: number) {
-    super("NOT_FOUND", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 404,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("NOT_FOUND", message, status, details, retryAfter, context);
     this.name = "NotFoundError";
   }
 }
 
 /** 400 — CELEX failed validation (`INVALID_CELEX`). */
 export class InvalidCelexError extends LexAPIError {
-  constructor(message: string, status = 400, details?: unknown, retryAfter?: number) {
-    super("INVALID_CELEX", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 400,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("INVALID_CELEX", message, status, details, retryAfter, context);
     this.name = "InvalidCelexError";
   }
 }
 
 /** 400 — URL had no resolvable CELEX (`INVALID_URL`). */
 export class InvalidUrlError extends LexAPIError {
-  constructor(message: string, status = 400, details?: unknown, retryAfter?: number) {
-    super("INVALID_URL", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 400,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("INVALID_URL", message, status, details, retryAfter, context);
     this.name = "InvalidUrlError";
   }
 }
 
 /** 400 — missing or malformed params (`INVALID_PARAMS`). */
 export class InvalidParamsError extends LexAPIError {
-  constructor(message: string, status = 400, details?: unknown, retryAfter?: number) {
-    super("INVALID_PARAMS", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 400,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("INVALID_PARAMS", message, status, details, retryAfter, context);
     this.name = "InvalidParamsError";
   }
 }
 
 /** 401 — missing, invalid, or revoked API key. */
 export class AuthenticationError extends LexAPIError {
-  constructor(message: string, status = 401, details?: unknown, retryAfter?: number) {
-    super("UNAUTHORIZED", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 401,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("UNAUTHORIZED", message, status, details, retryAfter, context);
     this.name = "AuthenticationError";
   }
 }
 
-/** 429 — quota or rate ceiling hit (`RATE_LIMITED`). Check `retryAfter`. */
+/**
+ * 429 — per-minute rate limit (or, on legacy daily plans, the daily quota).
+ * Today's 429s use the legacy `{error, message, retryAfter}` body; the
+ * `Retry-After` header is authoritative and is what `retryAfter` reads first.
+ */
 export class RateLimitedError extends LexAPIError {
-  constructor(message: string, status = 429, details?: unknown, retryAfter?: number) {
-    super("RATE_LIMITED", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 429,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("RATE_LIMITED", message, status, details, retryAfter, context);
     this.name = "RateLimitedError";
+  }
+
+  /** `RateLimit-*` headers from the 429 response (limit / remaining / reset seconds). */
+  get rateLimit(): RateLimitInfo | undefined {
+    return this.headers?.rateLimit;
   }
 }
 
 /** 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade the plan. */
 export class TierForbiddenError extends LexAPIError {
-  constructor(message: string, status = 403, details?: unknown, retryAfter?: number) {
-    super("TIER_FORBIDDEN", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 403,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("TIER_FORBIDDEN", message, status, details, retryAfter, context);
     this.name = "TierForbiddenError";
   }
 }
 
-/** 402 — monthly credit pool exhausted (`CREDITS_EXHAUSTED`). Not retried. */
+/** `error.details` on a 402 `CREDITS_EXHAUSTED` envelope. */
+export interface CreditsExhaustedDetails {
+  /** The operation that was refused, e.g. `"semantic_case_law"`. */
+  operation?: string;
+  /** Its upfront credit weight (variable-priced operations are admitted against their upfront weight). */
+  weight?: number;
+  /** Credits left in the pool (monthly + top-up − used). `weight − available` is the shortfall. */
+  available?: number;
+  /** Monthly allowance. */
+  included?: number;
+  /** Top-up credits. */
+  topup?: number;
+  /** Credits used this window. */
+  used?: number;
+  /** When the monthly pool refills. */
+  resetsAt?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * 402 — monthly credit pool (incl. top-ups) cannot cover the operation
+ * (`CREDITS_EXHAUSTED`). Not retried: wait for `resetsAt`, buy a top-up, or
+ * upgrade. A cheaper operation may still succeed — compare `weight` to `available`.
+ */
 export class CreditsExhaustedError extends LexAPIError {
   /** When the monthly credit allowance resets (ISO date-time), when the server said so. */
   readonly resetsAt: string | undefined;
+  /** Typed view of `error.details` (operation, weight, available, included, topup, used, resetsAt). */
+  declare readonly details: CreditsExhaustedDetails | undefined;
 
   constructor(
     message: string,
@@ -210,17 +322,39 @@ export class CreditsExhaustedError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     resetsAt?: string,
+    context?: LexAPIErrorContext,
   ) {
-    super("CREDITS_EXHAUSTED", message, status, details, retryAfter);
+    super("CREDITS_EXHAUSTED", message, status, details, retryAfter, context);
     this.name = "CreditsExhaustedError";
     this.resetsAt = resetsAt;
+  }
+
+  /** The refused operation's credit weight (`details.weight`). */
+  get weight(): number | undefined {
+    return readNumber(this.details?.weight);
+  }
+
+  /** Credits left in the pool (`details.available`). */
+  get available(): number | undefined {
+    return readNumber(this.details?.available);
+  }
+
+  /** The refused operation (`details.operation`). */
+  get operation(): string | undefined {
+    return readString(this.details?.operation);
   }
 }
 
 /** 502 — EUR-Lex returned an error (`UPSTREAM_ERROR`). Retry-safe on GETs. */
 export class UpstreamError extends LexAPIError {
-  constructor(message: string, status = 502, details?: unknown, retryAfter?: number) {
-    super("UPSTREAM_ERROR", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 502,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("UPSTREAM_ERROR", message, status, details, retryAfter, context);
     this.name = "UpstreamError";
   }
 }
@@ -231,16 +365,45 @@ export class UpstreamError extends LexAPIError {
  * configured `timeoutMs` elapsed before a response arrived.
  */
 export class TimeoutError extends LexAPIError {
-  constructor(message: string, status = 0, details?: unknown, retryAfter?: number) {
-    super("TIMEOUT", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 0,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("TIMEOUT", message, status, details, retryAfter, context);
     this.name = "TimeoutError";
+  }
+}
+
+/**
+ * 503 — service temporarily unavailable (e.g. a deploy's drain window).
+ * Derived from the status (no typed code). Retried like 502/504.
+ */
+export class ServiceUnavailableError extends LexAPIError {
+  constructor(
+    message: string,
+    status = 503,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("SERVICE_UNAVAILABLE", message, status, details, retryAfter, context);
+    this.name = "ServiceUnavailableError";
   }
 }
 
 /** 500 — unexpected server failure (`INTERNAL`). Not retried by default. */
 export class InternalServerError extends LexAPIError {
-  constructor(message: string, status = 500, details?: unknown, retryAfter?: number) {
-    super("INTERNAL", message, status, details, retryAfter);
+  constructor(
+    message: string,
+    status = 500,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("INTERNAL", message, status, details, retryAfter, context);
     this.name = "InternalServerError";
   }
 }

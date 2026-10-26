@@ -4,6 +4,7 @@ import {
   TimeoutError,
   normalizeRetryAfterSeconds,
 } from "./errors.js";
+import { parseResponseHeaders } from "./headers.js";
 import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
@@ -17,6 +18,16 @@ export interface RetryOptions {
   baseDelayMs?: number;
   /** Cap on any single wait (computed or server-directed). Default 30 000 ms. */
   maxDelayMs?: number;
+  /**
+   * Retry read-only POST endpoints (search, document reads, semantic search,
+   * resolve, citation extraction) on 502/503/504 responses, like GETs.
+   * Default `true`: the API refunds every 5xx in full, so a retried
+   * read-only call is never double-billed. Network errors on POST are never
+   * retried (the request may have been charged before the connection died),
+   * and write endpoints (webhook create/update/delete/test) are never retried
+   * on 5xx.
+   */
+  retryReadOnlyPosts?: boolean;
 }
 
 export interface HttpClientOptions {
@@ -28,7 +39,11 @@ export interface HttpClientOptions {
   userAgentSuffix?: string | undefined;
 }
 
-export type QueryParams = Record<string, string | number | boolean | undefined>;
+/** Query values; arrays are sent as repeated parameters (`?a=x&a=y`). */
+export type QueryParams = Record<
+  string,
+  string | number | boolean | undefined | ReadonlyArray<string | number | boolean>
+>;
 
 export interface RequestOptions {
   method: "GET" | "POST" | "PUT" | "DELETE";
@@ -37,6 +52,14 @@ export interface RequestOptions {
   body?: unknown;
   /** Per-call timeout override. */
   timeoutMs?: number | undefined;
+  /** `Accept` header override (default `application/json`). */
+  accept?: string;
+  /**
+   * The request only reads (no server-side side effects beyond billing,
+   * which 5xx refunds in full) — a POST marked idempotent is retried on
+   * 502/503/504 when `retryReadOnlyPosts` is on. GETs are always idempotent.
+   */
+  idempotent?: boolean;
 }
 
 /** Statuses the SDK retries (429 rate limit, 502/503/504 transient upstream). */
@@ -63,8 +86,10 @@ function isBrowserRuntime(): boolean {
  *   `Retry-After` header → `RateLimit-Reset` header → JSON `retryAfter` body
  *   field (epoch-guarded — the field was buggy epoch-seconds until a pending
  *   server fix, which is why the HEADER is authoritative) → backoff.
- * - Non-idempotent methods (anything but GET) are retried ONLY on 429 —
- *   never on 5xx or network errors, where the request may have been applied.
+ * - Non-GET requests are retried on 429; on 502/503/504 only when marked
+ *   `idempotent` (read-only POSTs — the API refunds 5xx in full) and
+ *   `retryReadOnlyPosts` is on; NEVER on network errors, where the request
+ *   may already have been applied (and billed).
  */
 export class HttpClient {
   private readonly opts: HttpClientOptions;
@@ -106,7 +131,7 @@ export class HttpClient {
 
     const headers: Record<string, string> = {
       "x-api-key": this.opts.apiKey,
-      accept: "application/json",
+      accept: options.accept ?? "application/json",
     };
     if (!isBrowserRuntime()) {
       headers["user-agent"] = this.userAgent;
@@ -140,9 +165,10 @@ export class HttpClient {
       if (response.ok) return response;
 
       const error = await parseErrorResponse(response);
+      const idempotent =
+        method === "GET" || (options.idempotent === true && this.opts.retry.retryReadOnlyPosts);
       const retryable =
-        RETRYABLE_STATUSES.has(response.status) &&
-        (method === "GET" || response.status === 429);
+        RETRYABLE_STATUSES.has(response.status) && (idempotent || response.status === 429);
       if (attempt < maxRetries && retryable) {
         const serverWaitSeconds = serverDirectedWaitSeconds(response, error);
         const waitMs =
@@ -188,7 +214,12 @@ export async function parseErrorResponse(response: Response): Promise<LexAPIErro
   } catch {
     body = undefined;
   }
-  return LexAPIError.fromResponse(response.status, body, headerRetryAfterSeconds(response));
+  return LexAPIError.fromResponse(
+    response.status,
+    body,
+    headerRetryAfterSeconds(response),
+    parseResponseHeaders(response),
+  );
 }
 
 /** `Retry-After` header — delta-seconds or an HTTP-date. */
@@ -231,7 +262,14 @@ export function buildQuery(query?: QueryParams): string {
   if (!query) return "";
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined) params.set(key, String(value));
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value as ReadonlyArray<string | number | boolean>) {
+        params.append(key, String(item));
+      }
+    } else {
+      params.set(key, String(value));
+    }
   }
   const qs = params.toString();
   return qs ? `?${qs}` : "";
