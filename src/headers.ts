@@ -72,6 +72,8 @@ export interface ResponseHeaders {
   batch?: BatchSourceCounts;
   /** Rate-limit headroom for this API key. */
   rateLimit?: RateLimitInfo;
+  /** Raw `Retry-After` header (delta-seconds or HTTP-date), sent on per-minute 429s. */
+  retryAfter?: string;
 }
 
 /** Minimal `Headers` surface (works with polyfilled / injected fetch implementations). */
@@ -127,6 +129,7 @@ export function parseResponseHeaders(source: { headers: HeaderGetter } | HeaderG
       liveFetches: int(h, "x-batch-live-fetches"),
       textUnavailable: int(h, "x-batch-text-unavailable"),
     }),
+    retryAfter: str(h, "retry-after"),
     rateLimit: compact<RateLimitInfo>({
       limit: int(h, "ratelimit-limit"),
       remaining: int(h, "ratelimit-remaining"),

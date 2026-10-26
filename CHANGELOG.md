@@ -54,6 +54,7 @@ was audited against the spec **and** the server controllers.
   `available` and typed `details`; `RateLimitedError.rateLimit`.
 - `SubscriptionTier` includes `SCALE`; `SubscriptionInfo.maxResults`; `ResolvedVia` includes
   `ecli-corpus` / `eli-corpus`; `DocumentUrls.pdf/xml`; `Document.fetchedAt`.
+- `ResponseHeaders.retryAfter`; `RateLimitedError.quotaExhausted` / `resetsAt`.
 - `LICENSE` file, `CHANGELOG.md`, `prepublishOnly` guard, and a framework-free dist smoke test
   (`npm run smoke:dist`) that CI runs on Node 18–24.
 
@@ -75,19 +76,27 @@ was audited against the spec **and** the server controllers.
 
 ### Changed
 
-- **Read-only POSTs are retried on 502/503/504** (search, document reads, batch, by-URL, metadata,
-  resolve, citation extraction, both semantic searches), like GETs. The API refunds every 5xx in
-  full, so a retry is never double-billed. Network errors on POST are still never retried (the
-  request may have been charged), webhook writes are never retried on 5xx, and
-  `retry: { retryReadOnlyPosts: false }` restores the 0.1 behaviour.
-- Dev toolchain: vitest 2 → 4, tsup/TypeScript/@types/node patch updates (clears all `npm audit`
-  advisories, which were dev-only — the package has no runtime dependencies). CI uses `npm ci` and
-  runs the unit suite on Node 20/22/24 plus the dist smoke test on Node 18.
+- **Default timeout 60 s → 95 s** (per attempt). The API's upstream hard timeout is 90 s, so 60 s cut slow live
+  fetches client-side — the call could still be billed — instead of receiving the server's typed, refunded 504.
+  95 s stays under Cloudflare's 100 s proxy timeout. `timeoutMs: 60_000` restores the old value.
+- **Retry waits:** `RateLimit-Reset` and the JSON `retryAfter` body field now drive the wait on a **429 only**.
+  The API sends `RateLimit-*` on every response, so a retried 502/503/504 GET used to sleep for the rate window
+  (up to the 30 s cap) instead of ~0.5–4 s of backoff, and 5xx errors reported that value as `retryAfter`.
+- **Legacy quota 429s are not retried** (daily call quota, monthly semantic quota — body `usage.resetsAt`, no
+  `Retry-After`): they cannot succeed before the reset. `RateLimitedError.quotaExhausted` / `.resetsAt`.
+- **Cloudflare 520–524** are typed (`UpstreamError`; 524 → `TimeoutError`) and retried for GETs (never for POSTs).
+- New opt-in `retry.retryReadOnlyPosts` retries read-only POSTs (search, document reads, batch, by-URL, metadata,
+  resolve, citation extraction, semantic search) on 502/503/504 — the API refunds every 5xx in full. Default
+  off (shared SDK contract §1.2); POST network errors, 520–524 on POST and webhook writes are never retried.
+- Dev toolchain: vitest 2 → 4, tsup/TypeScript/@types/node patch updates (clears all `npm audit` advisories,
+  which were dev-only — the package has no runtime dependencies). CI uses `npm ci` and runs the unit suite on
+  Node 20/22/24 plus the dist smoke test on Node 18.
+- PLAN.md §1.2 / §1.6 (shared SDK contract) aligned with `lexapi-python` 0.2.0.
 
 ### Breaking changes (type-level) and migration
 
-Runtime behaviour is backward compatible except the retry change above. TypeScript users may see
-new compile errors where the old types were wrong:
+Runtime behaviour changes are the timeout / retry items under *Changed* (each restorable via options).
+TypeScript users may see new compile errors where the old types were wrong:
 
 | Change | Why | Migrate |
 | --- | --- | --- |
@@ -98,7 +107,8 @@ new compile errors where the old types were wrong:
 | `ExportDone` / `ExportMeta` field types | Matched to the real server shape. | Read `done.truncated` / `done.written` directly. |
 | `DocumentMetadata.author` is `string \| null` | Placeholder authors are now `null`. | Handle `null`. |
 | `UsageInfo.resetsAt` is `string \| null` | The credit-pool mirror can carry `null` until the first reset is set. | Handle `null`. |
-| 503 throws `ServiceUnavailableError` (was `InternalServerError`) | Distinct, retryable condition. | Catch `ServiceUnavailableError` or the base `LexAPIError`. |
+| 503 throws `ServiceUnavailableError` (was `InternalServerError`); 520–523 throw `UpstreamError`, 524 `TimeoutError` (were `InternalServerError`) | Distinct, retryable conditions. | Catch the new classes or the base `LexAPIError`. |
+| `DEFAULT_TIMEOUT_MS` is `95_000` | See *Changed*. | Pass `timeoutMs` explicitly to keep 60 s. |
 
 ## [0.1.0] — 2026-07-02
 

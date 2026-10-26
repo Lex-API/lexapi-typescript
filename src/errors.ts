@@ -42,6 +42,12 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
   502: "UPSTREAM_ERROR",
   503: "SERVICE_UNAVAILABLE",
   504: "TIMEOUT",
+  // Cloudflare edge errors (non-JSON bodies): origin unreachable / timed out.
+  520: "UPSTREAM_ERROR",
+  521: "UPSTREAM_ERROR",
+  522: "UPSTREAM_ERROR",
+  523: "UPSTREAM_ERROR",
+  524: "TIMEOUT",
 };
 
 /** Extra context attached to errors built from an HTTP response. */
@@ -134,8 +140,9 @@ export class LexAPIError extends Error {
         message = record["message"];
         details = record["details"];
       }
-      // JSON retryAfter fallback — only when the header didn't provide one.
-      if (retryAfter === undefined) {
+      // JSON retryAfter fallback — only on a 429, and only when the header
+      // didn't provide one.
+      if (retryAfter === undefined && status === 429) {
         const jsonRetryAfter = readNumber(record["retryAfter"]) ?? readNumber(detailsField(details, "retryAfter"));
         if (jsonRetryAfter !== undefined) retryAfter = normalizeRetryAfterSeconds(jsonRetryAfter);
       }
@@ -269,6 +276,26 @@ export class RateLimitedError extends LexAPIError {
   /** `RateLimit-*` headers from the 429 response (limit / remaining / reset seconds). */
   get rateLimit(): RateLimitInfo | undefined {
     return this.headers?.rateLimit;
+  }
+
+  /**
+   * `true` for a legacy-plan quota 429 (daily call quota, or the monthly
+   * semantic quota) rather than the per-minute limiter: the body carries a
+   * `usage` block with `resetsAt` and no `Retry-After` is sent. Waiting
+   * seconds cannot help — the SDK does not retry these. See `resetsAt`.
+   */
+  get quotaExhausted(): boolean {
+    if (this.retryAfterFromHeader) return false;
+    return this.resetsAt !== undefined || /quota/i.test(readString(bodyField(this.body, "error")) ?? "");
+  }
+
+  /** When a legacy quota resets (`usage.resetsAt` on quota 429s). */
+  get resetsAt(): string | undefined {
+    return readString(detailsField(bodyField(this.body, "usage"), "resetsAt"));
+  }
+
+  private get retryAfterFromHeader(): boolean {
+    return this.headers?.retryAfter !== undefined;
   }
 }
 
@@ -444,6 +471,10 @@ function detailsField(details: unknown, key: string): unknown {
     return (details as Record<string, unknown>)[key];
   }
   return undefined;
+}
+
+function bodyField(body: unknown, key: string): unknown {
+  return detailsField(body, key);
 }
 
 function usageField(record: Record<string, unknown>, key: string): unknown {

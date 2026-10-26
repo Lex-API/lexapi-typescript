@@ -5,6 +5,7 @@ import {
   LexAPI,
   NetworkError,
   RateLimitedError,
+  TimeoutError,
   UpstreamError,
 } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
@@ -201,21 +202,41 @@ describe("retry policy", () => {
   });
 });
 
-describe("read-only POST retries", () => {
-  it("retries an idempotent POST on 502/503/504 (5xx is refunded in full)", async () => {
+const OPT_IN = { ...FAST_RETRY, retryReadOnlyPosts: true };
+
+describe("read-only POST retries (opt-in)", () => {
+  it("does not retry an idempotent POST on 5xx by default", async () => {
+    const fetchMock = fetchSequence(ERR(503), OK());
+    await expect(
+      httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries an idempotent POST on 502/503/504 when opted in (5xx is refunded in full)", async () => {
     for (const status of [502, 503, 504]) {
       const fetchMock = fetchSequence(ERR(status), OK());
       await expect(
-        httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+        httpClient(fetchMock, OPT_IN).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
       ).resolves.toBeTruthy();
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("never retries a POST on Cloudflare 520–524, even when opted in", async () => {
+    for (const status of [520, 521, 522, 523, 524]) {
+      const fetchMock = fetchSequence(new Response("cf", { status }), OK());
+      await expect(
+        httpClient(fetchMock, OPT_IN).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+      ).rejects.toThrow();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });
 
   it("does not retry an idempotent POST on 500 INTERNAL", async () => {
     const fetchMock = fetchSequence(ERR(500, "INTERNAL"), OK());
     await expect(
-      httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+      httpClient(fetchMock, OPT_IN).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
     ).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -223,27 +244,14 @@ describe("read-only POST retries", () => {
   it("never retries an idempotent POST on network errors (it may have been billed)", async () => {
     const fetchMock = fetchSequence(new TypeError("socket hang up"), OK());
     await expect(
-      httpClient(fetchMock).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
+      httpClient(fetchMock, OPT_IN).requestJson({ method: "POST", path: "/search", body: {}, idempotent: true }),
     ).rejects.toThrow(NetworkError);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("honors retryReadOnlyPosts: false", async () => {
-    const fetchMock = fetchSequence(ERR(503), OK());
-    await expect(
-      httpClient(fetchMock, { ...FAST_RETRY, retryReadOnlyPosts: false }).requestJson({
-        method: "POST",
-        path: "/search",
-        body: {},
-        idempotent: true,
-      }),
-    ).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("marks every read-only client method idempotent, and webhook writes not", async () => {
     const client = (fetchMock: typeof fetch) =>
-      new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, retry: FAST_RETRY });
+      new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, retry: OPT_IN });
 
     const reads: Array<(c: LexAPI) => Promise<unknown>> = [
       (c) => c.search({ query: "x" }),
@@ -272,6 +280,114 @@ describe("read-only POST retries", () => {
       const fetchMock = fetchSequence(ERR(502), OK());
       await expect(call(client(fetchMock))).rejects.toThrow(UpstreamError);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+describe("retry wait sources and non-retryable 429s", () => {
+  it("ignores RateLimit-Reset on a retried 5xx GET (it is sent on every response)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = fetchSequence(ERR(502, "UPSTREAM_ERROR", { "ratelimit-reset": "55" }), OK());
+    const pending = httpClient(fetchMock, { maxRetries: 1, baseDelayMs: 10, maxDelayMs: 30_000, retryReadOnlyPosts: false })
+      .requestJson({ method: "GET", path: "/info" });
+    // computed backoff for attempt 0 is < baseDelayMs (10 ms), not 55 s
+    await vi.advanceTimersByTimeAsync(20);
+    await expect(pending).resolves.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not put RateLimit-Reset / JSON retryAfter on a 5xx error's retryAfter", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(502, { error: "Upstream service error", retryAfter: 42 }, { "ratelimit-reset": "55" }),
+    );
+    const error = await httpClient(fetchMock, { ...FAST_RETRY, maxRetries: 0 })
+      .requestJson({ method: "GET", path: "/info" })
+      .catch((e: unknown) => e as UpstreamError);
+    expect(error).toBeInstanceOf(UpstreamError);
+    expect((error as UpstreamError).retryAfter).toBeUndefined();
+  });
+
+  it("still honors Retry-After on a 503 GET", async () => {
+    vi.useFakeTimers();
+    const fetchMock = fetchSequence(ERR(503, "UPSTREAM_ERROR", { "retry-after": "2" }), OK());
+    const pending = httpClient(fetchMock, { maxRetries: 1, baseDelayMs: 1, maxDelayMs: 30_000, retryReadOnlyPosts: false })
+      .requestJson({ method: "GET", path: "/info" });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(600);
+    await expect(pending).resolves.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a legacy daily-quota 429 (cannot succeed before resetsAt)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        429,
+        {
+          error: "Daily quota exceeded",
+          message: "You've reached your daily limit of 1000 API calls. Resets at midnight UTC.",
+          usage: { current: 1000, limit: 1000, resetsAt: "2026-10-27T00:00:00.000Z" },
+        },
+        { "ratelimit-reset": "30" },
+      ),
+      OK(),
+    );
+    const error = await httpClient(fetchMock)
+      .requestJson({ method: "GET", path: "/info" })
+      .catch((e: unknown) => e as RateLimitedError);
+    expect(error).toBeInstanceOf(RateLimitedError);
+    expect((error as RateLimitedError).quotaExhausted).toBe(true);
+    expect((error as RateLimitedError).resetsAt).toBe("2026-10-27T00:00:00.000Z");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a legacy monthly semantic-quota 429", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(429, {
+        error: "Monthly semantic search quota exceeded",
+        message: "You've reached your monthly limit of 100 semantic searches.",
+        usage: { current: 100, limit: 100, resetsAt: "2026-11-01T00:00:00.000Z" },
+      }),
+      OK(),
+    );
+    await expect(
+      httpClient(fetchMock).requestJson({ method: "POST", path: "/search/semantic", body: {} }),
+    ).rejects.toThrow(RateLimitedError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still retries a per-minute 429 (Retry-After) and reports quotaExhausted: false", async () => {
+    const limited = jsonResponse(
+      429,
+      { error: "Rate limit exceeded", message: "…", retryAfter: 0 },
+      { "retry-after": "0" },
+    );
+    const fetchMock = fetchSequence(limited, OK());
+    await expect(httpClient(fetchMock).requestJson({ method: "GET", path: "/info" })).resolves.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const error = await httpClient(fetchSequence(limited), { ...FAST_RETRY, maxRetries: 0 })
+      .requestJson({ method: "GET", path: "/info" })
+      .catch((e: unknown) => e as RateLimitedError);
+    expect((error as RateLimitedError).quotaExhausted).toBe(false);
+  });
+
+  it("types and retries Cloudflare 520–524 on GET", async () => {
+    for (const [status, ctor] of [
+      [520, UpstreamError],
+      [521, UpstreamError],
+      [522, UpstreamError],
+      [523, UpstreamError],
+      [524, TimeoutError],
+    ] as const) {
+      const fetchMock = fetchSequence(new Response("<html>cloudflare</html>", { status }), OK());
+      await expect(httpClient(fetchMock).requestJson({ method: "GET", path: "/info" })).resolves.toBeTruthy();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      const error = await httpClient(fetchSequence(new Response("cf", { status })), { ...FAST_RETRY, maxRetries: 0 })
+        .requestJson({ method: "GET", path: "/info" })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ctor);
     }
   });
 });

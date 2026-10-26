@@ -272,8 +272,8 @@ Also: `searchSource`, `searchCache`, `warning`, `ignoredDocumentTypes`, `postFil
 const client = new LexAPI({
   apiKey: "lex_...",                     // or LEXAPI_API_KEY env var
   baseUrl: "https://lex-api.com/api/v1", // default
-  timeoutMs: 60_000,                     // per attempt; per-call override: client.getInfo({ timeoutMs: 5_000 })
-  retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 30_000, retryReadOnlyPosts: true },
+  timeoutMs: 95_000,                     // per attempt (> the API's 90 s upstream budget); per-call: client.getInfo({ timeoutMs: 5_000 })
+  retry: { maxRetries: 3, baseDelayMs: 500, maxDelayMs: 30_000, retryReadOnlyPosts: false },
   fetch: myFetch,                        // injectable transport (testing / polyfills)
   userAgentSuffix: "my-app/1.0",         // appended to `lexapi-typescript/<version>`
 });
@@ -283,11 +283,11 @@ const client = new LexAPI({
 
 Failed requests are retried up to 3 times (configurable via `retry`) with exponential backoff + full jitter:
 
-- **GET:** retried on 429, 502, 503, 504 and transport-level network errors.
-- **Read-only POSTs** (search, document reads, batch, by-URL, metadata, resolve, citation extraction, semantic search): retried on 429 and 502/503/504 — the API refunds 5xx in full, so a retry is never double-billed. Set `retryReadOnlyPosts: false` to retry them on 429 only.
-- **Never retried:** network errors on any POST (the request may already have been charged), webhook writes on 5xx, 500 `INTERNAL`, and every other 4xx (including 402 — waiting cannot help until the pool resets).
-- **Server-directed waits win:** the `Retry-After` header first, then `RateLimit-Reset`, then the JSON `retryAfter` body field (epoch-guarded).
-- Client-side timeouts throw `TimeoutError` (status 0) and are not retried.
+- **GET:** retried on 429, 502, 503, 504, Cloudflare 520–524 and transport-level network errors.
+- **POST / PUT / DELETE:** retried on 429 only. Opt in with `retry: { retryReadOnlyPosts: true }` to also retry the read-only POSTs (search, document reads, batch, by-URL, metadata, resolve, citation extraction, semantic search) on 502/503/504 — the API refunds 5xx in full, so such a retry is not double-billed. Network errors and 520–524 on POST are never retried (the request may already have reached the API and been charged); webhook writes never retry on 5xx.
+- **Never retried:** 500 `INTERNAL`, every other 4xx (402 cannot succeed until the pool resets), and legacy-plan quota 429s (`RateLimitedError.quotaExhausted` — daily / monthly-semantic quota, see `resetsAt`).
+- **Server-directed waits win:** the `Retry-After` header (any status); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` body field (epoch-guarded). `RateLimit-*` is sent on every response, so it never drives the wait for a 5xx.
+- The default per-attempt timeout is 95 s — above the API's 90 s upstream budget, so a slow live fetch ends in the server's typed, refunded 504. Client-side timeouts throw `TimeoutError` (status 0) and are not retried.
 
 ## Typed errors
 
@@ -299,7 +299,8 @@ import { CreditsExhaustedError, NotFoundError, RateLimitedError, TierForbiddenEr
 try {
   await client.semanticSearch({ query: "gdpr" });
 } catch (err) {
-  if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
+  if (err instanceof RateLimitedError && err.quotaExhausted) console.log(`legacy quota resets ${err.resetsAt}`);
+  else if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
   else if (err instanceof CreditsExhaustedError) console.log(`need ${err.weight}, have ${err.available}; resets ${err.resetsAt}`);
   else if (err instanceof TierForbiddenError) console.log((err.body as { upgradeUrl?: string })?.upgradeUrl);
   else if (err instanceof NotFoundError) console.log("no such document");
@@ -316,9 +317,9 @@ try {
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
 | `RateLimitedError` | `RATE_LIMITED` | 429 |
 | `InternalServerError` | `INTERNAL` | 500 |
-| `UpstreamError` | `UPSTREAM_ERROR` | 502 |
+| `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
-| `TimeoutError` | `TIMEOUT` | 504, or 0 for a client-side timeout |
+| `TimeoutError` | `TIMEOUT` | 504; Cloudflare 524; 0 for a client-side timeout |
 | `NetworkError` | `NETWORK_ERROR` | 0 (no response) |
 
 Both the typed envelope (`{success: false, error: {code, message, details}}`) and the legacy bare `{error, message, details?}` shape (still used by 429s, API-key 401s, `/search` and webhook validation, the export tier gate and semantic upstream errors) are parsed; unknown codes stay on the base `LexAPIError` with the raw code string.

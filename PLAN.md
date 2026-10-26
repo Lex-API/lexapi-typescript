@@ -18,13 +18,14 @@ Source of truth: `openapi.yaml` (LexAPI 2.0.0, OpenAPI 3.1.0). Production base U
 ### 1.2 Retries and rate limiting
 
 - Default retry policy: up to 3 retries with exponential backoff + full jitter (base 500 ms, cap 30 s).
-- Retryable: HTTP 429 (`RATE_LIMITED`), 502 (`UPSTREAM_ERROR`), 504 (`TIMEOUT` — spec marks this retry-safe), and transport-level network errors. Non-retryable: all other 4xx (including 402 `CREDITS_EXHAUSTED` — retrying cannot help until top-up/reset) and 500 `INTERNAL` by default.
+- Retryable: HTTP 429 (`RATE_LIMITED`), 502 (`UPSTREAM_ERROR`), 503, 504 (`TIMEOUT` — spec marks this retry-safe), Cloudflare 520–524, and transport-level network errors. Non-retryable: all other 4xx (including 402 `CREDITS_EXHAUSTED` — retrying cannot help until top-up/reset), a legacy-plan 429 that reports an exhausted *quota* (`usage.resetsAt` in the body, no `retryAfter`), and 500 `INTERNAL` by default.
 - Server-directed wait wins over computed backoff. Resolution order for the wait duration on 429:
-  1. `Retry-After` response header (seconds; documented in the spec's `RateLimited` response),
-  2. `RateLimit-*` headers (`RateLimit-Remaining`, `RateLimit-Reset` / draft IETF forms) when present,
-  3. the JSON `retryAfter` field on the 429 error body, when present,
+  1. `Retry-After` response header (seconds; documented in the spec's `RateLimited` response) — on any status,
+  2. on a 429 only: `RateLimit-Reset` (draft-6, delta-seconds). LexAPI sends `RateLimit-*` on **every** `/api/v1` response, so outside a 429 it describes the rate window and must not drive retry waits,
+  3. on a 429 only: the JSON `retryAfter` field on the error body,
   4. computed exponential backoff as fallback.
-- Retry behaviour is configurable (max attempts, disable entirely). Idempotent GETs retry by default. Non-GET calls retry on 429; **read-only POSTs** (search, document reads, semantic search, resolve, citation extraction) additionally retry on 502/503/504 because the API refunds every 5xx in full (TypeScript: `retry.retryReadOnlyPosts`, default on). Network errors on POST are never retried (the request may have been billed); write endpoints (webhook create/update/delete/test) never retry on 5xx.
+- Retry behaviour is configurable (max attempts, disable entirely). Idempotent GETs retry by default; non-GET calls retry only on 429/network-error-before-send unless the caller opts in.
+  - TypeScript: the opt-in is `retry.retryReadOnlyPosts` (read-only POSTs on 502/503/504 — the API refunds every 5xx in full); POST network errors and Cloudflare 520–524 on POST are never retried, since the request may have reached the origin and been billed.
 
 ### 1.3 Typed errors
 
@@ -51,7 +52,7 @@ Source of truth: `openapi.yaml` (LexAPI 2.0.0, OpenAPI 3.1.0). Production base U
 
 ### 1.6 Timeouts
 
-- Defaults: 10 s connect, 60 s read/overall (the API's upstream hard timeout is 90 s; staying under it means the SDK sees the typed 504 rather than cutting the connection). Both configurable per-client and per-call.
+- Defaults: 10 s connect, 95 s read/overall. The API's upstream hard timeout is 90 s and Cloudflare's proxy timeout 100 s: staying *above* 90 s means the SDK receives the server's typed (refunded) 504 rather than cutting the connection first. Both configurable per-client and per-call (Python: `with_options`; TypeScript: `timeoutMs` / per-call `{ timeoutMs }`, a single per-attempt budget — `fetch` has no separate connect timeout).
 
 ### 1.7 User agent
 

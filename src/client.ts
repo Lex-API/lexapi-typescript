@@ -55,14 +55,15 @@ export interface LexAPIOptions {
   /** API base URL. Defaults to production (`https://lex-api.com/api/v1`). */
   baseUrl?: string;
   /**
-   * Per-request timeout in milliseconds (per attempt). Default 60_000 —
-   * below the API's 90 s upstream hard timeout, so the typed 504 arrives
-   * before the connection is cut.
+   * Per-request timeout in milliseconds (per attempt). Default 95_000 —
+   * above the API's 90 s upstream hard timeout, so a slow live fetch ends in
+   * the server's typed (and refunded) 504 instead of a client-side abort,
+   * and below Cloudflare's 100 s proxy timeout.
    */
   timeoutMs?: number;
   /** Injectable fetch (used for testing / polyfills). Defaults to global fetch. */
   fetch?: typeof fetch;
-  /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap, read-only POSTs retried on 502/503/504. */
+  /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap; read-only POST 5xx retries are opt-in. */
   retry?: RetryOptions;
   /** Optional suffix appended to the `User-Agent` header. */
   userAgentSuffix?: string;
@@ -111,7 +112,7 @@ export class LexAPI {
         maxRetries: options.retry?.maxRetries ?? 3,
         baseDelayMs: options.retry?.baseDelayMs ?? 500,
         maxDelayMs: options.retry?.maxDelayMs ?? 30_000,
-        retryReadOnlyPosts: options.retry?.retryReadOnlyPosts ?? true,
+        retryReadOnlyPosts: options.retry?.retryReadOnlyPosts ?? false,
       },
       userAgentSuffix: options.userAgentSuffix,
     });

@@ -1,6 +1,7 @@
 import {
   LexAPIError,
   NetworkError,
+  RateLimitedError,
   TimeoutError,
   normalizeRetryAfterSeconds,
 } from "./errors.js";
@@ -8,7 +9,12 @@ import { parseResponseHeaders } from "./headers.js";
 import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
-export const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * 95 s: above the API's 90 s upstream hard timeout (so a slow live fetch
+ * ends in the server's typed, refunded 504 rather than a client abort that
+ * may still be billed) and below Cloudflare's 100 s proxy timeout.
+ */
+export const DEFAULT_TIMEOUT_MS = 95_000;
 
 /** Retry policy knobs (SDK contract §1.2). */
 export interface RetryOptions {
@@ -19,13 +25,14 @@ export interface RetryOptions {
   /** Cap on any single wait (computed or server-directed). Default 30 000 ms. */
   maxDelayMs?: number;
   /**
-   * Retry read-only POST endpoints (search, document reads, semantic search,
-   * resolve, citation extraction) on 502/503/504 responses, like GETs.
-   * Default `true`: the API refunds every 5xx in full, so a retried
-   * read-only call is never double-billed. Network errors on POST are never
-   * retried (the request may have been charged before the connection died),
-   * and write endpoints (webhook create/update/delete/test) are never retried
-   * on 5xx.
+   * Opt in to retrying read-only POST endpoints (search, document reads,
+   * semantic search, resolve, citation extraction) on 502/503/504, like
+   * GETs. Default `false` (SDK contract §1.2: non-GET calls retry only on
+   * 429 unless the caller opts in). The API refunds every 5xx in full, so a
+   * retried read-only call is not double-billed. Even when enabled, network
+   * errors and Cloudflare 520–524 on POST are never retried (the request may
+   * have reached the origin and been charged), and write endpoints (webhook
+   * create/update/delete/test) never retry on 5xx.
    */
   retryReadOnlyPosts?: boolean;
 }
@@ -62,8 +69,13 @@ export interface RequestOptions {
   idempotent?: boolean;
 }
 
-/** Statuses the SDK retries (429 rate limit, 502/503/504 transient upstream). */
-const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+/** Transient statuses retried for idempotent requests (opted-in read-only POSTs use the same set minus 520–524). */
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504, 520, 521, 522, 523, 524]);
+/**
+ * Cloudflare edge errors (520–524): retried for GETs only — a POST may have
+ * reached the origin (524 = origin still working) and been charged.
+ */
+const CLOUDFLARE_STATUSES = new Set([520, 521, 522, 523, 524]);
 
 /**
  * Browsers forbid setting the `User-Agent` header (and this SDK is
@@ -86,10 +98,12 @@ function isBrowserRuntime(): boolean {
  *   `Retry-After` header → `RateLimit-Reset` header → JSON `retryAfter` body
  *   field (epoch-guarded — the field was buggy epoch-seconds until a pending
  *   server fix, which is why the HEADER is authoritative) → backoff.
- * - Non-GET requests are retried on 429; on 502/503/504 only when marked
- *   `idempotent` (read-only POSTs — the API refunds 5xx in full) and
- *   `retryReadOnlyPosts` is on; NEVER on network errors, where the request
- *   may already have been applied (and billed).
+ * - GETs retry on 429, 502/503/504, Cloudflare 520–524 and network errors.
+ * - Non-GET requests retry on 429; on 502/503/504 only when marked
+ *   `idempotent` (read-only POSTs) AND the caller opted in with
+ *   `retryReadOnlyPosts`; NEVER on network errors or 520–524, where the
+ *   request may already have been applied (and billed).
+ * - Legacy quota-exhausted 429s (daily / monthly-semantic) are never retried.
  */
 export class HttpClient {
   private readonly opts: HttpClientOptions;
@@ -165,10 +179,14 @@ export class HttpClient {
       if (response.ok) return response;
 
       const error = await parseErrorResponse(response);
-      const idempotent =
-        method === "GET" || (options.idempotent === true && this.opts.retry.retryReadOnlyPosts);
+      const status = response.status;
+      const readOnlyPostRetry =
+        options.idempotent === true && this.opts.retry.retryReadOnlyPosts && !CLOUDFLARE_STATUSES.has(status);
       const retryable =
-        RETRYABLE_STATUSES.has(response.status) && (idempotent || response.status === 429);
+        RETRYABLE_STATUSES.has(status) &&
+        (method === "GET" || status === 429 || readOnlyPostRetry) &&
+        // Legacy daily / monthly-semantic quota 429s cannot succeed before `resetsAt`.
+        !(error instanceof RateLimitedError && error.quotaExhausted);
       if (attempt < maxRetries && retryable) {
         const serverWaitSeconds = serverDirectedWaitSeconds(response, error);
         const waitMs =
@@ -237,10 +255,14 @@ function headerRetryAfterSeconds(response: Response): number | undefined {
  * Server-directed wait, resolved in the SDK contract's precedence order:
  * `Retry-After` header → `RateLimit-Reset` header (draft IETF delta-seconds)
  * → JSON `retryAfter` body field (already epoch-normalized on the error).
+ * Only `Retry-After` applies to non-429 statuses: the API sends `RateLimit-*`
+ * on EVERY response, so reading `RateLimit-Reset` on a 502/504 would sleep
+ * for the rate window instead of backing off.
  */
 function serverDirectedWaitSeconds(response: Response, error: LexAPIError): number | undefined {
   const header = headerRetryAfterSeconds(response);
   if (header !== undefined) return header;
+  if (response.status !== 429) return undefined;
   const rateLimitReset = response.headers.get("ratelimit-reset");
   if (rateLimitReset !== null) {
     const seconds = Number(rateLimitReset);

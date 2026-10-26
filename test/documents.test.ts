@@ -122,7 +122,7 @@ describe("search", () => {
     expect(result.xWarning).toBe("maxPages clamped to 5 for tier STARTER");
   });
 
-  it("retries on 429, and on 502 because search is a read-only POST (5xx is refunded)", async () => {
+  it("retries on 429 but not on 502 by default (non-GET; SDK contract §1.2)", async () => {
     const rateLimited = jsonResponse(429, { success: false, error: { code: "RATE_LIMITED", message: "slow down" } });
     const ok = jsonResponse(200, SEARCH_BODY);
     const fetchMock = fetchSequence(rateLimited, ok);
@@ -131,20 +131,20 @@ describe("search", () => {
 
     const upstream = jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "EUR-Lex down" } });
     const fetchMock2 = fetchSequence(upstream, ok);
-    await expect(client(fetchMock2).search({ query: "GDPR" })).resolves.toBeTruthy();
-    expect(fetchMock2).toHaveBeenCalledTimes(2);
+    await expect(client(fetchMock2).search({ query: "GDPR" })).rejects.toThrow(UpstreamError);
+    expect(fetchMock2).toHaveBeenCalledTimes(1);
   });
 
-  it("does not retry search on 502 when retryReadOnlyPosts is off", async () => {
+  it("retries search on 502 when retryReadOnlyPosts is opted in (5xx is refunded)", async () => {
     const upstream = jsonResponse(502, { success: false, error: { code: "UPSTREAM_ERROR", message: "EUR-Lex down" } });
     const fetchMock = fetchSequence(upstream, jsonResponse(200, SEARCH_BODY));
-    const strict = new LexAPI({
+    const optedIn = new LexAPI({
       apiKey: "lex_test_key",
       fetch: fetchMock,
-      retry: { ...FAST_RETRY, retryReadOnlyPosts: false },
+      retry: { ...FAST_RETRY, retryReadOnlyPosts: true },
     });
-    await expect(strict.search({ query: "GDPR" })).rejects.toThrow(UpstreamError);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(optedIn.search({ query: "GDPR" })).resolves.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("sends fresh and surfaces hint, cache and source headers", async () => {
