@@ -93,8 +93,11 @@ was audited against the spec **and** the server controllers.
   `totalCitations`, which counts distinct pairs (raw rows can outnumber it). They now stop on a short page.
 - `BatchDocumentError` used field names the server never sends: it is `{ celex, error }` (the README example
   printed `undefined`).
-- `getRecentDocuments({ documentType: [...] })` silently used only the first type (the endpoint has no
-  fan-out); `documentType` now takes one value.
+- `getRecentDocuments({ documentType: [...] })` / `({ subdomain: [...] })` silently used only the first value
+  (the endpoint has no fan-out and EUR-Lex reads the first `DTS_SUBDOM` only); both now take one value.
+  `search()` keeps multi-value `subdomain` (the web service ORs them) with a documented caveat for the
+  result-page fallback. `author` arrays work on both (every `AU_CODED` is sent and ORed).
+- Aborting an export now releases the connection immediately, even while nobody is iterating.
 - A 200 with a non-JSON body threw a raw `SyntaxError` (now `InvalidResponseError`); an empty `Retry-After`
   meant a 0 ms retry (now ignored); unmapped 4xx were `InternalServerError` (now a base `LexAPIError`, code
   `INTERNAL` per §1.3); an empty webhook secret threw a raw Web Crypto `DataError` (now
@@ -117,7 +120,8 @@ Retries, timeouts and error codes now follow the shared SDK contract (PLAN.md §
 `lexapi-python`) — **an SDK retries only when the retry cannot charge the caller twice**:
 
 - **Retry decision table (§1.2).** 429 that is not a quota: every call. Never reached the server (DNS failure,
-  connection refused/unreachable, connect timeout; Cloudflare 521/522/523): every call. App-origin
+  connection refused/unreachable, connect timeout incl. `ETIMEDOUT` with `syscall: "connect"`, TLS
+  certificate-verification and handshake-alert failures; Cloudflare 521/522/523): every call. App-origin
   502/503/504: GETs, and read-only POSTs only with the opt-in. Proxy-origin 502/503/504, 520, 524 and any other
   transport error (reset, closed connection — `fetch` cannot tell before-response from mid-response — read
   timeout): **free calls only** (`getInfo`, webhook reads). Never: quota 429, 4xx, 500.
@@ -170,6 +174,7 @@ sees are also in this table. TypeScript users may see new compile errors where t
 | `SubscriptionTier` gains `SCALE` and an open `(string & {})`; `CitationType` gains `corrigendum`; `DocumentTypeCode` gains `consolidated_text` | New API values. | Add the cases; a `Record<SubscriptionTier, …>` needs a fallback. |
 | `RecentDocumentsResponse.parameters.documentType/author/subdomain` are `string \| string[] \| null` | Echo of repeated query params. | Handle arrays. |
 | `RecentDocumentsParams.documentType` is a single `DocumentType` | The endpoint uses only the first type. | Pass one type, or use `search()` for several. |
+| `RecentDocumentsParams.subdomain` is a single `Subdomain` | A subdomain filter sends the request to EUR-Lex result pages, where EUR-Lex reads only the first `DTS_SUBDOM`. | Pass one subdomain, or use `search()` (the web service ORs several). |
 | `BatchDocumentError` is `{ celex, error }` (`celexNumber` / `message` deprecated, never sent) | Matches the server. | Read `e.celex` and `e.error`. |
 | `Section.number` / `Section.title` and `Recital.number` may be `null`; `SearchResult.celex` may be `null` | The parser emits `null` when the markup has no value. | Handle `null`. |
 | `stream.done` is the lifted trailer (`done.truncated`, `done.written`) — 0.1 exposed the raw `{_done: {…}}` | Raw key kept as `done._done`. | Read the top-level fields. |

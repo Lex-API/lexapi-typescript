@@ -91,27 +91,65 @@ export interface AttemptContext {
 }
 
 /**
- * Error codes of a transport failure where the request PROVABLY NEVER
- * REACHED THE SERVER (SDK contract §1.2): DNS failure, connection refused /
- * unreachable, connect timeout, TLS handshake failure. `fetch` cannot tell a connection closed
- * before the response from one closed mid-response (a reset, "other side
- * closed"), so those are NOT treated as never-reached: on a billed call they
- * surface as `NetworkError` instead of being retried.
+ * Transport failures where the request PROVABLY NEVER REACHED THE SERVER
+ * (SDK contract §1.2). Every one happens before undici writes a single
+ * request byte: undici only writes the request after the TCP connect (and,
+ * for HTTPS, the TLS handshake) has completed.
+ *
+ * - DNS: `ENOTFOUND`, `EAI_AGAIN` (getaddrinfo — before any socket exists).
+ * - TCP connect: `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, and undici's
+ *   `UND_ERR_CONNECT_TIMEOUT`.
+ * - TLS handshake: X.509 certificate-verification codes (raised only while
+ *   verifying the server certificate during the handshake) and the
+ *   handshake-alert / protocol-negotiation `ERR_SSL_*` codes listed below
+ *   (raised only before the handshake completes). Post-handshake TLS
+ *   errors (bad record MAC, decryption failures) are deliberately absent.
+ *
+ * `ETIMEDOUT` is ambiguous on its own (it is also a TCP retransmission
+ * timeout on an established connection, i.e. possibly after send), so it
+ * counts only when the error says `syscall: "connect"` — Node's connect
+ * timeout, e.g. under `autoSelectFamily` (often inside an `AggregateError`).
+ *
+ * `fetch` cannot tell a connection closed before the response from one
+ * closed mid-response (a reset, "other side closed"), so those are NOT
+ * never-reached: on a billed call they surface as `NetworkError`.
  */
 const NEVER_REACHED_CODES = new Set([
-  "ECONNREFUSED",
+  // DNS
   "ENOTFOUND",
   "EAI_AGAIN",
+  // TCP connect
+  "ECONNREFUSED",
   "EHOSTUNREACH",
   "ENETUNREACH",
   "UND_ERR_CONNECT_TIMEOUT",
-  // TLS handshake failures — the request was never sent.
+  // TLS certificate verification (handshake)
   "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_REVOKED",
+  "CERT_UNTRUSTED",
+  "CERT_REJECTED",
+  "CERT_SIGNATURE_FAILURE",
   "DEPTH_ZERO_SELF_SIGNED_CERT",
   "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "HOSTNAME_MISMATCH",
   "ERR_TLS_CERT_ALTNAME_INVALID",
+  // TLS handshake alerts / protocol negotiation
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+  "ERR_SSL_UNSUPPORTED_PROTOCOL",
+  "ERR_SSL_NO_PROTOCOLS_AVAILABLE",
+  "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+  "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION",
+  "ERR_SSL_TLSV1_ALERT_UNKNOWN_CA",
+  "ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE",
+  "ERR_SSL_SSLV3_ALERT_CERTIFICATE_EXPIRED",
 ]);
+
+/** Codes that are connect-phase only when the error carries `syscall: "connect"`. */
+const CONNECT_SYSCALL_CODES = new Set(["ETIMEDOUT"]);
 
 /** Cloudflare: web server down / connection timed out / origin unreachable — never reached the app. */
 const NEVER_REACHED_STATUSES = new Set([521, 522, 523]);
@@ -121,14 +159,23 @@ const ORIGIN_DEPENDENT_STATUSES = new Set([502, 503, 504]);
 const PROXY_STATUSES = new Set([520, 524]);
 
 /** `true` when a transport error (or one of its causes) carries a never-reached-the-app code. */
-export function isNeverReachedError(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 6 && typeof current === "object" && current !== null; depth++) {
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === "string" && NEVER_REACHED_CODES.has(code)) return true;
-    current = (current as { cause?: unknown }).cause;
+export function isNeverReachedError(error: unknown, depth = 0): boolean {
+  if (depth > 6 || typeof error !== "object" || error === null) return false;
+  const { code, syscall, cause, errors } = error as {
+    code?: unknown;
+    syscall?: unknown;
+    cause?: unknown;
+    errors?: unknown;
+  };
+  if (typeof code === "string") {
+    if (NEVER_REACHED_CODES.has(code)) return true;
+    if (CONNECT_SYSCALL_CODES.has(code) && syscall === "connect") return true;
   }
-  return false;
+  // AggregateError (happy-eyeballs connect): never-reached only if EVERY attempt was.
+  if (Array.isArray(errors) && errors.length > 0 && errors.every((e) => isNeverReachedError(e, depth + 1))) {
+    return true;
+  }
+  return isNeverReachedError(cause, depth + 1);
 }
 
 /**

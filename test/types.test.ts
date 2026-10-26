@@ -43,3 +43,15 @@ describe("review S7", () => {
     >();
   });
 });
+
+describe("round 2 — R1", () => {
+  it("getRecentDocuments takes a single subdomain (EUR-Lex reads only the first DTS_SUBDOM)", () => {
+    expectTypeOf<import("../src/index.js").RecentDocumentsParams["subdomain"]>().toEqualTypeOf<
+      import("../src/index.js").Subdomain | undefined
+    >();
+    // author arrays stay: every AU_CODED is appended and EUR-Lex ORs them
+    expectTypeOf<["commission", "council"]>().toMatchTypeOf<
+      NonNullable<import("../src/index.js").RecentDocumentsParams["author"]>
+    >();
+  });
+});

@@ -492,6 +492,13 @@ export interface SearchRequest {
   author?: OneOrMany<Author>;
   procedure?: OneOrMany<Procedure>;
   domain?: Domain;
+  /**
+   * One subdomain or several. Several are ORed when the EUR-Lex web service
+   * answers (`headers.searchSource === "soap"`, the normal path). If the
+   * search falls back to EUR-Lex result pages (no `searchSource`), EUR-Lex
+   * applies only the FIRST subdomain; the Cellar listing fallback does not
+   * take several at all. Pass one subdomain when the result set must be exact.
+   */
   subdomain?: OneOrMany<Subdomain>;
   language?: Language;
   /**
@@ -648,9 +655,15 @@ export interface RecentDocumentsParams {
    * (no fan-out, unlike `/search`), so the SDK accepts a single value.
    */
   documentType?: DocumentType;
+  /** One author or several (sent as repeated params; EUR-Lex ORs them). */
   author?: OneOrMany<Author>;
   domain?: Domain;
-  subdomain?: OneOrMany<Subdomain>;
+  /**
+   * ONE subdomain. A subdomain filter sends the request to EUR-Lex result
+   * pages, where EUR-Lex reads only the first `DTS_SUBDOM` value
+   * (lex-api `server/utils/urlBuilder.js`), so the SDK accepts a single value.
+   */
+  subdomain?: Subdomain;
   /** Result language (default `en`). */
   language?: Language;
   /** Maximum number of results to return. Default 50 (3 credits per ~10 results, tier-capped). */

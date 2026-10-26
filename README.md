@@ -288,7 +288,7 @@ The SDK retries automatically **only when a retry cannot charge you twice** (the
 |---|---|---|---|---|
 | 429, not a quota | retry | retry | retry | retry |
 | 429 reporting an exhausted quota (`RateLimitedError.quotaExhausted`) | no | no | no | no |
-| Never reached the server (DNS failure, connection refused/unreachable, connect timeout; Cloudflare 521/522/523) | retry | retry | retry | retry |
+| Never reached the server (DNS failure, connection refused/unreachable, connect timeout, TLS handshake failure; Cloudflare 521/522/523) | retry | retry | retry | retry |
 | App-origin 502 / 503 / 504 | retry | retry | only with `retry: { retryReadOnlyPosts: true }` | no |
 | Proxy-origin 502 / 503 / 504, 520, 524 | no | retry | no | no |
 | Any other transport error (reset, connection closed — `fetch` cannot tell before-response from mid-response — read error, `REQUEST_TIMEOUT`) | no | retry | no | no |

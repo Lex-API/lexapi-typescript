@@ -366,3 +366,37 @@ describe("§1.8 export stream", () => {
     expect(plain.truncated).toBe(true);
   });
 });
+
+describe("§1.2 never-reached transport codes (round 2 — R5)", () => {
+  const billed = async (cause: unknown) => {
+    const fetchMock = fetchSequence(Object.assign(new TypeError("fetch failed"), { cause }) as unknown as Response, OK());
+    await http(fetchMock).requestJson({ method: "POST", path: "/webhooks", body: {} }).catch(() => undefined);
+    return fetchMock.mock.calls.length;
+  };
+
+  it("pre-handshake TLS failures are never-reached (retried even on a mutating call)", async () => {
+    for (const code of [
+      "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "CERT_NOT_YET_VALID", "HOSTNAME_MISMATCH",
+      "ERR_SSL_WRONG_VERSION_NUMBER", "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+    ]) {
+      expect({ code, n: await billed({ code }) }).toEqual({ code, n: 2 });
+    }
+  });
+
+  it("ETIMEDOUT counts only with syscall 'connect' (incl. an AggregateError of connect attempts)", async () => {
+    expect(await billed({ code: "ETIMEDOUT", syscall: "connect" })).toBe(2);
+    expect(await billed({ code: "ETIMEDOUT" })).toBe(1); // e.g. a TCP retransmission timeout after send
+    expect(await billed({ code: "ETIMEDOUT", syscall: "read" })).toBe(1);
+    const happyEyeballs = new AggregateError(
+      [Object.assign(new Error("a"), { code: "ETIMEDOUT", syscall: "connect" }), Object.assign(new Error("b"), { code: "ECONNREFUSED" })],
+      "connect failed",
+    );
+    expect(await billed(happyEyeballs)).toBe(2);
+    const mixed = new AggregateError([Object.assign(new Error("a"), { code: "ETIMEDOUT", syscall: "connect" }), new Error("other")]);
+    expect(await billed(mixed)).toBe(1);
+  });
+
+  it("post-handshake TLS errors are not never-reached", async () => {
+    expect(await billed({ code: "ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC" })).toBe(1);
+  });
+});

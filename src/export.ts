@@ -214,15 +214,26 @@ class NdjsonReader {
   /** Data rows handed out so far (for error messages). */
   rows = 0;
 
+  /** Releases the connection the moment the caller aborts — even while nobody is reading. */
+  private readonly onAbort = (): void => this.cancel();
+
   constructor(
     body: ReadableStream<Uint8Array>,
     private readonly options: ExportStreamOptions,
   ) {
     this.reader = body.getReader();
+    const { signal } = options;
+    if (signal?.aborted) this.cancel();
+    else signal?.addEventListener("abort", this.onAbort, { once: true });
   }
 
   /** Next trimmed, non-empty line, or `undefined` at EOF. */
   async nextLine(): Promise<string | undefined> {
+    const { signal } = this.options;
+    if (signal?.aborted) {
+      this.cancel();
+      throw new RequestAbortedError("Export stream was aborted", signal.reason);
+    }
     for (;;) {
       const line = this.ready.shift();
       if (line !== undefined) return line;
@@ -279,6 +290,9 @@ class NdjsonReader {
     });
     try {
       const result = await Promise.race([this.reader.read(), interruptions]);
+      // The abort listener cancels the body, which can settle the pending
+      // read as "done" before the rejection above wins the race.
+      if (signal?.aborted) throw new RequestAbortedError("Export stream was aborted", signal.reason);
       return result.done ? undefined : result.value;
     } catch (cause) {
       this.cancel();
@@ -305,6 +319,7 @@ class NdjsonReader {
   private release(): void {
     if (this.released) return;
     this.released = true;
+    this.options.signal?.removeEventListener("abort", this.onAbort);
     try {
       this.reader.releaseLock();
     } catch {

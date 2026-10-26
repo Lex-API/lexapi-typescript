@@ -143,9 +143,9 @@ Names marked *(to add)* do not exist yet in that SDK; when it implements the rul
 | Timeouts (§1.6) | `timeout=` (R) and `connect_timeout=` (C); per call `client.with_options(...)` | `timeoutMs` (R, connect included); per call `{ timeoutMs }` |
 | 503 error type (§1.3) | `ServiceUnavailableError` (subclass of `UpstreamError` for 0.1.x compatibility) | `ServiceUnavailableError` |
 | Transport error types | `LexAPIConnectionError`, `RequestTimeoutError` | `NetworkError`, `TimeoutError` with status 0 |
-| 2xx non-JSON (§1.3) | `InvalidResponseError` | `InvalidResponseError` *(to add)* |
-| Export completeness (§1.8) | `IncompleteExportError`; `stream.complete`, `stream.rows_read`, `stream.invalid_lines` | `IncompleteExportError`; `stream.complete`, `stream.rowsRead`, `stream.invalidLines` *(to add)* |
-| Webhook helpers (§1.9) | `verify_webhook`, `verify_signature`, `compute_signature`, `WebhookSignatureError` | `verifyWebhook`, `verifySignature`, `computeSignature`, `WebhookSignatureError` *(to add)* |
+| 2xx non-JSON (§1.3) | `InvalidResponseError` | `InvalidResponseError` |
+| Export completeness (§1.8) | `IncompleteExportError`; `stream.complete`, `stream.rows_read`, `stream.invalid_lines` | `IncompleteExportError`; `stream.complete`, `stream.rowsRead`, `stream.invalidLines` |
+| Webhook helpers (§1.9) | `verify_webhook`, `verify_signature`, `compute_signature`, `WebhookSignatureError` | `verifyWebhook`, `verifySignature`, `computeSignature`, `WebhookSignatureError` |
 
 ## 2. Endpoint coverage matrix
 

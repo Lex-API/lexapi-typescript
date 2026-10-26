@@ -246,9 +246,9 @@ export class LexAPI {
    * **Cost: 3 credits per result page** (~10 results each, tier-capped);
    * unfiltered requests are answered from Cellar in one query
    * (`headers.source === "cellar"`) and settle at a single page. `author`
-   * / `subdomain` arrays are sent as repeated query parameters;
-   * `documentType` takes ONE type — the endpoint has no multi-type fan-out
-   * (use `search` for that). `languageFilter`
+   * arrays are sent as repeated query parameters; `documentType` and
+   * `subdomain` take ONE value — EUR-Lex applies only the first of several
+   * on this path (use `search` for multi-type / multi-subdomain queries). `languageFilter`
    * reports rows dropped by the language post-filter.
    */
   async getRecentDocuments(

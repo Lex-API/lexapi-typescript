@@ -464,3 +464,21 @@ describe("S6 — batch errors as the server sends them", () => {
     expect(result.errors[0]?.error).toContain("No document found");
   });
 });
+
+describe("round 2 — R2: abort releases the export connection even while nobody reads", () => {
+  it("closes the socket on abort with no iteration in progress, then iteration throws ABORTED", async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "application/x-ndjson" });
+      res.write(`${META}\n${ROW}\n`);
+    };
+    lastSocketClosedEarly = undefined;
+    const controller = new AbortController();
+    const stream = await real({ timeoutMs: 30_000 }).export({}, { signal: controller.signal });
+    controller.abort(new Error("caller gave up"));
+    await vi.waitFor(() => expect(lastSocketClosedEarly).toBe(true), { timeout: 1_000 });
+    const error = await (async () => {
+      for await (const _row of stream) void _row;
+    })().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RequestAbortedError);
+  });
+});
