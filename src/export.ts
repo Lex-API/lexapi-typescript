@@ -144,14 +144,21 @@ export interface ExportMeta extends ExportMetaInfo {
 export interface ExportDoneInfo {
   /** Rows actually written. */
   written?: number;
-  /** `true` when the row cap was hit — narrow the filters or resume via `fetchedSince`. */
+  /**
+   * `true` when matching rows remain that the export did not reach (API
+   * 2.3.0: authoritative, see `truncatedBy`) — narrow the filters or resume
+   * via `changedSince` / `fetchedSince`.
+   */
   truncated?: boolean;
   /** Metadata-only rows skipped because `includeStubs` was off. */
   skippedStubs?: number;
   /** Exactly `false` marks an incomplete export (SDK contract §1.8); absent or `true` = complete. */
   complete?: boolean;
-  /** API 2.3.0: what cut the export short — `limit`, `max_rows`, or `null`. */
-  truncatedBy?: "limit" | "max_rows" | null;
+  /**
+   * API 2.3.0: what cut the export short — `limit`, `max_rows`, `credits`
+   * (the pool could not pay for rows added since the count), or `null`.
+   */
+  truncatedBy?: "limit" | "max_rows" | "credits" | null;
   /**
    * API 2.3.0, credit plans: the pool after settlement, plus `reserved`,
    * `charged` (max(written, 1)) and `refunded`; `refundPending: true` when
@@ -185,7 +192,10 @@ export interface ExportHeaderInfo {
    * (`X-Export-Streaming`). Rows written can be lower by `done.skippedStubs`.
    */
   streaming: number | undefined;
-  /** `true` when the row cap was hit (`X-Export-Truncated: 1`). */
+  /**
+   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap. A hint
+   * only; `stream.truncated` prefers `_done.truncated` once it is read.
+   */
   truncated: boolean | undefined;
 }
 
@@ -195,8 +205,9 @@ export interface ExportHeaderInfo {
  * - `meta` is parsed from the leading `_meta` line and available
  *   immediately (before iterating).
  * - `done` is populated from the trailing `_done` line once iteration
- *   completes; check `stream.truncated` (it resolves the header, `_meta`
- *   and `_done` signals per SDK contract §1.8) to detect the row cap.
+ *   completes; check `stream.truncated` (`_done.truncated` once read,
+ *   else the header / `_meta` hints — SDK contract §1.8) to detect rows the
+ *   export did not reach.
  * - If the body ends WITHOUT the `_done` trailer (the server stopped
  *   mid-export), iteration throws `IncompleteExportError` after yielding the
  *   rows that did arrive (`complete` stays `false`); a dropped connection
@@ -228,11 +239,13 @@ export interface ExportStream extends AsyncIterable<ExportRow> {
   /** Lines that were not JSON objects (e.g. a half-written last line) — counted, not yielded. */
   readonly invalidLines: number;
   /**
-   * Whether the server's row cap was hit, resolved per SDK contract §1.8:
-   * the `X-Export-Truncated` header (cap-only) first, then `_meta.truncated`,
-   * then `_done.truncated` discounted by `skippedStubs` (the server sets that
-   * flag to `written < total`, and `total` includes metadata-only rows that
-   * `includeStubs=false` skips). `undefined` when unknown.
+   * Whether matching rows remain that this export did not reach, per SDK
+   * contract §1.8: `_done.truncated` once the trailer has been read (API
+   * 2.3.0: authoritative — set by `limit`, the server maximum or the credit
+   * pool, see `done.truncatedBy`; never derived from the count; skipped stubs
+   * do not count). Before the trailer: the `X-Export-Truncated` header, then
+   * `_meta.truncated` — hints from the up-front count, which may be cached
+   * for up to a minute and never caps the stream. `undefined` when unknown.
    */
   readonly truncated: boolean | undefined;
   /**
@@ -449,17 +462,12 @@ class ExportStreamImpl implements ExportStream {
   }
 
   get truncated(): boolean | undefined {
+    // API 2.3.0: once read, `_done.truncated` is authoritative — never
+    // derived from the (possibly cached) count, skipped stubs not counted.
+    if (typeof this.done?.truncated === "boolean") return this.done.truncated;
     if (this.headers.truncated !== undefined) return this.headers.truncated;
     if (typeof this.meta?.truncated === "boolean") return this.meta.truncated;
-    const done = this.done;
-    if (done === undefined || typeof done.truncated !== "boolean") return undefined;
-    if (!done.truncated) return false;
-    const skipped = typeof done.skippedStubs === "number" ? done.skippedStubs : 0;
-    if (skipped === 0) return true;
-    const total = this.meta?.totalMatching;
-    const written = typeof done.written === "number" ? done.written : undefined;
-    if (typeof total === "number" && written !== undefined) return written + skipped < total;
-    return undefined; // can't tell a real cap from skipped stubs
+    return undefined;
   }
 
   constructor(lines: NdjsonReader, headers: ExportHeaderInfo) {

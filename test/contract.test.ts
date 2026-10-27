@@ -347,23 +347,31 @@ describe("§1.8 export stream", () => {
     expect(s.complete).toBe(true);
   });
 
-  it("truncated: X-Export-Truncated header first", async () => {
-    const s = await run(ndjson([META({ truncated: false }), JSON.stringify({ _done: { written: 0, truncated: false } })], { "x-export-truncated": "1" }));
-    expect(s.truncated).toBe(true);
+  it("truncated: _done.truncated is authoritative once read (API 2.3.0, never count-derived)", async () => {
+    // The pool stopped the export on rows added since a cached count: the
+    // count-based header and _meta said "not truncated".
+    const byCredits = await run(ndjson(
+      [META({ truncated: false }), JSON.stringify({ _done: { written: 4, truncated: true, truncatedBy: "credits" } })],
+      { "x-export-truncated": "0" },
+    ));
+    expect(byCredits.truncated).toBe(true);
+    expect(byCredits.done?.truncatedBy).toBe("credits");
+    // Every matching row reached (stubs skipped): no discount needed.
+    const reached = await run(ndjson(
+      [META({ truncated: true }), JSON.stringify({ _done: { written: 7, truncated: false, skippedStubs: 3 } })],
+      { "x-export-truncated": "1" },
+    ));
+    expect(reached.truncated).toBe(false);
   });
 
-  it("truncated: then _meta.truncated", async () => {
-    const s = await run(ndjson([META({ truncated: true }), JSON.stringify({ _done: { written: 0, truncated: false } })]));
-    expect(s.truncated).toBe(true);
-  });
-
-  it("truncated: _done.truncated last, discounted by skippedStubs", async () => {
-    const onlyStubs = await run(ndjson([META(), JSON.stringify({ _done: { written: 7, truncated: true, skippedStubs: 3 } })]));
-    expect(onlyStubs.truncated).toBe(false); // 7 + 3 = totalMatching 10 → no cap, just skipped stubs
-    const realCap = await run(ndjson([META(), JSON.stringify({ _done: { written: 5, truncated: true, skippedStubs: 1 } })]));
-    expect(realCap.truncated).toBe(true);
-    const plain = await run(ndjson([META(), JSON.stringify({ _done: { written: 5, truncated: true, skippedStubs: 0 } })]));
-    expect(plain.truncated).toBe(true);
+  it("truncated: before the trailer, the X-Export-Truncated header, then _meta.truncated", async () => {
+    const res = ndjson([META({ truncated: false }), JSON.stringify({ celex: "A" }), JSON.stringify({ _done: { written: 1, truncated: false } })], { "x-export-truncated": "1" });
+    const stream = await new LexAPI({ apiKey: "k", fetch: fetchSequence(res) }).export();
+    expect(stream.truncated).toBe(true); // header hint, nothing read yet
+    for await (const _r of stream) void _r;
+    expect(stream.truncated).toBe(false);
+    const metaOnly = await run(ndjson([META({ truncated: true }), JSON.stringify({ _done: { written: 0 } })]));
+    expect(metaOnly.truncated).toBe(true); // a trailer without the flag: _meta
   });
 });
 

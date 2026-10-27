@@ -657,14 +657,15 @@ export class LexAPI {
    * Returns a single-pass async iterator over document rows. The leading
    * `_meta` envelope is parsed before this resolves (`stream.meta`); the
    * trailing `_done` line is exposed as `stream.done` after iteration —
-   * check `stream.truncated` (header → `_meta` → `_done`) to detect the server row
-   * cap instead of assuming the export was complete.
+   * check `stream.truncated` (`_done.truncated` once read; the header / `_meta`
+   * hints before) to detect rows the export did not reach instead of assuming
+   * it was complete.
    *
    * ```ts
    * const stream = await client.export({ documentTypeCode: "regulation", limit: 1000 });
    * console.log(stream.meta?.totalMatching, stream.headers.total);
    * for await (const row of stream) process(row.celex, row.parsedContent);
-   * if (stream.truncated) console.warn("row cap hit — narrow the filters or resume with changedSince");
+   * if (stream.truncated) console.warn(`not every row reached (${stream.done?.truncatedBy}) — narrow the filters or resume with changedSince`);
    * ```
    */
   async export(params: ExportParams = {}, options?: CallOptions): Promise<ExportStream> {
@@ -725,12 +726,12 @@ function edgeQuery(params: CitationEdgeParams): Record<string, string | number |
   };
 }
 
-/** Comma-join list filters (the export endpoint accepts comma-separated or repeated values). */
 /** A `Date` is sent as its UTC ISO string; strings pass through for the server to validate. */
 function timestampParam(value: string | Date | undefined): string | undefined {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+/** Comma-join list filters (the export endpoint accepts comma-separated or repeated values). */
 function listParam(value: string | ReadonlyArray<string> | undefined): string | undefined {
   if (value === undefined) return undefined;
   return typeof value === "string" ? value : value.join(",");
