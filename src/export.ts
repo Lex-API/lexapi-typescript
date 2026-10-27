@@ -12,21 +12,44 @@ import type { Language } from "./types.js";
 /** A list filter: an array, or a comma-separated string (`"regulation,directive"`). */
 export type ExportListFilter = string | ReadonlyArray<string>;
 
+/**
+ * Filters for `GET /export` (API 2.3.0, lex-api #303). List values are sent
+ * comma-separated and ORed.
+ */
 export interface ExportParams {
-  /** Document types (prose form as stored, e.g. `"Regulation"`), array or comma-separated. */
+  /**
+   * Document types: the stored label, matched exactly ignoring case
+   * (`"regulation"` matches `Regulation`, not `Implementing regulation`).
+   * For a whole family use `documentTypeCode`.
+   */
   documentType?: ExportListFilter;
-  /** Authors, array or comma-separated. */
+  /**
+   * Type families by the `documentTypeCode` each row carries: `"regulation"`
+   * includes implementing and delegated regulations. Combined with
+   * `documentType`, both must match.
+   */
+  documentTypeCode?: ExportListFilter;
+  /** Authors: whole stored values, ignoring case (a joint act's author string is one value). */
   author?: ExportListFilter;
   /** Subdomains (`legislation`, `case-law`, `treaties`, `preparatory`, `international`, `consolidated`, …). */
   subdomain?: ExportListFilter;
   /** Document language (default `en`). */
   language?: Language;
-  /** Earliest `dateOfDocument` to include (inclusive, `YYYY-MM-DD`). */
+  /** Earliest document date to include (inclusive, `YYYY-MM-DD`; anything else is a 400). */
   dateFrom?: string;
-  /** Latest `dateOfDocument` to include (inclusive, `YYYY-MM-DD`). */
+  /** Latest document date to include (inclusive, `YYYY-MM-DD`). */
   dateTo?: string;
-  /** Incremental sync: only rows whose `lastSeenAt` is at or after this ISO timestamp. */
-  fetchedSince?: string;
+  /**
+   * Rows whose `lastSeenAt` is at or after this time (any write to the row).
+   * An ISO 8601 date or a date-time WITH a timezone (the API answers 400 to
+   * one without), or a `Date` (sent as UTC).
+   */
+  fetchedSince?: string | Date;
+  /**
+   * Rows whose text changed (`contentChangedAt`) at or after this time — the
+   * cheapest incremental sync. Same format as `fetchedSince`.
+   */
+  changedSince?: string | Date;
   /** Include raw `htmlContent` / `htmlMetadata` per row (large). Default false. */
   includeHtml?: boolean;
   /** Set `false` to omit `parsedContent` from each row. Default true. */
@@ -37,7 +60,11 @@ export interface ExportParams {
    * `skippedStubs` on the trailer.
    */
   includeStubs?: boolean;
-  /** Max rows to stream. Clamped to the server's `EXPORT_MAX_ROWS` ceiling (default 50 000). */
+  /**
+   * Max rows to stream: a positive integer (anything else throws a
+   * `RangeError` before the request — the API answers 400). Clamped to the
+   * server's `EXPORT_MAX_ROWS` ceiling (default 50 000).
+   */
   limit?: number;
 }
 
@@ -117,10 +144,35 @@ export interface ExportMeta extends ExportMetaInfo {
 export interface ExportDoneInfo {
   /** Rows actually written. */
   written?: number;
-  /** `true` when the row cap was hit — narrow the filters or resume via `fetchedSince`. */
+  /**
+   * `true` when matching rows remain that the export did not reach (API
+   * 2.3.0: authoritative, see `truncatedBy`) — narrow the filters or resume
+   * via `changedSince` / `fetchedSince`.
+   */
   truncated?: boolean;
   /** Metadata-only rows skipped because `includeStubs` was off. */
   skippedStubs?: number;
+  /** Exactly `false` marks an incomplete export (SDK contract §1.8); absent or `true` = complete. */
+  complete?: boolean;
+  /**
+   * API 2.3.0: what cut the export short — `limit`, `max_rows`, `recovered`
+   * (the server's recovery sweep took the export's billing record mid-stream), `credits`
+   * (the pool could not pay for rows added since the count), or `null`.
+   */
+  truncatedBy?: "limit" | "max_rows" | "credits" | "recovered" | null;
+  /**
+   * API 2.3.0, credit plans: the pool after settlement, plus `reserved`,
+   * `charged` (max(written, 1)) and `refunded`; `refundPending: true` when
+   * the refund is applied later by the server's recovery sweep.
+   */
+  credits?: {
+    reserved?: number;
+    charged?: number;
+    refunded?: number;
+    refundPending?: boolean;
+    remaining?: number;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 
@@ -141,7 +193,10 @@ export interface ExportHeaderInfo {
    * (`X-Export-Streaming`). Rows written can be lower by `done.skippedStubs`.
    */
   streaming: number | undefined;
-  /** `true` when the row cap was hit (`X-Export-Truncated: 1`). */
+  /**
+   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap. A hint
+   * only; `stream.truncated` prefers `_done.truncated` once it is read.
+   */
   truncated: boolean | undefined;
 }
 
@@ -151,33 +206,47 @@ export interface ExportHeaderInfo {
  * - `meta` is parsed from the leading `_meta` line and available
  *   immediately (before iterating).
  * - `done` is populated from the trailing `_done` line once iteration
- *   completes; check `stream.truncated` (it resolves the header, `_meta`
- *   and `_done` signals per SDK contract §1.8) to detect the row cap.
+ *   completes; check `stream.truncated` (`_done.truncated` once read,
+ *   else the header / `_meta` hints — SDK contract §1.8) to detect rows the
+ *   export did not reach.
  * - If the body ends WITHOUT the `_done` trailer (the server stopped
  *   mid-export), iteration throws `IncompleteExportError` after yielding the
  *   rows that did arrive (`complete` stays `false`); a dropped connection
  *   throws `NetworkError` (`CONNECTION_ERROR`); no data for `timeoutMs`
  *   throws `TimeoutError` (`REQUEST_TIMEOUT`); the call's `signal` throws
  *   `RequestAbortedError`. In every case the connection is released.
+ * - A `_done` line with `complete: false`, or any line whose only key is
+ *   `_error`, also means incomplete: iteration throws `IncompleteExportError`
+ *   after the rows that did arrive (the `_error` body is on its `details` and
+ *   on `stream.error`). Unknown `_done` fields (`truncatedBy`, `credits`) are
+ *   kept on `done`.
  * - Lines that are not JSON objects are counted in `invalidLines`, not yielded.
- * - `_meta`/`_done` lines are never yielded as rows.
+ * - `_meta`/`_done`/`_error` lines are never yielded as rows.
  */
 export interface ExportStream extends AsyncIterable<ExportRow> {
   readonly meta: ExportMeta | undefined;
   readonly done: ExportDone | undefined;
   readonly headers: ExportHeaderInfo;
-  /** `true` once the `_done` trailer was read — only then is the export whole (SDK contract §1.8). */
+  /**
+   * `true` once a `_done` trailer was read that does not say
+   * `complete: false`, and no `_error` line arrived — only then is the export
+   * whole (SDK contract §1.8).
+   */
   readonly complete: boolean;
+  /** The server's `_error` line body, if one arrived (never yielded as a row). */
+  readonly error: Record<string, unknown> | undefined;
   /** Data rows yielded so far. */
   readonly rowsRead: number;
   /** Lines that were not JSON objects (e.g. a half-written last line) — counted, not yielded. */
   readonly invalidLines: number;
   /**
-   * Whether the server's row cap was hit, resolved per SDK contract §1.8:
-   * the `X-Export-Truncated` header (cap-only) first, then `_meta.truncated`,
-   * then `_done.truncated` discounted by `skippedStubs` (the server sets that
-   * flag to `written < total`, and `total` includes metadata-only rows that
-   * `includeStubs=false` skips). `undefined` when unknown.
+   * Whether matching rows remain that this export did not reach, per SDK
+   * contract §1.8: `_done.truncated` once the trailer has been read (API
+   * 2.3.0: authoritative — set by `limit`, the server maximum or the credit
+   * pool, see `done.truncatedBy`; never derived from the count; skipped stubs
+   * do not count). Before the trailer: the `X-Export-Truncated` header, then
+   * `_meta.truncated` — hints from the up-front count, which may be cached
+   * for up to a minute and never caps the stream. `undefined` when unknown.
    */
   readonly truncated: boolean | undefined;
   /**
@@ -337,6 +406,16 @@ function liftEnvelope<T>(parsed: Record<string, unknown>, key: "_meta" | "_done"
   return parsed as T;
 }
 
+/** A line whose only key is `_error`: a server failure signal, never a row. */
+function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | undefined {
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "_error") return undefined;
+  const value = parsed._error;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : { message: String(value) };
+}
+
 /** Parse one NDJSON line; `undefined` when it is not a JSON object. */
 function parseLine(line: string): Record<string, unknown> | undefined {
   try {
@@ -352,6 +431,7 @@ function parseLine(line: string): Record<string, unknown> | undefined {
 class ExportStreamImpl implements ExportStream {
   meta: ExportMeta | undefined;
   done: ExportDone | undefined;
+  error: Record<string, unknown> | undefined;
   readonly headers: ExportHeaderInfo;
 
   private readonly lines: NdjsonReader;
@@ -360,7 +440,22 @@ class ExportStreamImpl implements ExportStream {
   invalidLines = 0;
 
   get complete(): boolean {
-    return this.done !== undefined;
+    return this.done !== undefined && this.done.complete !== false && this.error === undefined;
+  }
+
+  private incomplete(reason: string): IncompleteExportError {
+    return new IncompleteExportError(
+      `Export stream is incomplete after ${this.lines.rows} rows: ${reason}`,
+      this.lines.rows,
+      this.error,
+    );
+  }
+
+  private failureReason(): string {
+    if (this.error !== undefined) {
+      return `the server reported an error mid-stream (${String(this.error.code ?? "UNKNOWN")}: ${String(this.error.message ?? "")})`;
+    }
+    return "its _done trailer says complete: false";
   }
 
   get rowsRead(): number {
@@ -368,17 +463,12 @@ class ExportStreamImpl implements ExportStream {
   }
 
   get truncated(): boolean | undefined {
+    // API 2.3.0: once read, `_done.truncated` is authoritative — never
+    // derived from the (possibly cached) count, skipped stubs not counted.
+    if (typeof this.done?.truncated === "boolean") return this.done.truncated;
     if (this.headers.truncated !== undefined) return this.headers.truncated;
     if (typeof this.meta?.truncated === "boolean") return this.meta.truncated;
-    const done = this.done;
-    if (done === undefined || typeof done.truncated !== "boolean") return undefined;
-    if (!done.truncated) return false;
-    const skipped = typeof done.skippedStubs === "number" ? done.skippedStubs : 0;
-    if (skipped === 0) return true;
-    const total = this.meta?.totalMatching;
-    const written = typeof done.written === "number" ? done.written : undefined;
-    if (typeof total === "number" && written !== undefined) return written + skipped < total;
-    return undefined; // can't tell a real cap from skipped stubs
+    return undefined;
   }
 
   constructor(lines: NdjsonReader, headers: ExportHeaderInfo) {
@@ -398,7 +488,12 @@ class ExportStreamImpl implements ExportStream {
       const first = await this.lines.nextLine();
       if (first === undefined) return;
       parsed = parseLine(first);
-      if (parsed !== undefined) break;
+      if (parsed !== undefined) {
+        const error = errorLine(parsed);
+        if (error === undefined) break;
+        this.error = error; // never a row; iteration reports it
+        continue;
+      }
       this.invalidLines++;
     }
     if ("_meta" in parsed) {
@@ -417,7 +512,8 @@ class ExportStreamImpl implements ExportStream {
       // SDK contract §1.8: a stream is read once. Re-iterating one that was
       // read to its `_done` yields nothing; one that was ended early
       // (cancel(), break, an error) never looks complete.
-      if (this.done !== undefined) return;
+      if (this.complete) return;
+      if (this.done !== undefined || this.error !== undefined) throw this.incomplete(this.failureReason());
       throw new IncompleteExportError(
         `Export stream was ended before its _done trailer (after ${this.lines.rows} rows) — call export() again to re-read`,
         this.lines.rows,
@@ -431,11 +527,16 @@ class ExportStreamImpl implements ExportStream {
         this.lines.rows++;
         yield row;
       }
-      if (this.done !== undefined) return; // _done arrived first (empty export)
+      if (this.done !== undefined) {
+        // _done arrived first (empty export)
+        if (!this.complete) throw this.incomplete(this.failureReason());
+        return;
+      }
       for (;;) {
         const line = await this.lines.nextLine();
         if (line === undefined) {
           // Clean EOF without the trailer: the server stopped mid-export.
+          if (this.error !== undefined) throw this.incomplete(this.failureReason());
           throw new IncompleteExportError(
             `Export stream ended without its _done trailer after ${this.lines.rows} rows — the export is incomplete`,
             this.lines.rows,
@@ -448,9 +549,15 @@ class ExportStreamImpl implements ExportStream {
         }
         if ("_done" in parsed) {
           this.done = liftEnvelope<ExportDone>(parsed, "_done");
+          if (!this.complete) throw this.incomplete(this.failureReason());
           return;
         }
         if ("_meta" in parsed) continue; // never surface envelope lines as rows
+        const error = errorLine(parsed);
+        if (error !== undefined) {
+          this.error = error; // a failure signal, never a row
+          continue;
+        }
         this.lines.rows++;
         yield parsed as ExportRow;
       }

@@ -18,6 +18,8 @@ export type ErrorCode =
   | "INVALID_URL"
   | "INVALID_PARAMS"
   | "RATE_LIMITED"
+  // 429 on a legacy daily-call plan: the quota is used up (lex-api #304).
+  | "QUOTA_EXHAUSTED"
   | "TIER_FORBIDDEN"
   | "CREDITS_EXHAUSTED"
   | "UPSTREAM_ERROR"
@@ -186,8 +188,13 @@ export class LexAPIError extends Error {
         details = e["details"];
       } else if (typeof err === "string") {
         // Legacy bare {error: "<text>", message?, details?}: the string is
-        // HUMAN TEXT, never a code (even when it looks like a slug) — the
-        // code comes from the status. `details` (validation lists) is kept.
+        // HUMAN TEXT, never a code (even when it looks like a slug). The code
+        // is the top-level string `code` when present (lex-api #304), else
+        // the status. `details` (validation lists) is kept.
+        if (typeof record["code"] === "string" && record["code"] !== "") {
+          code = record["code"];
+          typedCode = true;
+        }
         message =
           typeof record["message"] === "string" && record["message"] !== err
             ? `${err}: ${record["message"]}`
@@ -195,6 +202,10 @@ export class LexAPIError extends Error {
         details = record["details"];
       } else {
         // No `error` member ({message, details}): keep both when present.
+        if (typeof record["code"] === "string" && record["code"] !== "") {
+          code = record["code"];
+          typedCode = true;
+        }
         if (typeof record["message"] === "string") message = record["message"];
         details = record["details"];
       }
@@ -218,8 +229,15 @@ export class LexAPIError extends Error {
       return new LexAPIError(code, message, status, details, retryAfter, context);
     }
     // §1.2: a quota-exhausted 429 exposes no retry-after value.
-    if (code === "RATE_LIMITED" && isQuota429(body, headers)) {
-      return new RateLimitedError(message, status, details, undefined, context);
+    if (code === "QUOTA_EXHAUSTED" || (code === "RATE_LIMITED" && isQuota429(body, headers))) {
+      return new RateLimitedError(
+        message,
+        status,
+        details,
+        undefined,
+        context,
+        code === "QUOTA_EXHAUSTED" ? "QUOTA_EXHAUSTED" : "RATE_LIMITED",
+      );
     }
     switch (code) {
       case "NOT_FOUND":
@@ -329,9 +347,11 @@ export class AuthenticationError extends LexAPIError {
 }
 
 /**
- * 429 — per-minute rate limit (or, on legacy daily plans, the daily quota).
- * Today's 429s use the legacy `{error, message, retryAfter}` body; the
- * `Retry-After` header is authoritative and is what `retryAfter` reads first.
+ * 429 — per-minute rate limit (`RATE_LIMITED`), or, on legacy daily plans,
+ * the used-up daily / monthly-semantic quota (`QUOTA_EXHAUSTED`; `code`
+ * tells them apart). 429s use the legacy `{error, message, retryAfter}` body
+ * (with a top-level `code` from lex-api #304 on); the `Retry-After` header is
+ * authoritative and is what `retryAfter` reads first.
  */
 export class RateLimitedError extends LexAPIError {
   static override readonly kind: string = "RateLimitedError";
@@ -341,8 +361,9 @@ export class RateLimitedError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    code: "RATE_LIMITED" | "QUOTA_EXHAUSTED" = "RATE_LIMITED",
   ) {
-    super("RATE_LIMITED", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "RateLimitedError";
   }
 
@@ -354,17 +375,22 @@ export class RateLimitedError extends LexAPIError {
   /**
    * `true` for a legacy-plan quota 429 (daily call quota, or the monthly
    * semantic quota) rather than the per-minute limiter (SDK contract §1.2):
-   * the body carries `usage.resetsAt`, with neither a `Retry-After` header
-   * nor a `retryAfter` body field. It cannot succeed before `resetsAt`, so
-   * the SDK does not retry it and `retryAfter` is `undefined`.
+   * `code` is `QUOTA_EXHAUSTED`, or — servers before lex-api #304, which
+   * send no code — the body carries `usage.resetsAt` with neither a
+   * `Retry-After` header nor a `retryAfter` body field. It cannot succeed
+   * before `resetsAt`, so the SDK does not retry it and `retryAfter` is
+   * `undefined`.
    */
   get quotaExhausted(): boolean {
-    return isQuota429(this.body, this.headers);
+    return this.code === "QUOTA_EXHAUSTED" || isQuota429(this.body, this.headers);
   }
 
-  /** When a legacy quota resets (`usage.resetsAt` on quota 429s). */
+  /** When a legacy quota resets: the body's `resetsAt`, else `usage.resetsAt`. */
   get resetsAt(): string | undefined {
-    return readString(detailsField(bodyField(this.body, "usage"), "resetsAt"));
+    return (
+      readString(bodyField(this.body, "resetsAt")) ??
+      readString(detailsField(bodyField(this.body, "usage"), "resetsAt"))
+    );
   }
 }
 
@@ -561,8 +587,12 @@ export class IncompleteExportError extends LexAPIError {
   /** Rows yielded before the stream ended. */
   readonly rowsRead: number;
 
-  constructor(message: string, rowsRead: number) {
-    super("INCOMPLETE_EXPORT", message, 0);
+  /**
+   * @param details the server's `_error` line body (`{ code, message }`) when
+   *   one arrived; `undefined` for a missing or `complete: false` trailer.
+   */
+  constructor(message: string, rowsRead: number, details?: unknown) {
+    super("INCOMPLETE_EXPORT", message, 0, details);
     this.name = "IncompleteExportError";
     this.rowsRead = rowsRead;
   }
@@ -609,6 +639,8 @@ function detailsField(details: unknown, key: string): unknown {
 
 /** SDK contract §1.2 quota-429 test. */
 function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolean {
+  if (detailsField(body, "code") === "QUOTA_EXHAUSTED") return true;
+  // Fallback for servers before lex-api #304 (no top-level code).
   const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
   if (typeof resetsAt !== "string") return false;
   if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;

@@ -218,10 +218,16 @@ app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (r
 
 ## Corpus export (BUSINESS, SCALE, ENTERPRISE)
 
-`export()` streams NDJSON rows via the fetch body stream — constant memory regardless of result size. BUSINESS, SCALE and ENTERPRISE only; lower tiers get a 403 `TierForbiddenError`. For pricing see the [pricing page](https://lex-api.com/pricing?ref=npm-sdk) and the `credits` block on your next response. Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)).
+`export()` streams NDJSON rows via the fetch body stream — constant memory regardless of result size. BUSINESS, SCALE and ENTERPRISE only; lower tiers get a 403 `TierForbiddenError`.
+
+**Billing (credit plans, API 2.3.0):** 1 credit per row written, at least 1 per export. The call is admitted for 1 credit, the matching rows are counted, and the rest of 1 credit per row it can return is reserved; a pool that cannot cover it throws `CreditsExhaustedError` before anything streams. Unwritten rows are refunded when the stream ends: `stream.done?.credits?.charged`.
+
+**Filters:** `documentType` matches the stored label exactly, ignoring case; `documentTypeCode: "regulation"` selects the family (incl. implementing and delegated regulations); `author` matches whole values; `dateFrom` / `dateTo` are `YYYY-MM-DD`; `changedSince` returns rows whose text changed (the cheapest incremental sync) and `fetchedSince` rows written to at all — both an ISO date or a date-time with a timezone, or a `Date`; `limit` is a positive integer (anything else throws `RangeError`).
+
+Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)).
 
 ```ts
-const stream = await client.export({ documentType: ["Regulation"], dateFrom: "2024-01-01", limit: 10_000 });
+const stream = await client.export({ documentTypeCode: "regulation", dateFrom: "2024-01-01", limit: 10_000 });
 
 console.log(stream.meta?.totalMatching, stream.headers.total); // leading _meta envelope / X-Export-Total
 
@@ -230,10 +236,10 @@ for await (const row of stream) {
 }
 
 console.log(stream.done?.written, stream.done?.skippedStubs);
-if (stream.truncated) console.warn("row cap hit — narrow filters or resume via fetchedSince");
+if (stream.truncated) console.warn(`rows not reached (${stream.done?.truncatedBy}) — narrow filters or resume via changedSince`);
 ```
 
-The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass (re-iterating a fully read stream yields nothing; iterating one you ended early raises `IncompleteExportError` — call `export()` again to re-read). Breaking out of the loop (or `stream.cancel()`, or the call's `signal`) releases the connection. **A stream that ends without its `_done` trailer throws `IncompleteExportError`** after yielding the rows that did arrive — the server stopped mid-export and they are not the whole set (`stream.complete` stays `false`; `stream.rowsRead` counts them). A dropped connection throws `NetworkError`, a stall longer than `timeoutMs` throws `TimeoutError`. Lines that are not JSON objects are counted in `stream.invalidLines`. For "did the row cap cut this export?" read `stream.truncated` — it resolves the header, `_meta` and `_done` signals in the right order. Metadata-only rows are skipped unless `includeStubs: true`.
+The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass (re-iterating a fully read stream yields nothing; iterating one you ended early raises `IncompleteExportError` — call `export()` again to re-read). Breaking out of the loop (or `stream.cancel()`, or the call's `signal`) releases the connection. **A stream that ends without its `_done` trailer throws `IncompleteExportError`** (so does a `_done` with `complete: false`, or an `_error` line, which is never yielded as a row) after yielding the rows that did arrive — the server stopped mid-export and they are not the whole set (`stream.complete` stays `false`; `stream.rowsRead` counts them). A dropped connection throws `NetworkError`, a stall longer than `timeoutMs` throws `TimeoutError`. Lines that are not JSON objects are counted in `stream.invalidLines`. For "did matching rows remain that this export did not reach?" read `stream.truncated` — after iterating it is the server's authoritative `_done.truncated` (`stream.done?.truncatedBy`: `limit`, `max_rows`, `credits` or `recovered`); before that, a hint from the up-front count. Metadata-only rows are skipped unless `includeStubs: true`.
 
 ## Point-in-time versions
 
@@ -334,7 +340,7 @@ try {
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
-| `RateLimitedError` | `RATE_LIMITED` | 429 |
+| `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
@@ -342,7 +348,7 @@ try {
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |
 | `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx whose body was not JSON (e.g. a proxy HTML page) |
-| `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without its `_done` trailer (`rowsRead`) |
+| `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without a complete `_done` trailer, or the server sent an `_error` line (`rowsRead`, `details`) |
 | `LexAPIError` (base) | `INTERNAL` | any other status (e.g. 409, 413), with `status` kept |
 
 **`instanceof` across builds.** The package ships an ESM and a CommonJS build; in a process that loads both (a CommonJS dependency wrapping the SDK inside an ESM app, Next.js, …) they are two copies of every class. The error classes carry a shared brand (`Symbol.for`), so `err instanceof NotFoundError` is still true for an error thrown by the other copy. `isLexAPIError(err)` / `isLexAPIError(err, NotFoundError)` does the same as a function.
