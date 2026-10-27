@@ -155,10 +155,11 @@ export interface ExportDoneInfo {
   /** Exactly `false` marks an incomplete export (SDK contract §1.8); absent or `true` = complete. */
   complete?: boolean;
   /**
-   * API 2.3.0: what cut the export short — `limit`, `max_rows`, `credits`
+   * API 2.3.0: what cut the export short — `limit`, `max_rows`, `recovered`
+   * (the server's recovery sweep took the export's billing record mid-stream), `credits`
    * (the pool could not pay for rows added since the count), or `null`.
    */
-  truncatedBy?: "limit" | "max_rows" | "credits" | null;
+  truncatedBy?: "limit" | "max_rows" | "credits" | "recovered" | null;
   /**
    * API 2.3.0, credit plans: the pool after settlement, plus `reserved`,
    * `charged` (max(written, 1)) and `refunded`; `refundPending: true` when
