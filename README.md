@@ -378,6 +378,7 @@ try {
 | Class | `code` | HTTP |
 | --- | --- | --- |
 | `NotFoundError` | `NOT_FOUND` | 404 |
+| `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
@@ -389,7 +390,6 @@ try {
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
 | `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable; `.jurisdiction`; retry later |
-| `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `TimeoutError` | `TIMEOUT` (504, 524) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |

@@ -596,17 +596,45 @@ export class LexAPI {
    *
    * `params.includeNational` also counts national documents of live
    * jurisdictions — BUSINESS+ only (`403 TierForbiddenError` below that).
+   *
+   * **Back-compat:** 0.2.0's signature was `getCitationStats(options?:
+   * CallOptions)`. Both the single-argument form (`getCitationStats({
+   * timeoutMs, signal })`) and the current two-argument form
+   * (`getCitationStats(params, options)`) keep working — overloaded here so
+   * TypeScript callers on either shape type-check, and a first argument
+   * that looks like `CallOptions` rather than `CitationStatsParams` is also
+   * detected at runtime (for a non-literal variable or a JS caller, which
+   * the overloads alone can't catch) and honoured as the per-call options
+   * rather than silently read as `params` with the timeout or abort signal
+   * dropped.
    */
+  async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse>;
+  async getCitationStats(params: CitationStatsParams, options?: CallOptions): Promise<CitationStatsResponse>;
   async getCitationStats(
-    params: CitationStatsParams = {},
+    params?: CitationStatsParams | CallOptions,
     options?: CallOptions,
   ): Promise<CitationStatsResponse> {
+    // Back-compat (review round 2): 0.2.0's signature was
+    // `getCitationStats(options?: CallOptions)`. A caller passing a single
+    // argument shaped like `CallOptions` (`{ timeoutMs }` / `{ signal }`,
+    // and nothing from `CitationStatsParams`) is honoured as `options`, not
+    // silently read as `params` with the timeout/signal dropped — this
+    // can't be caught at the type level (TS object literals get an excess-
+    // property error, but a non-literal variable or a JS caller wouldn't).
+    let effectiveParams: CitationStatsParams | undefined;
+    let effectiveOptions: CallOptions | undefined;
+    if (isLegacyCitationStatsCallOptions(params)) {
+      effectiveOptions = params;
+    } else {
+      effectiveParams = params;
+      effectiveOptions = options;
+    }
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
-      query: { includeNational: params.includeNational },
-      timeoutMs: options?.timeoutMs,
-      signal: options?.signal,
+      query: { includeNational: effectiveParams?.includeNational },
+      timeoutMs: effectiveOptions?.timeoutMs,
+      signal: effectiveOptions?.signal,
     });
   }
 
@@ -703,19 +731,24 @@ export class LexAPI {
    * Walk every page of `listNationalDocuments` via `cursor` (works past the
    * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
    * a separate billed call. Stops after a page with `hasMore: false` (or an
-   * empty page). Any `params.page` is ignored — pass `params.cursor` only
-   * to resume a walk you saved partway through.
+   * empty page). Any `params.page` is ignored and never sent — pass
+   * `params.cursor` only to resume a walk you saved partway through;
+   * `page` together with `cursor` is a 400 ("Use either cursor or page,
+   * not both"), so this strips `page` at runtime, not just in the type
+   * (`Omit` alone only guards TypeScript callers — a JS caller, or one
+   * using `as`, could otherwise still pass it through).
    */
   async *paginateNationalDocuments(
     jurisdiction: string,
     params: Omit<NationalDocumentListParams, "page"> = {},
     options?: CallOptions,
   ): AsyncGenerator<NationalDocumentListResponse, void> {
-    let cursor = params.cursor;
+    const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
+    let cursor = rest.cursor;
     for (;;) {
       const page = await this.listNationalDocuments(
         jurisdiction,
-        cursor !== undefined ? { ...params, cursor } : { ...params },
+        cursor !== undefined ? { ...rest, cursor } : { ...rest },
         options,
       );
       yield page;
@@ -955,6 +988,19 @@ function nationalSemanticWireBody(
   // validates it strictly as a boolean on this route too (400 otherwise).
   if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
   return body;
+}
+
+/**
+ * True when `value` looks like a 0.2.0-era `getCitationStats(options?)`
+ * call (a `CallOptions`: `timeoutMs` and/or `signal`, never
+ * `includeNational`) rather than the current `CitationStatsParams`.
+ */
+function isLegacyCitationStatsCallOptions(
+  value: CitationStatsParams | CallOptions | undefined,
+): value is CallOptions {
+  if (!value || typeof value !== "object") return false;
+  if ("includeNational" in value) return false;
+  return "timeoutMs" in value || "signal" in value;
 }
 
 function edgeQuery(params: CitationEdgeParams): Record<string, string | number | boolean | undefined> {

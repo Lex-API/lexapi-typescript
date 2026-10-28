@@ -1696,9 +1696,10 @@ export interface NationalSemanticLegislationResult extends SemanticLegislationRe
 
 /**
  * `POST /{jurisdiction}/search/semantic` — national case-law semantic
- * search. Like the EU semantic endpoints, this route does not run
- * `attachCreditsEnvelope`, so `credits` is normally absent from the body
- * (optional via `CreditedResponse`).
+ * search. `credits` is present on the body (lex-api #314 round 2 restored
+ * it on the semantic routes generally — `api.js`'s router-level
+ * `attachCreditsEnvelope` wraps `res.json` before the semantic router
+ * charges), typed optional only via the shared `CreditedResponse` shape.
  */
 export interface NationalSemanticCaseLawResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;

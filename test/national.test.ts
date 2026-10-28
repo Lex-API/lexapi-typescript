@@ -200,6 +200,35 @@ describe("listNationalDocuments", () => {
     expect(secondUrl.searchParams.get("cursor")).toBe("c1");
   });
 
+  it("paginateNationalDocuments strips a bypassed `page` so it's never sent alongside `cursor` (review round 2 — the server 400s that combination)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 2, totalExact: true, limit: 1, includeRepealed: false,
+        hasMore: true, nextCursor: "c1",
+        results: [{ id: "AT-NOR-1", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" }],
+      }),
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 2, totalExact: true, limit: 1, includeRepealed: false,
+        hasMore: false, nextCursor: null,
+        results: [{ id: "AT-NOR-2", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-02T00:00:00.000Z" }],
+      }),
+    );
+    // `Omit<NationalDocumentListParams, "page">` only guards TypeScript — a
+    // caller bypassing it (JS, or `as`) could otherwise still pass `page`.
+    const bypassed = { limit: 1, page: 3 } as unknown as Record<string, unknown>;
+    const seen: string[] = [];
+    for await (const page of client(fetchMock).paginateNationalDocuments("AT", bypassed)) {
+      seen.push(...page.results.map((r) => r.id!));
+    }
+    expect(seen).toEqual(["AT-NOR-1", "AT-NOR-2"]);
+    for (const call of fetchMock.mock.calls) {
+      const url = new URL((call as unknown as [string])[0]);
+      expect(url.searchParams.has("page")).toBe(false);
+    }
+    const secondUrl = new URL((fetchMock.mock.calls[1] as unknown as [string])[0]);
+    expect(secondUrl.searchParams.get("cursor")).toBe("c1");
+  });
+
   it("a page past the first 1,000 rows via `page` is a 400 InvalidParamsError", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(400, {

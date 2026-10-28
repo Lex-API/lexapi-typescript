@@ -54,13 +54,23 @@ the per-item notes below for what is still provisional (the listing's credit wei
   ENTERPRISE only (`403 TierForbiddenError` below that; no account/code change needed, it already
   throws the existing error). `celexNumber` and `getCitationPath`'s `from`/`to` accept a national
   document id directly (e.g. `"AT-NOR-10001597"`); an id whose jurisdiction is not live is a plain
-  `404 NotFoundError`. `getCitationStats` gained an optional `params` argument (back-compatible —
-  `getCitationStats()` with no args still works). Every response type carries an optional
-  `includeNational` boolean, present once the flag was honoured.
+  `404 NotFoundError`. `getCitationStats` gained an optional `params` argument before `options`.
+  Back-compatible with 0.2.0's `getCitationStats(options?)`: a first argument shaped like
+  `CallOptions` (`timeoutMs`/`signal`, not `includeNational`) is still honoured as the per-call
+  options rather than silently read as `params` — this can't be caught at the type level for a
+  non-literal variable or a JS caller, so it's detected at runtime too. Every response type
+  carries an optional `includeNational` boolean, present once the flag was honoured.
+- `paginateNationalDocuments` strips `page` from its params at runtime (not just via the
+  `Omit<…, "page">` type, which only guards TypeScript callers) — passing both `page` and
+  `cursor` to the underlying `GET` is a 400 ("Use either cursor or page, not both").
 
-Validated against lex-api **PR #314** (`openapi.yaml`/`docs.md` @ `e10657f`, API 2.5.0 — the
-documented national-law contract) and PR #306 (the allowance), plus the real
-`nationalCoverageController.js` on `feat/national-launch-switch`.
+Validated against lex-api **PR #320** (`fix/national-api-hardening` @ `e49881b`: `openapi.yaml`
+2.5.0, `docs.md`, the national controllers, `nationalWithdrawn.js`, `jurisdiction.js`,
+`utils/errors.js`, `operationWeights.js`), stacked on PR #314 (the documented contract) and PR
+#306 (the allowance), plus the real `nationalCoverageController.js` on `feat/national-launch-switch`.
+National semantic responses (`nationalSemanticSearch`/`nationalLegislationSemanticSearch`) DO
+carry the `credits` block — PR #314 round 2 restored the envelope on the semantic routes
+generally; an earlier note here said otherwise and was wrong.
 
 ## [0.2.0] — 2026-10-26
 

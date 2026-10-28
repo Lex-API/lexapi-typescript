@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { LexAPI, NotFoundError, RateLimitedError, TierForbiddenError } from "../src/index.js";
+import { LexAPI, NotFoundError, RateLimitedError, RequestAbortedError, TierForbiddenError } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
 function client(fetchMock: typeof fetch) {
@@ -450,6 +450,24 @@ describe("includeNational (citation graph + national ids, API 2.5.0)", () => {
     expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBeNull();
   });
 
+  it("getCitationStats(options) — a 0.2.0-shaped single CallOptions argument is still honoured as options, not silently read as params (review round 2)", async () => {
+    const fetchMock = fetchSequence(jsonResponse(200, { success: true, stats: {} }));
+    // A JS-shaped (or non-literal-variable) 0.2.0 call: getCitationStats({ signal }).
+    // If `signal` were silently read as `params.signal` instead of `options.signal`,
+    // the abort would be ignored and the call would go through to fetch.
+    const legacyCallOptions = { signal: AbortSignal.abort() };
+    await expect(client(fetchMock).getCitationStats(legacyCallOptions)).rejects.toBeInstanceOf(RequestAbortedError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("getCitationStats({ includeNational }, options) — the two-argument form still forwards options", async () => {
+    const fetchMock = fetchSequence(jsonResponse(200, { success: true, stats: {} }));
+    await expect(
+      client(fetchMock).getCitationStats({ includeNational: true }, { signal: AbortSignal.abort() }),
+    ).rejects.toBeInstanceOf(RequestAbortedError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("includeNational=true below BUSINESS is a 403 TierForbiddenError (legacy shape, upgradeUrl)", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(403, {
@@ -466,11 +484,14 @@ describe("includeNational (citation graph + national ids, API 2.5.0)", () => {
     expect(err.body).toMatchObject({ upgradeUrl: "/pricing" });
   });
 
-  it("a national id of a jurisdiction that is not live is a 404 NotFoundError (legacy bare, no code)", async () => {
-    const fetchMock = fetchSequence(jsonResponse(404, { error: "Document not found: XX-NOR-99999999" }));
+  it("a national id of a jurisdiction that is not live is a 404 NotFoundError (legacy shape, top-level code since #320)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(404, { success: false, code: "NOT_FOUND", error: "Document not found: XX-NOR-99999999" }),
+    );
     const err = await client(fetchMock).getCites("XX-NOR-99999999").catch((e) => e);
     expect(err).toBeInstanceOf(NotFoundError);
     expect(err.status).toBe(404);
+    expect(err.code).toBe("NOT_FOUND");
     expect(err.message).toContain("Document not found: XX-NOR-99999999");
   });
 });
