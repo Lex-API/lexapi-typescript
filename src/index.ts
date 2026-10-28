@@ -132,6 +132,7 @@ export type {
   CitationNetworkResponse,
   CitationStatsTopCited,
   CitationStatsTopCiting,
+  CitationStatsParams,
   CitationStatsResponse,
   CitationPathNode,
   CitationPathParams,

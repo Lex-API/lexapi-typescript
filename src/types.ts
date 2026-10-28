@@ -879,6 +879,15 @@ export interface CitationEdgeParams {
   offset?: number;
   /** Language preferred for neighbour titles (default `en`). */
   language?: Language;
+  /**
+   * Also return national documents of live jurisdictions as neighbours
+   * (national acts/decisions that cite, implement or are cited by the EU
+   * graph, where the national source records the link). BUSINESS, SCALE
+   * and ENTERPRISE only — `403 TierForbiddenError` below that. A `celexNumber`
+   * that is itself a national id (`AT-…`) includes national neighbours
+   * without this flag.
+   */
+  includeNational?: boolean;
 }
 
 export interface CitedByResponse extends CreditedResponse, WithResponseHeaders {
@@ -893,6 +902,8 @@ export interface CitedByResponse extends CreditedResponse, WithResponseHeaders {
   offset?: number;
   citedBy: CitingDocumentGroup[];
   relationSync?: RelationSync;
+  /** Whether national documents were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
@@ -905,6 +916,8 @@ export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
   limit?: number;
   offset?: number;
   cites: CitedDocumentGroup[];
+  /** Whether national documents were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 /** A neighbour in the citation graph, deduplicated across edge types. */
@@ -927,6 +940,8 @@ export interface CitationNetworkParams {
   offset?: number;
   /** Language preferred for neighbour titles (default `en`). */
   language?: Language;
+  /** Also include national neighbours of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
 }
 
 export interface CitationNetworkResponse extends CreditedResponse, WithResponseHeaders {
@@ -962,6 +977,8 @@ export interface CitationNetworkResponse extends CreditedResponse, WithResponseH
   /** The server-side budget that expired (only on partial responses). */
   timeoutMs?: number;
   relationSync?: RelationSync;
+  /** Whether national neighbours were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface CitationStatsTopCited {
@@ -976,8 +993,16 @@ export interface CitationStatsTopCiting {
   citesCount?: number;
 }
 
+/** Params for {@link getCitationStats}. */
+export interface CitationStatsParams {
+  /** Also count national documents of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
+}
+
 export interface CitationStatsResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
+  /** Whether national documents were counted (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
   stats: {
     totalCitations: number;
     uniqueSourceDocuments: number;
@@ -1005,6 +1030,12 @@ export interface CitationPathParams {
   maxDepth?: number;
   /** Language preferred for node titles (default `en`). */
   language?: Language;
+  /**
+   * Also follow national documents of live jurisdictions. BUSINESS+ only —
+   * `403 TierForbiddenError` below that. `from`/`to` may themselves be
+   * national ids (`AT-…`) regardless of this flag.
+   */
+  includeNational?: boolean;
 }
 
 export interface CitationPathResponse extends CreditedResponse, WithResponseHeaders {
@@ -1020,6 +1051,8 @@ export interface CitationPathResponse extends CreditedResponse, WithResponseHead
   path: CitationPathNode[];
   /** Present when `found` is false. */
   message?: string;
+  /** Whether national documents were followed (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface RelatedDocument {
@@ -1036,6 +1069,8 @@ export interface RelatedDocumentsParams {
   limit?: number;
   /** Language preferred for titles (default `en`). */
   language?: Language;
+  /** Also consider national documents of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
 }
 
 export interface RelatedDocumentsResponse extends CreditedResponse, WithResponseHeaders {
@@ -1048,6 +1083,8 @@ export interface RelatedDocumentsResponse extends CreditedResponse, WithResponse
   related: RelatedDocument[];
   /** Present when the seed has no outbound citations to couple on. */
   message?: string;
+  /** Whether national documents were considered (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 // ── Semantic search ─────────────────────────────────────────────────

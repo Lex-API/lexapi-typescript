@@ -15,6 +15,7 @@ import type {
   CitationNetworkResponse,
   CitationPathParams,
   CitationPathResponse,
+  CitationStatsParams,
   CitationStatsResponse,
   CitedByResponse,
   CitesResponse,
@@ -425,6 +426,12 @@ export class LexAPI {
    * `GET /citations/cites/{celexNumber}` — documents this one cites
    * (outbound edges), grouped by target. The document must first have been
    * crawled via `extractCitations` to appear here. 1 credit.
+   *
+   * `celexNumber` may be a national document id (e.g. `AT-NOR-10001597`);
+   * `params.includeNational` also pulls in national neighbours of live
+   * jurisdictions — BUSINESS, SCALE and ENTERPRISE only (`403
+   * TierForbiddenError` below that, refunded in full). A national id whose
+   * jurisdiction is not live is `404 NotFoundError`.
    */
   async getCites(
     celexNumber: string,
@@ -445,6 +452,10 @@ export class LexAPI {
    * (inbound edges), grouped by source. 1 credit. For legislation, inbound
    * amendment / corrigendum / repeal edges are refreshed from Cellar when
    * older than 7 days (waits ≤ ~2.5 s) — see `relationSync`.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also pulls in national neighbours of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitedBy(
     celexNumber: string,
@@ -506,6 +517,10 @@ export class LexAPI {
    * If the server-side wall-clock budget expires the endpoint still
    * returns 200 with `partial: true`, an EMPTY `network`, and `null`
    * paging totals — check `partial` before treating the network as empty.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also pulls in national neighbours of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitationNetwork(
     celexNumber: string,
@@ -520,6 +535,7 @@ export class LexAPI {
         limit: params.limit,
         offset: params.offset,
         language: params.language,
+        includeNational: params.includeNational,
       },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -531,6 +547,10 @@ export class LexAPI {
    * outbound edges). 20 credits. `found: false` is a graceful HTTP 200,
    * not an error. Default `maxDepth` 3 (max 8); the visited set is bounded
    * to 5000 nodes.
+   *
+   * `from`/`to` may be national document ids; `params.includeNational` also
+   * follows national documents of live jurisdictions along the way —
+   * BUSINESS+ only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitationPath(
     from: string,
@@ -541,7 +561,7 @@ export class LexAPI {
     return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
-      query: { maxDepth: params.maxDepth, language: params.language },
+      query: { maxDepth: params.maxDepth, language: params.language, includeNational: params.includeNational },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -552,6 +572,10 @@ export class LexAPI {
    * neighbours (documents sharing the most outbound citation targets with
    * the seed). 20 credits. Returns a graceful empty list with `message`
    * when the seed has no outbound citations to couple on.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also considers national documents of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getRelatedDocuments(
     celexNumber: string,
@@ -561,17 +585,26 @@ export class LexAPI {
     return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
-      query: { limit: params.limit, language: params.language },
+      query: { limit: params.limit, language: params.language, includeNational: params.includeNational },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
   }
 
-  /** `GET /citations/stats` — global citation graph statistics. 20 credits. */
-  async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse> {
+  /**
+   * `GET /citations/stats` — global citation graph statistics. 20 credits.
+   *
+   * `params.includeNational` also counts national documents of live
+   * jurisdictions — BUSINESS+ only (`403 TierForbiddenError` below that).
+   */
+  async getCitationStats(
+    params: CitationStatsParams = {},
+    options?: CallOptions,
+  ): Promise<CitationStatsResponse> {
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
+      query: { includeNational: params.includeNational },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -877,12 +910,13 @@ function nationalSemanticWireBody(request: {
   return body;
 }
 
-function edgeQuery(params: CitationEdgeParams): Record<string, string | number | undefined> {
+function edgeQuery(params: CitationEdgeParams): Record<string, string | number | boolean | undefined> {
   return {
     citationType: params.citationType,
     limit: params.limit,
     offset: params.offset,
     language: params.language,
+    includeNational: params.includeNational,
   };
 }
 

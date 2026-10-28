@@ -36,12 +36,19 @@ Adds national (member-state, and non-EU) law support ahead of the LexAPI nationa
   `X-National-Limit`/`X-National-Remaining`/`X-National-Reset` — present only for
   FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints (also on the
   402 error itself, via `err.headers`).
+- **`includeNational`** on all six citation-graph methods (`getCites`, `getCitedBy`,
+  `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`): also
+  returns/follows national documents of live jurisdictions as neighbours — BUSINESS, SCALE and
+  ENTERPRISE only (`403 TierForbiddenError` below that; no account/code change needed, it already
+  throws the existing error). `celexNumber` and `getCitationPath`'s `from`/`to` accept a national
+  document id directly (e.g. `"AT-NOR-10001597"`); an id whose jurisdiction is not live is a plain
+  `404 NotFoundError`. `getCitationStats` gained an optional `params` argument (back-compatible —
+  `getCitationStats()` with no args still works). Every response type carries an optional
+  `includeNational` boolean, present once the flag was honoured.
 
 Validated against lex-api **PR #314** (`openapi.yaml`/`docs.md` @ `e10657f`, API 2.5.0 — the
 documented national-law contract) and PR #306 (the allowance), plus the real
-`nationalCoverageController.js` on `feat/national-launch-switch`. **Not covered yet:**
-`includeNational` and national ids on the `/citations/*` routes (BUSINESS+) — deferred to a
-follow-up release once that surface ships server-side.
+`nationalCoverageController.js` on `feat/national-launch-switch`.
 
 ## [0.2.0] — 2026-10-26
 

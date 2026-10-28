@@ -169,9 +169,14 @@ if (!path.found) console.log(path.message);           // graceful 200, not an er
 
 const related = await client.getRelatedDocuments("32016R0679", { limit: 10 }); // bibliographic coupling
 const stats = await client.getCitationStats();
+
+// National documents in the graph (BUSINESS, SCALE, ENTERPRISE only — 403 TierForbiddenError below that):
+const withNational = await client.getCitedBy("32016R0679", { includeNational: true });
+console.log(withNational.includeNational); // present once honoured; absent while no jurisdiction is live
+const nationalEdges = await client.getCites("AT-NOR-10001597"); // a national id works directly, no flag needed
 ```
 
-`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles.
+`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles, and `includeNational` (`getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`) to also return/follow national documents of live jurisdictions — BUSINESS, SCALE and ENTERPRISE only. `celexNumber` (and `getCitationPath`'s `from`/`to`) accept a national document id (e.g. `"AT-NOR-10001597"`) directly, with or without the flag; such an id whose jurisdiction isn't live is a plain `NotFoundError`.
 
 ## National law
 

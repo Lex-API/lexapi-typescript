@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { LexAPI, RateLimitedError } from "../src/index.js";
+import { LexAPI, NotFoundError, RateLimitedError, TierForbiddenError } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
 function client(fetchMock: typeof fetch) {
@@ -390,5 +390,87 @@ describe("citations — 2026-10 additions", () => {
     for await (const _p of client(fetchMock).paginateCites("32016R0679")) pages++;
 
     expect(pages).toBe(2);
+  });
+});
+
+describe("includeNational (citation graph + national ids, API 2.5.0)", () => {
+  it("sends includeNational on getCites / getCitedBy and keeps it in the response", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, { success: true, sourceDocument: "AT-NOR-10001597", cites: [], includeNational: true }),
+      jsonResponse(200, { success: true, targetDocument: "AT-NOR-10001597", citedBy: [], includeNational: true }),
+    );
+    const c = client(fetchMock);
+
+    const cites = await c.getCites("AT-NOR-10001597", { includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(cites.includeNational).toBe(true);
+
+    const citedBy = await c.getCitedBy("AT-NOR-10001597", { includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(citedBy.includeNational).toBe(true);
+  });
+
+  it("sends includeNational on getCitationNetwork, getCitationPath, getRelatedDocuments and getCitationStats", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        success: true, document: "32016R0679",
+        network: { celexNumber: "32016R0679", citesCount: 0, citedByCount: 0, cites: [], citedBy: [] },
+        paging: { limit: 100, offset: 0, citesTotal: 0, citedByTotal: 0 },
+        includeNational: true,
+      }),
+      jsonResponse(200, { success: true, from: "32016R0679", to: "AT-NOR-10001597", found: false, path: [], includeNational: true }),
+      jsonResponse(200, { success: true, celexNumber: "32016R0679", method: "bibliographic-coupling", count: 0, related: [], includeNational: true }),
+      jsonResponse(200, { success: true, stats: { totalCitations: 0, uniqueSourceDocuments: 0, uniqueTargetDocuments: 0, mostCited: [], mostCiting: [] }, includeNational: true }),
+    );
+    const c = client(fetchMock);
+
+    const network = await c.getCitationNetwork("32016R0679", { includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(network.includeNational).toBe(true);
+
+    const path = await c.getCitationPath("32016R0679", "AT-NOR-10001597", { includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(path.includeNational).toBe(true);
+
+    const related = await c.getRelatedDocuments("32016R0679", { includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(related.includeNational).toBe(true);
+
+    const stats = await c.getCitationStats({ includeNational: true });
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBe("true");
+    expect(stats.includeNational).toBe(true);
+  });
+
+  it("getCitationStats still works with no params at all (back-compat)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, { success: true, stats: { totalCitations: 1, uniqueSourceDocuments: 1, uniqueTargetDocuments: 1, mostCited: [], mostCiting: [] } }),
+    );
+    const stats = await client(fetchMock).getCitationStats();
+    expect(stats.includeNational).toBeUndefined();
+    expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBeNull();
+  });
+
+  it("includeNational=true below BUSINESS is a 403 TierForbiddenError (legacy shape, upgradeUrl)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(403, {
+        success: false,
+        code: "TIER_FORBIDDEN",
+        error: "National-law access requires a BUSINESS plan or higher",
+        message: "National documents in citation results are available on the BUSINESS, SCALE and ENTERPRISE plans. Your current plan: STARTER.",
+        upgradeUrl: "/pricing",
+      }),
+    );
+    const err = await client(fetchMock).getCitedBy("32016R0679", { includeNational: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(TierForbiddenError);
+    expect(err.status).toBe(403);
+    expect(err.body).toMatchObject({ upgradeUrl: "/pricing" });
+  });
+
+  it("a national id of a jurisdiction that is not live is a 404 NotFoundError (legacy bare, no code)", async () => {
+    const fetchMock = fetchSequence(jsonResponse(404, { error: "Document not found: XX-NOR-99999999" }));
+    const err = await client(fetchMock).getCites("XX-NOR-99999999").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.status).toBe(404);
+    expect(err.message).toContain("Document not found: XX-NOR-99999999");
   });
 });
