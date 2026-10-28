@@ -1378,10 +1378,10 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
 export interface NationalCoverageAvailability {
   available: boolean;
   description?: string;
-  /** Approximate document count. */
-  documents?: number;
-  /** Earliest date covered (`YYYY-MM-DD` or a year), when known. */
-  from?: string;
+  /** Approximate document count. `null` whenever `available` is false (incl. every jurisdiction still in preparation). */
+  documents?: number | null;
+  /** Earliest year covered, as an integer. `null` when unknown — today, always `null` for `legislation`. */
+  from?: number | null;
 }
 
 /** `caseLaw` adds the courts covered. */
@@ -1435,9 +1435,16 @@ export interface NationalCoverageResponse extends WithResponseHeaders {
  * How a national lane labels the text it serves (`content.source.textBasis`
  * server-side) — present only for lanes that write it; absent elsewhere.
  */
+/** Known `NationalTextBasis.basis` wire values (snake_case). Open for forward compatibility. */
+export type NationalTextBasisKind =
+  | "as_announced"
+  | "official_consolidated"
+  | "official_consolidated_superseded"
+  | "none"
+  | (string & {});
+
 export interface NationalTextBasis {
-  /** e.g. `"as announced"`, `"official consolidated text"`, `"superseded"`, `"none"`. */
-  basis: string;
+  basis: NationalTextBasisKind;
   /** The date the text speaks for (never "valid until"). */
   asOf?: string;
   newerConsolidationExists?: boolean;
@@ -1514,17 +1521,27 @@ export interface NationalDocumentListResponse extends CreditedResponse, WithResp
   results: NationalDocumentSummary[];
 }
 
-/** Filters honoured by `POST /{jurisdiction}/search/semantic` (unknown keys are rejected with 400). */
+/**
+ * Filters honoured by `POST /{jurisdiction}/search/semantic` — deliberately
+ * an EXACT interface (no index signature): the server 400s any unsupported
+ * key (`"Unsupported filter"`), so a typo here should be a compile error,
+ * not a silent 400 at runtime. `jurisdiction` must equal the path's
+ * jurisdiction, or be omitted.
+ */
 export interface NationalCaseLawFilters {
   court?: string;
   date_from?: string;
   date_to?: string;
   ecli?: string;
   language?: string;
-  [key: string]: unknown;
+  jurisdiction?: string;
 }
 
-/** Filters honoured by `POST /{jurisdiction}/legislation/semantic`. `law_id`/`in_force`/`law_type` are clausly's own names, accepted as aliases. */
+/**
+ * Filters honoured by `POST /{jurisdiction}/legislation/semantic` — exact,
+ * like {@link NationalCaseLawFilters}. `law_id`/`in_force`/`law_type` are
+ * clausly's own names, accepted as aliases.
+ */
 export interface NationalLegislationFilters {
   id?: string;
   law_id?: string;
@@ -1533,7 +1550,7 @@ export interface NationalLegislationFilters {
   documentType?: string;
   law_type?: string;
   language?: string;
-  [key: string]: unknown;
+  jurisdiction?: string;
 }
 
 /**
@@ -1541,14 +1558,39 @@ export interface NationalLegislationFilters {
  * compatibility but is always a no-op here: the national index never
  * rewrites, so the response reports `hyde: false` (never `true`) when the
  * request set it, and billing stays the flat 5 credits (no 15-credit tier).
+ *
+ * Deliberately NOT `extends SemanticSearchOptions`: `language` here is a
+ * plain `string` (the jurisdiction's own language — anything else is a
+ * 400), not the 10-code EU `SemanticLanguage` enum, and `filters` is the
+ * exact {@link NationalCaseLawFilters} rather than a free-form record.
  */
-export interface NationalSemanticCaseLawOptions extends SemanticSearchOptions {
+export interface NationalSemanticCaseLawOptions {
+  /** Natural-language query to embed. */
+  query: string;
+  /** Max results. Default 10. */
+  limit?: number;
+  /** Drop results below this cosine similarity (wire: `min_score`). */
+  minScore?: number;
+  /** Omit, or the jurisdiction's own language — any other value is a 400. */
+  language?: string;
+  /** Receive the full matched text per hit (wire: `include: ["text"]`) instead of a `snippet`. */
+  includeText?: boolean;
   hyde?: boolean;
   filters?: NationalCaseLawFilters;
 }
 
-/** Options for `nationalLegislationSemanticSearch`. No `hyde`, no `asOf` — both are EU-only. */
-export interface NationalSemanticLegislationOptions extends SemanticSearchOptions {
+/**
+ * Options for `nationalLegislationSemanticSearch`. No `hyde`, no `asOf` —
+ * both are EU-only. See {@link NationalSemanticCaseLawOptions} for why this
+ * does not extend `SemanticSearchOptions`.
+ */
+export interface NationalSemanticLegislationOptions {
+  query: string;
+  limit?: number;
+  minScore?: number;
+  /** Omit, or the jurisdiction's own language — any other value is a 400. */
+  language?: string;
+  includeText?: boolean;
   filters?: NationalLegislationFilters;
 }
 
@@ -1576,9 +1618,15 @@ export interface NationalSemanticCaseLawResult extends SemanticCaseLawResult {
 export interface NationalSemanticLegislationResult extends SemanticLegislationResult {
   documentId?: string;
   jurisdiction?: string;
-  /** Only ever sent as `false`, when a confirmed repeal overrides the hit toward NOT in force. */
-  in_force?: false;
-  /** Present only alongside `in_force: false`. */
+  /**
+   * From the semantic index's own `valid_from`/`valid_to`, computed at query
+   * time — present on EVERY hit as `true` or `false`, same as the EU field.
+   * LexAPI never asserts `true` on its own; it only ever *overrides* this
+   * toward `false` (and adds `valid_to`) when the LexAPI corpus has a
+   * confirmed repeal the index hasn't caught up to yet.
+   */
+  in_force?: boolean;
+  /** Present only alongside a LexAPI-asserted `in_force: false` override — never on the index's own value. */
   valid_to?: string;
   attribution?: string;
 }

@@ -17,6 +17,8 @@ export {
   TierForbiddenError,
   CreditsExhaustedError,
   NationalAllowanceExhaustedError,
+  NationalSemanticNotEnabledError,
+  NationalSemanticUnavailableError,
   UpstreamError,
   ServiceUnavailableError,
   TimeoutError,

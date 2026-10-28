@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { isLexAPIError, LexAPI, NationalAllowanceExhaustedError } from "../src/index.js";
+import {
+  isLexAPIError,
+  LexAPI,
+  NationalAllowanceExhaustedError,
+  NationalSemanticNotEnabledError,
+  NationalSemanticUnavailableError,
+  NotFoundError,
+  ServiceUnavailableError,
+} from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
 function client(fetchMock: typeof fetch) {
@@ -18,7 +26,7 @@ const ALLOWANCE_HEADERS = {
 };
 
 describe("getNationalCoverage", () => {
-  it("GETs /national/coverage with no query", async () => {
+  it("GETs /national/coverage with no query, and keeps the real documents/from shape (int year or null, never a string)", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(200, {
         updatedAt: "2026-10-28T00:00:00.000Z",
@@ -28,13 +36,27 @@ describe("getNationalCoverage", () => {
             name: "Austria",
             live: true,
             launchedAt: "2026-11-03T00:00:00.000Z",
-            legislation: { available: true, documents: 12000, from: "1945" },
-            caseLaw: { available: true, documents: 4000, courts: ["Verfassungsgerichtshof"] },
+            // legislation.from is always null today (not a date/year string).
+            legislation: { available: true, description: "Federal legislation", documents: 12000, from: null },
+            // caseLaw.from is an integer year (firstHeld), or null.
+            caseLaw: { available: true, description: "Federal courts", documents: 4000, from: 2000, courts: ["Verfassungsgerichtshof"] },
             semanticSearch: { legislation: true, caseLaw: true },
             sources: [{ name: "RIS", url: "https://ris.bka.gv.at", licence: "CC BY 4.0", attribution: "Data source: RIS, Bundeskanzleramt Österreich." }],
             lastSyncAt: "2026-10-27T03:00:00.000Z",
           },
-          { code: "ES", name: "Spain", live: false, legislation: { available: false }, caseLaw: { available: false }, semanticSearch: { legislation: false, caseLaw: false }, sources: [] },
+          // A dark (in-preparation) jurisdiction: unavailable sections carry
+          // `documents: null`, `description: ""` and empty `courts`/`sources` — never omitted.
+          {
+            code: "ES",
+            name: "Spain",
+            live: false,
+            launchedAt: null,
+            legislation: { available: false, description: "", documents: null, from: null },
+            caseLaw: { available: false, description: "", documents: null, from: null, courts: [] },
+            semanticSearch: { legislation: false, caseLaw: false },
+            sources: [],
+            lastSyncAt: null,
+          },
         ],
       }),
     );
@@ -45,8 +67,11 @@ describe("getNationalCoverage", () => {
     expect(url).toBe("https://lex-api.com/api/v1/national/coverage");
     expect(result.jurisdictions).toHaveLength(2);
     expect(result.jurisdictions[0]?.code).toBe("AT");
+    expect(result.jurisdictions[0]?.legislation.from).toBeNull();
+    expect(result.jurisdictions[0]?.caseLaw.from).toBe(2000);
     expect(result.jurisdictions[0]?.sources[0]?.attribution).toContain("RIS");
     expect(result.jurisdictions[1]?.live).toBe(false);
+    expect(result.jurisdictions[1]?.legislation.documents).toBeNull();
   });
 });
 
@@ -257,5 +282,100 @@ describe("NationalAllowanceExhaustedError", () => {
     expect(e.remaining).toBe(0);
     expect(e.resetsAt).toBe("2026-11-01T00:00:00.000Z");
     expect(e.upgradeUrl).toBe("/pricing");
+    // A used-up allowance is a usage shortfall, not a transient failure — never retried.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Errors carry the parsed response headers too (X-National-* on the 402 itself).
+    expect(e.headers?.nationalAllowance).toEqual({ limit: 30, remaining: 0, resetsAt: "2026-11-01T00:00:00.000Z" });
+  });
+});
+
+describe("NationalSemanticNotEnabledError (409)", () => {
+  it("is thrown with the legacy-shape body's top-level jurisdiction, and is not retried", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(409, {
+        success: false,
+        code: "NATIONAL_SEMANTIC_NOT_ENABLED",
+        error: "National semantic search not enabled",
+        message: "Semantic search over Austria (AT) is not enabled yet. No credits were charged.",
+        jurisdiction: "AT",
+      }),
+    );
+
+    let thrown: unknown;
+    try {
+      await client(fetchMock).nationalSemanticSearch("AT", { query: "Datenschutz" });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(isLexAPIError(thrown, NationalSemanticNotEnabledError)).toBe(true);
+    const e = thrown as NationalSemanticNotEnabledError;
+    expect(e.status).toBe(409);
+    expect(e.code).toBe("NATIONAL_SEMANTIC_NOT_ENABLED");
+    expect(e.jurisdiction).toBe("AT");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("NationalSemanticUnavailableError (503)", () => {
+  it("is thrown, stays instanceof ServiceUnavailableError, and exposes jurisdiction", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        503,
+        {
+          success: false,
+          code: "NATIONAL_SEMANTIC_UNAVAILABLE",
+          error: "National semantic index unavailable",
+          message: "The Austria (AT) semantic index is temporarily unavailable. No credits were charged. Please try again later.",
+          jurisdiction: "AT",
+        },
+        { "retry-after": "0" },
+      ),
+      jsonResponse(200, { success: true, searchType: "semantic-case-law", jurisdiction: "AT", query: "x", resultCount: 0, results: [] }),
+    );
+
+    // retryReadOnlyPosts is off by default, so a 503 on this read-only POST is not retried —
+    // disable retries entirely so the single attempt surfaces the typed error deterministically.
+    const c = new LexAPI({ apiKey: "lex_test_key", fetch: fetchMock, retry: { ...FAST_RETRY, maxRetries: 0 } });
+
+    let thrown: unknown;
+    try {
+      await c.nationalSemanticSearch("AT", { query: "Datenschutz" });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(isLexAPIError(thrown, NationalSemanticUnavailableError)).toBe(true);
+    expect(isLexAPIError(thrown, ServiceUnavailableError)).toBe(true);
+    const e = thrown as NationalSemanticUnavailableError;
+    expect(e.status).toBe(503);
+    expect(e.code).toBe("NATIONAL_SEMANTIC_UNAVAILABLE");
+    expect(e.jurisdiction).toBe("AT");
+  });
+});
+
+describe("typed national-document 404", () => {
+  it("keeps error.details { id, jurisdiction } from the typed NOT_FOUND envelope", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(404, {
+        success: false,
+        error: {
+          code: "NOT_FOUND",
+          message: "No AT document found with id AT-NOR-99999999",
+          details: { id: "AT-NOR-99999999", jurisdiction: "AT" },
+        },
+      }),
+    );
+
+    let thrown: unknown;
+    try {
+      await client(fetchMock).getNationalDocument("AT", "AT-NOR-99999999");
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(isLexAPIError(thrown, NotFoundError)).toBe(true);
+    const e = thrown as NotFoundError;
+    expect(e.details).toEqual({ id: "AT-NOR-99999999", jurisdiction: "AT" });
   });
 });

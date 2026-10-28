@@ -27,12 +27,21 @@ Adds national (member-state, and non-EU) law support ahead of the LexAPI nationa
 - **`NationalAllowanceExhaustedError`** (`NATIONAL_ALLOWANCE_EXHAUSTED`, 402): FREE/STARTER/
   PROFESSIONAL get national law within a monthly allowance of calls; BUSINESS and above have no
   separate limit. Typed `jurisdiction`/`limit`/`remaining`/`resetsAt`/`upgradeUrl` getters.
+- **`NationalSemanticNotEnabledError`** (409 `NATIONAL_SEMANTIC_NOT_ENABLED` — a jurisdiction has
+  no semantic index at all) and **`NationalSemanticUnavailableError`** (503
+  `NATIONAL_SEMANTIC_UNAVAILABLE` — temporarily unreachable; extends `ServiceUnavailableError`, so
+  `instanceof ServiceUnavailableError` still holds). Both legacy-shape bodies; `.jurisdiction` is
+  read off the raw `body`, not `details`.
 - **`result.headers.nationalAllowance`** (`{ limit, remaining, resetsAt }`), parsed from
   `X-National-Limit`/`X-National-Remaining`/`X-National-Reset` — present only for
-  FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints.
+  FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints (also on the
+  402 error itself, via `err.headers`).
 
-Validate against the live API once lex-api PR #306 (the allowance) and the national-law launch
-are deployed — this SDK was built from the server source and PR #306's diff ahead of merge.
+Validated against lex-api **PR #314** (`openapi.yaml`/`docs.md` @ `e10657f`, API 2.5.0 — the
+documented national-law contract) and PR #306 (the allowance), plus the real
+`nationalCoverageController.js` on `feat/national-launch-switch`. **Not covered yet:**
+`includeNational` and national ids on the `/citations/*` routes (BUSINESS+) — deferred to a
+follow-up release once that surface ships server-side.
 
 ## [0.2.0] — 2026-10-26
 

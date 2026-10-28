@@ -43,6 +43,12 @@ export type ErrorCode =
   // 402 on a national-law call from a plan below BUSINESS: the monthly
   // allowance of national calls is used up (lex-api PR #306) — `NationalAllowanceExhaustedError`.
   | "NATIONAL_ALLOWANCE_EXHAUSTED"
+  // 409 — this jurisdiction has no semantic index to search (legacy shape,
+  // top-level `jurisdiction`) — `NationalSemanticNotEnabledError`.
+  | "NATIONAL_SEMANTIC_NOT_ENABLED"
+  // 503 — a jurisdiction's semantic index is temporarily unreachable
+  // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
+  | "NATIONAL_SEMANTIC_UNAVAILABLE"
   // Forward compatibility: unknown codes are kept as-is.
   | (string & {});
 
@@ -259,6 +265,10 @@ export class LexAPIError extends Error {
         return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
       case "NATIONAL_ALLOWANCE_EXHAUSTED":
         return new NationalAllowanceExhaustedError(message, status, details, retryAfter, context);
+      case "NATIONAL_SEMANTIC_NOT_ENABLED":
+        return new NationalSemanticNotEnabledError(message, status, details, retryAfter, context);
+      case "NATIONAL_SEMANTIC_UNAVAILABLE":
+        return new NationalSemanticUnavailableError(message, status, details, retryAfter, context);
       case "UPSTREAM_ERROR":
         return new UpstreamError(message, status, details, retryAfter, context);
       case "TIMEOUT":
@@ -587,9 +597,68 @@ export class ServiceUnavailableError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    // Internal: lets a subclass (`NationalSemanticUnavailableError`) keep its
+    // own, more specific `code` while still being `instanceof
+    // ServiceUnavailableError` (and retried the same way). Not part of the
+    // public constructor contract — always omitted by callers outside this file.
+    code: ErrorCode = "SERVICE_UNAVAILABLE",
   ) {
-    super("SERVICE_UNAVAILABLE", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "ServiceUnavailableError";
+  }
+}
+
+/**
+ * 409 — this jurisdiction's semantic index isn't enabled at all
+ * (`NATIONAL_SEMANTIC_NOT_ENABLED`). Legacy-shape body (`{code, error,
+ * message, jurisdiction}`, no `error.details`) — `jurisdiction` is read off
+ * the raw `body`, not `details`. Not retryable; the call was refunded in
+ * full and never reached the national allowance counter.
+ */
+export class NationalSemanticNotEnabledError extends LexAPIError {
+  static override readonly kind: string = "NationalSemanticNotEnabledError";
+
+  constructor(
+    message: string,
+    status = 409,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("NATIONAL_SEMANTIC_NOT_ENABLED", message, status, details, retryAfter, context);
+    this.name = "NationalSemanticNotEnabledError";
+  }
+
+  /** ISO 3166-1 alpha-2 jurisdiction code (top-level `jurisdiction` on the raw body). */
+  get jurisdiction(): string | undefined {
+    return readString(bodyField(this.body, "jurisdiction"));
+  }
+}
+
+/**
+ * 503 — a jurisdiction's semantic index exists but is temporarily
+ * unreachable (`NATIONAL_SEMANTIC_UNAVAILABLE`). Extends
+ * `ServiceUnavailableError` so `instanceof ServiceUnavailableError` still
+ * holds (and any existing 503-retry handling still catches it), while
+ * `code`/`name` stay specific. Legacy-shape body, same as
+ * `NationalSemanticNotEnabledError` — `jurisdiction` comes off `body`.
+ */
+export class NationalSemanticUnavailableError extends ServiceUnavailableError {
+  static override readonly kind: string = "NationalSemanticUnavailableError";
+
+  constructor(
+    message: string,
+    status = 503,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super(message, status, details, retryAfter, context, "NATIONAL_SEMANTIC_UNAVAILABLE");
+    this.name = "NationalSemanticUnavailableError";
+  }
+
+  get jurisdiction(): string | undefined {
+    return readString(bodyField(this.body, "jurisdiction"));
   }
 }
 

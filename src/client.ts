@@ -672,7 +672,7 @@ export class LexAPI {
     return this.call<NationalSemanticCaseLawResponse>({
       method: "POST",
       path: `/${jurisdiction.toLowerCase()}/search/semantic`,
-      body: semanticWireBody(request),
+      body: nationalSemanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -695,7 +695,7 @@ export class LexAPI {
     return this.call<NationalSemanticLegislationResponse>({
       method: "POST",
       path: `/${jurisdiction.toLowerCase()}/legislation/semantic`,
-      body: semanticWireBody(request),
+      body: nationalSemanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -847,6 +847,33 @@ function semanticWireBody(
   if (request.filters !== undefined) body["filters"] = request.filters;
   if (request.hyde !== undefined) body["hyde"] = request.hyde;
   if (request.asOf !== undefined) body["asOf"] = request.asOf;
+  return body;
+}
+
+/**
+ * Same mapping as `semanticWireBody`, for the national options types: those
+ * deliberately don't extend `SemanticSearchOptions` (a narrower `language`,
+ * exact `filters` interfaces — see `NationalSemanticCaseLawOptions`), so
+ * `filters` is read as `unknown` here rather than `Record<string, unknown>`
+ * to avoid the missing-index-signature assignability error. Never forwards
+ * `asOf` — the national legislation options type has no such field.
+ */
+function nationalSemanticWireBody(request: {
+  query: string;
+  limit?: number;
+  minScore?: number;
+  language?: string;
+  includeText?: boolean;
+  filters?: unknown;
+  hyde?: boolean;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = { query: request.query };
+  if (request.limit !== undefined) body["limit"] = request.limit;
+  if (request.minScore !== undefined) body["min_score"] = request.minScore;
+  if (request.language !== undefined) body["language"] = request.language;
+  if (request.includeText) body["include"] = ["text"];
+  if (request.filters !== undefined) body["filters"] = request.filters;
+  if (request.hyde !== undefined) body["hyde"] = request.hyde;
   return body;
 }
 
