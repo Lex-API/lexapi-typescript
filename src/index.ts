@@ -19,6 +19,7 @@ export {
   NationalAllowanceExhaustedError,
   NationalSemanticNotEnabledError,
   NationalSemanticUnavailableError,
+  DocumentWithdrawnError,
   UpstreamError,
   ServiceUnavailableError,
   TimeoutError,
@@ -33,6 +34,7 @@ export {
   type LexAPIErrorContext,
   type CreditsExhaustedDetails,
   type NationalAllowanceExhaustedDetails,
+  type DocumentWithdrawnDetails,
 } from "./errors.js";
 export { getCreditUsage, type CreditUsage } from "./credits.js";
 export {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DocumentWithdrawnError,
   isLexAPIError,
   LexAPI,
   NationalAllowanceExhaustedError,
@@ -8,6 +9,8 @@ import {
   NationalSemanticUnavailableError,
   NotFoundError,
   ServiceUnavailableError,
+  TimeoutError,
+  type NationalSemanticLegislationOptions,
 } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
@@ -127,9 +130,12 @@ describe("listNationalDocuments", () => {
       jsonResponse(200, {
         jurisdiction: "AT",
         total: 2,
+        totalExact: true,
         page: 1,
         limit: 20,
         includeRepealed: false,
+        hasMore: false,
+        nextCursor: null,
         results: [
           { id: "AT-NOR-1", jurisdiction: "AT", language: "de", title: "A", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" },
           { id: "AT-NOR-2", jurisdiction: "AT", language: "de", title: "B", version: 2, fetchedAt: "2026-10-02T00:00:00.000Z" },
@@ -148,7 +154,122 @@ describe("listNationalDocuments", () => {
     expect(parsed.searchParams.get("page")).toBe("1");
     expect(parsed.searchParams.get("includeRepealed")).toBe("true");
     expect(result.total).toBe(2);
+    expect(result.totalExact).toBe(true);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
     expect(result.results).toHaveLength(2);
+  });
+
+  it("sends cursor instead of page, and omits page from the query when unset", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 1200, totalExact: false, limit: 20, includeRepealed: false,
+        hasMore: true, nextCursor: "eyJhIjoxfQ", results: [],
+      }),
+    );
+    const result = await client(fetchMock).listNationalDocuments("AT", { cursor: "abc123" });
+    const parsed = new URL(lastCall(fetchMock)[0]);
+    expect(parsed.searchParams.get("cursor")).toBe("abc123");
+    expect(parsed.searchParams.has("page")).toBe(false);
+    expect(result.page).toBeUndefined();
+    expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).toBe("eyJhIjoxfQ");
+  });
+
+  it("paginateNationalDocuments walks pages via nextCursor and stops on hasMore: false", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 3, totalExact: true, limit: 2, includeRepealed: false,
+        hasMore: true, nextCursor: "c1",
+        results: [{ id: "AT-NOR-1", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" }],
+      }),
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 3, totalExact: true, limit: 2, includeRepealed: false,
+        hasMore: false, nextCursor: null,
+        results: [{ id: "AT-NOR-2", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-02T00:00:00.000Z" }],
+      }),
+    );
+    const seen: string[] = [];
+    for await (const page of client(fetchMock).paginateNationalDocuments("AT", { limit: 2 })) {
+      seen.push(...page.results.map((r) => r.id!));
+    }
+    expect(seen).toEqual(["AT-NOR-1", "AT-NOR-2"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [secondCallUrl] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    const secondUrl = new URL(secondCallUrl);
+    expect(secondUrl.searchParams.get("cursor")).toBe("c1");
+  });
+
+  it("a page past the first 1,000 rows via `page` is a 400 InvalidParamsError", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(400, {
+        success: false,
+        error: { code: "INVALID_PARAMS", message: "page reaches past the first 1000 results — page further with cursor (each page's nextCursor)" },
+      }),
+    );
+    await expect(client(fetchMock).listNationalDocuments("AT", { page: 51, limit: 20 })).rejects.toThrow(/page/i);
+  });
+
+  it("a slow page is a retry-safe 504 TimeoutError", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(504, { success: false, error: { code: "TIMEOUT", message: "The listing took too long. Narrow it (q, type) and retry." } }),
+    );
+    const err = await client(fetchMock).listNationalDocuments("AT", { q: "x".repeat(3) }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.status).toBe(504);
+  });
+});
+
+describe("DocumentWithdrawnError (410, lex-api PR #320)", () => {
+  it("getNationalDocument: typed envelope, details nested", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(410, {
+        success: false,
+        error: {
+          code: "DOCUMENT_WITHDRAWN",
+          message: "AT document AT-NOR-5 was withdrawn by its source and is no longer served",
+          details: { id: "AT-NOR-5", jurisdiction: "AT", withdrawnAt: "2026-10-20T00:00:00.000Z" },
+        },
+      }),
+    );
+    const err = await client(fetchMock).getNationalDocument("AT", "AT-NOR-5").catch((e) => e);
+    expect(err).toBeInstanceOf(DocumentWithdrawnError);
+    expect(err.status).toBe(410);
+    expect(err.id).toBe("AT-NOR-5");
+    expect(err.jurisdiction).toBe("AT");
+    expect(err.withdrawnAt).toBe("2026-10-20T00:00:00.000Z");
+  });
+
+  it("citation routes: legacy shape, id/jurisdiction/withdrawnAt as top-level siblings — still readable via the same getters", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(410, {
+        success: false,
+        code: "DOCUMENT_WITHDRAWN",
+        error: "Document withdrawn: AT-NOR-5",
+        message: "AT document AT-NOR-5 was withdrawn by its source and is no longer served.",
+        id: "AT-NOR-5",
+        jurisdiction: "AT",
+        withdrawnAt: "2026-10-20T00:00:00.000Z",
+      }),
+    );
+    const err = await client(fetchMock).getCites("AT-NOR-5").catch((e) => e);
+    expect(err).toBeInstanceOf(DocumentWithdrawnError);
+    expect(err.id).toBe("AT-NOR-5");
+    expect(err.jurisdiction).toBe("AT");
+    expect(err.withdrawnAt).toBe("2026-10-20T00:00:00.000Z");
+  });
+});
+
+describe("legislation semantic never sends hyde, even if injected on the request object", () => {
+  it("strips a bypassed hyde field from the wire body", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, { success: true, searchType: "semantic-legislation", jurisdiction: "AT", results: [] }),
+    );
+    const bypassed = { query: "Kündigungsfrist", hyde: true } as NationalSemanticLegislationOptions & { hyde?: boolean };
+    await client(fetchMock).nationalLegislationSemanticSearch("AT", bypassed);
+    const [, init] = lastCall(fetchMock);
+    const body = JSON.parse(init.body as string);
+    expect(body.hyde).toBeUndefined();
   });
 });
 

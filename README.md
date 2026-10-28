@@ -39,8 +39,8 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
 | 0 | `getNationalCoverage` (public) |
-| 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 |
-| 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
+| 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 (an unknown id too) |
+| 1 per call | `listNationalDocuments` — flat; pagination does not multiply the price (API 2.5.0; was 3 — confirm against the live API) |
 | 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law |
 
 Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge. The national-law call allowance follows the same rule: a failed call (other than a 404) gives its call back too.
@@ -194,11 +194,16 @@ for (const j of coverage.jurisdictions) {
 const doc = await client.getNationalDocument("AT", "AT-NOR-12345"); // 1 credit
 console.log(doc.document.attribution); // always show this alongside the text
 
-const page = await client.listNationalDocuments("AT", { q: "Datenschutz", limit: 20 }); // 3 credits flat
+const page = await client.listNationalDocuments("AT", { q: "Datenschutz", limit: 20 }); // 1 credit flat
+for await (const p of client.paginateNationalDocuments("AT", { q: "Datenschutz", limit: 100 })) {
+  console.log(p.results.length, p.hasMore); // cursor paging — reaches past the first 1,000 rows, `page` doesn't
+}
 
 const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei Bankgeschäften" }); // 5 credits
 const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
 ```
+
+A document its source withdrew (a takedown, a pseudonymisation fix) throws `DocumentWithdrawnError` (410) from `getNationalDocument` and from the citation methods for a withdrawn national id — nothing of it is served, not even the title; drop any copy you hold.
 
 A used-up allowance is `NationalAllowanceExhaustedError` (402); its headroom is also on
 `result.headers.nationalAllowance` (`{ limit, remaining, resetsAt }`) on every admitted call from a
@@ -384,6 +389,7 @@ try {
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
 | `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable; `.jurisdiction`; retry later |
+| `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `TimeoutError` | `TIMEOUT` (504, 524) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |

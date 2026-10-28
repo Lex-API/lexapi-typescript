@@ -8,17 +8,23 @@ picks up `0.2.0` on its own.
 ## [0.3.0] — 2026-10-28
 
 Adds national (member-state, and non-EU) law support ahead of the LexAPI national-law launch
-(2026-11-03).
+(2026-11-03). **Requires LexAPI API 2.5.0** (lex-api PRs #306, #314, #320 — the allowance, the
+documented contract and the pre-launch hardening pass). Re-verify once all three are deployed; see
+the per-item notes below for what is still provisional (the listing's credit weight).
 
 ### Added
 
 - **National law**: `getNationalCoverage()` (`GET /national/coverage`, public, free — which
   jurisdictions are live, what each covers, sources and their attribution), `getNationalDocument()`
-  (`GET /{jurisdiction}/documents/{id}`, 1 credit), `listNationalDocuments()`
-  (`GET /{jurisdiction}/documents`, 3 credits flat), `nationalSemanticSearch()`
+  (`GET /{jurisdiction}/documents/{id}`, 1 credit), `listNationalDocuments()` /
+  `paginateNationalDocuments()` (`GET /{jurisdiction}/documents`, 1 credit flat — API 2.5.0 dropped
+  this from 3, **pending Nejc's confirmation**; cursor paging past the first 1,000 rows, newest-first
+  by document date), `nationalSemanticSearch()`
   (`POST /{jurisdiction}/search/semantic`, 5 credits — `hyde` accepted but never rewrites or
   changes price here) and `nationalLegislationSemanticSearch()`
-  (`POST /{jurisdiction}/legislation/semantic`, 5 credits; no `hyde`/`asOf`). New types:
+  (`POST /{jurisdiction}/legislation/semantic`, 5 credits; no `hyde`/`asOf` — and never forwards a
+  bypassed `hyde` either, now that the server validates it strictly as a boolean on this route
+  too). New types:
   `NationalCoverageResponse`, `NationalDocument`, `NationalDocumentSummary`,
   `NationalDocumentResponse`, `NationalDocumentListParams`, `NationalDocumentListResponse`,
   `NationalSemanticCaseLawOptions`/`Result`/`Response`, `NationalSemanticLegislationOptions`/
@@ -32,6 +38,12 @@ Adds national (member-state, and non-EU) law support ahead of the LexAPI nationa
   `NATIONAL_SEMANTIC_UNAVAILABLE` — temporarily unreachable; extends `ServiceUnavailableError`, so
   `instanceof ServiceUnavailableError` still holds). Both legacy-shape bodies; `.jurisdiction` is
   read off the raw `body`, not `details`.
+- **`DocumentWithdrawnError`** (`DOCUMENT_WITHDRAWN`, 410 — lex-api PR #320): a national document
+  its source withdrew (a takedown, a pseudonymisation fix) is served nowhere — no title, no
+  metadata, no text. Thrown by `getNationalDocument` (typed envelope, `details: {id, jurisdiction,
+  withdrawnAt}`) and by the citation methods for a withdrawn national id (legacy shape, the same
+  three fields as top-level siblings instead). `.id`/`.jurisdiction`/`.withdrawnAt` read whichever
+  shape answered. Not retryable; nothing is ever charged for it.
 - **`result.headers.nationalAllowance`** (`{ limit, remaining, resetsAt }`), parsed from
   `X-National-Limit`/`X-National-Remaining`/`X-National-Reset` — present only for
   FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints (also on the

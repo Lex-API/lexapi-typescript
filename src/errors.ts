@@ -49,6 +49,13 @@ export type ErrorCode =
   // 503 — a jurisdiction's semantic index is temporarily unreachable
   // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
   | "NATIONAL_SEMANTIC_UNAVAILABLE"
+  // 410 — a national document its source withdrew (lex-api PR #320): served
+  // nowhere, no title/metadata/text. Two envelope shapes carry it: the typed
+  // envelope on a direct document read (`details: {id, jurisdiction,
+  // withdrawnAt}`), and the legacy shape with those three as TOP-LEVEL
+  // sibling fields on the citation routes — `DocumentWithdrawnError` reads
+  // either.
+  | "DOCUMENT_WITHDRAWN"
   // Forward compatibility: unknown codes are kept as-is.
   | (string & {});
 
@@ -269,6 +276,8 @@ export class LexAPIError extends Error {
         return new NationalSemanticNotEnabledError(message, status, details, retryAfter, context);
       case "NATIONAL_SEMANTIC_UNAVAILABLE":
         return new NationalSemanticUnavailableError(message, status, details, retryAfter, context);
+      case "DOCUMENT_WITHDRAWN":
+        return new DocumentWithdrawnError(message, status, details, retryAfter, context);
       case "UPSTREAM_ERROR":
         return new UpstreamError(message, status, details, retryAfter, context);
       case "TIMEOUT":
@@ -659,6 +668,69 @@ export class NationalSemanticUnavailableError extends ServiceUnavailableError {
 
   get jurisdiction(): string | undefined {
     return readString(bodyField(this.body, "jurisdiction"));
+  }
+}
+
+/** `error.details` (typed envelope) or the raw body (legacy envelope) on a `DOCUMENT_WITHDRAWN` 410. */
+export interface DocumentWithdrawnDetails {
+  id?: string;
+  jurisdiction?: string;
+  /** ISO date-time the source withdrew the document; `null` when unknown. */
+  withdrawnAt?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * 410 — a national document its source withdrew (a takedown, a
+ * pseudonymisation fix, a robots.txt listing — lex-api PR #320). LexAPI
+ * serves nothing of it: no title, no metadata, no text. Two envelope shapes
+ * carry this code: the TYPED envelope on a direct document read
+ * (`GET /{jurisdiction}/documents/{id}`, `error.details: {id, jurisdiction,
+ * withdrawnAt}`), and the LEGACY shape with those same three fields as
+ * top-level siblings of `code`/`error` on the citation routes (a withdrawn
+ * id queried directly, or via `includeNational`). The getters below check
+ * `details` first, then fall back to the raw `body` — correct for either
+ * shape without the caller needing to know which one answered.
+ *
+ * Not retryable (the document is gone, not temporarily failing); never
+ * charges anything (the credits/allowance refund rule already returns
+ * every non-404 4xx-or-5xx). If you hold a cached copy of this document,
+ * drop it — the source withdrew it for a reason that may include a legal
+ * takedown or a pseudonymisation fix (see docs §7, no re-identification).
+ */
+export class DocumentWithdrawnError extends LexAPIError {
+  static override readonly kind: string = "DocumentWithdrawnError";
+  declare readonly details: DocumentWithdrawnDetails | undefined;
+
+  constructor(
+    message: string,
+    status = 410,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("DOCUMENT_WITHDRAWN", message, status, details, retryAfter, context);
+    this.name = "DocumentWithdrawnError";
+  }
+
+  private field(key: "id" | "jurisdiction" | "withdrawnAt"): unknown {
+    const fromDetails = detailsField(this.details, key);
+    return fromDetails !== undefined ? fromDetails : bodyField(this.body, key);
+  }
+
+  /** The withdrawn document's id (e.g. `AT-NOR-10001597`). */
+  get id(): string | undefined {
+    return readString(this.field("id"));
+  }
+
+  /** Upper-case jurisdiction code. */
+  get jurisdiction(): string | undefined {
+    return readString(this.field("jurisdiction"));
+  }
+
+  /** ISO date-time the source withdrew the document; `undefined` when unknown. */
+  get withdrawnAt(): string | undefined {
+    return readString(this.field("withdrawnAt"));
   }
 }
 

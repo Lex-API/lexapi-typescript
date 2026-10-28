@@ -1534,27 +1534,53 @@ export interface NationalDocumentResponse extends CreditedResponse, WithResponse
 }
 
 export interface NationalDocumentListParams {
+  /**
+   * 1-based page, within the first `LISTING_MAX_OFFSET` (1,000) rows only —
+   * `(page - 1) * limit >= 1000` is a 400 `InvalidParamsError`. Mutually
+   * exclusive with `cursor`; omit both for page 1. Beyond the first 1,000
+   * rows, page through with `cursor` (each response's `nextCursor`) instead.
+   */
   page?: number;
+  /**
+   * Opaque keyset cursor from a previous response's `nextCursor`. Works at
+   * any depth (unlike `page`, which only reaches the first 1,000 rows). An
+   * invalid cursor is a 400.
+   */
+  cursor?: string;
   /** Default 20, max 100. */
   limit?: number;
-  /** Case-insensitive title search. */
+  /** Case-insensitive title search, 3–200 characters (Unicode code points). */
   q?: string;
-  /** Case-insensitive substring match on `documentType` (wire param: `type`). */
+  /** Case-insensitive substring match on `documentType` (wire param: `type`), at most 200 characters. */
   documentType?: string;
   /** Repealed acts are hidden by default; `true` includes them. */
   includeRepealed?: boolean;
 }
 
 /**
- * `GET /{jurisdiction}/documents`. No `success` field. 3 credits per call
- * (flat — pagination does not multiply the price, unlike `search`).
+ * `GET /{jurisdiction}/documents`. No `success` field. 1 credit per call
+ * (flat — pagination does not multiply the price, unlike `search`; this
+ * dropped from 3 credits in API 2.5.0 — confirm against the live API /
+ * docs.md before relying on it).
+ *
+ * Results are newest-first by the document's own date (undated rows last),
+ * then by id — a total order, so pages never repeat or skip a row even
+ * while the corpus keeps changing underneath the walk.
  */
 export interface NationalDocumentListResponse extends CreditedResponse, WithResponseHeaders {
   jurisdiction: string;
+  /** Matching rows, counted up to 10,000 — see `totalExact`. */
   total: number;
-  page: number;
+  /** `false` when `total` is a lower bound (more than 10,000 rows matched, or the count timed out). */
+  totalExact: boolean;
+  /** Present only when the request paged with `page` (absent in cursor mode). */
+  page?: number;
   limit: number;
   includeRepealed: boolean;
+  /** `true` when another page follows — page with `nextCursor`. */
+  hasMore: boolean;
+  /** Opaque cursor for the next page (via `cursor`), or `null` on the last page. */
+  nextCursor: string | null;
   results: NationalDocumentSummary[];
 }
 

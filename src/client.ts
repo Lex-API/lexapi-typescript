@@ -641,9 +641,13 @@ export class LexAPI {
    *
    * **Cost: 1 credit** — every national read is a corpus read (there is no
    * live-fetch fallback), so the 5-credit upfront reservation always
-   * settles to 1. Check `document.textAvailability.available` before
-   * reading `content`, and always show `document.attribution` to the user
-   * alongside the text.
+   * settles to 1 (an unknown id too). Check
+   * `document.textAvailability.available` before reading `content`, and
+   * always show `document.attribution` to the user alongside the text.
+   *
+   * A document its source withdrew (a takedown, a pseudonymisation fix)
+   * throws `DocumentWithdrawnError` (410) instead of answering — nothing of
+   * it is served, not even the title; drop any copy you hold.
    */
   async getNationalDocument(
     jurisdiction: string,
@@ -662,10 +666,17 @@ export class LexAPI {
 
   /**
    * `GET /{jurisdiction}/documents` — browse a jurisdiction's corpus by
-   * title (`q`), type, and in-force status.
+   * title (`q`), type, and in-force status. Newest-first by the document's
+   * own date.
    *
-   * **Cost: 3 credits per call** — flat; pagination (`page`) does not
-   * multiply the price, unlike `search`.
+   * **Cost: 1 credit per call** — flat; pagination does not multiply the
+   * price, unlike `search` (API 2.5.0 dropped this from 3 — confirm against
+   * the live API before relying on it). **Paging:** `page` only reaches the
+   * first 1,000 rows (a 400 past that); page further with `cursor` (each
+   * response's `nextCursor`), which works at any depth — see
+   * `paginateNationalDocuments` for a ready-made walk. A slow page is a
+   * retry-safe `TimeoutError` (504, refunded); the `total` count is capped
+   * at 10,000 and flagged `totalExact: false` past that or on a slow count.
    */
   async listNationalDocuments(
     jurisdiction: string,
@@ -677,6 +688,7 @@ export class LexAPI {
       path: `/${jurisdiction.toLowerCase()}/documents`,
       query: {
         page: params.page,
+        cursor: params.cursor,
         limit: params.limit,
         q: params.q,
         type: params.documentType,
@@ -685,6 +697,31 @@ export class LexAPI {
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
+  }
+
+  /**
+   * Walk every page of `listNationalDocuments` via `cursor` (works past the
+   * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
+   * a separate billed call. Stops after a page with `hasMore: false` (or an
+   * empty page). Any `params.page` is ignored — pass `params.cursor` only
+   * to resume a walk you saved partway through.
+   */
+  async *paginateNationalDocuments(
+    jurisdiction: string,
+    params: Omit<NationalDocumentListParams, "page"> = {},
+    options?: CallOptions,
+  ): AsyncGenerator<NationalDocumentListResponse, void> {
+    let cursor = params.cursor;
+    for (;;) {
+      const page = await this.listNationalDocuments(
+        jurisdiction,
+        cursor !== undefined ? { ...params, cursor } : { ...params },
+        options,
+      );
+      yield page;
+      if (!page.hasMore || !page.nextCursor || page.results.length === 0) return;
+      cursor = page.nextCursor;
+    }
   }
 
   /**
@@ -717,6 +754,10 @@ export class LexAPI {
    * search over a jurisdiction's legislation; article-level matches. Same
    * shape as `semanticLegislationSearch`, plus `jurisdiction`/`documentId`/
    * `attribution` on every hit. No `hyde`, no `asOf` — both are EU-only.
+   * `NationalSemanticLegislationOptions` has no `hyde` field, and this SDK
+   * never forwards one on this call even if a caller bypasses the type
+   * system — the server now validates `hyde` as a boolean on this route too
+   * (400 otherwise), so a stray non-boolean value would 400 for nothing.
    *
    * **Cost: 5 credits.**
    */
@@ -728,7 +769,7 @@ export class LexAPI {
     return this.call<NationalSemanticLegislationResponse>({
       method: "POST",
       path: `/${jurisdiction.toLowerCase()}/legislation/semantic`,
-      body: nationalSemanticWireBody(request),
+      body: nationalSemanticWireBody(request, { allowHyde: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -891,22 +932,28 @@ function semanticWireBody(
  * to avoid the missing-index-signature assignability error. Never forwards
  * `asOf` — the national legislation options type has no such field.
  */
-function nationalSemanticWireBody(request: {
-  query: string;
-  limit?: number;
-  minScore?: number;
-  language?: string;
-  includeText?: boolean;
-  filters?: unknown;
-  hyde?: boolean;
-}): Record<string, unknown> {
+function nationalSemanticWireBody(
+  request: {
+    query: string;
+    limit?: number;
+    minScore?: number;
+    language?: string;
+    includeText?: boolean;
+    filters?: unknown;
+    hyde?: boolean;
+  },
+  { allowHyde = true }: { allowHyde?: boolean } = {},
+): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
   if (request.minScore !== undefined) body["min_score"] = request.minScore;
   if (request.language !== undefined) body["language"] = request.language;
   if (request.includeText) body["include"] = ["text"];
   if (request.filters !== undefined) body["filters"] = request.filters;
-  if (request.hyde !== undefined) body["hyde"] = request.hyde;
+  // Legislation never sends hyde, even if a caller bypassing the type
+  // system set one on the (typed hyde-less) request object — the server
+  // validates it strictly as a boolean on this route too (400 otherwise).
+  if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
   return body;
 }
 
