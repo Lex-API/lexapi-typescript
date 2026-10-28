@@ -1365,6 +1365,264 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
   semanticUsage?: SemanticUsageInfo;
 }
 
+// ── National law ────────────────────────────────────────────────────
+// Member-state (and non-EU, e.g. UK) legal orders LexAPI serves alongside
+// EUR-Lex. BUSINESS and above get full access; FREE/STARTER/PROFESSIONAL get
+// it within a monthly allowance of national calls (lex-api PR #306) —
+// see `X-National-Limit`/`X-National-Remaining`/`X-National-Reset`
+// (`ResponseHeaders.nationalAllowance`) and `NationalAllowanceExhaustedError`.
+// A jurisdiction not yet launched answers 404, exactly like one that doesn't
+// exist — call `getNationalCoverage()` first to see what is live.
+
+/** Availability block shared by `legislation` and `caseLaw` on a coverage entry. */
+export interface NationalCoverageAvailability {
+  available: boolean;
+  description?: string;
+  /** Approximate document count. */
+  documents?: number;
+  /** Earliest date covered (`YYYY-MM-DD` or a year), when known. */
+  from?: string;
+}
+
+/** `caseLaw` adds the courts covered. */
+export interface NationalCaseLawCoverageAvailability extends NationalCoverageAvailability {
+  courts?: string[];
+}
+
+/** Whether semantic search is indexed for this jurisdiction, per domain. */
+export interface NationalSemanticSearchAvailability {
+  legislation: boolean;
+  caseLaw: boolean;
+}
+
+/** One upstream data source a jurisdiction's corpus is built from. */
+export interface NationalSource {
+  name: string;
+  url: string;
+  licence: string;
+  attribution: string;
+}
+
+/** One jurisdiction's entry on `GET /national/coverage`. */
+export interface NationalJurisdictionCoverage {
+  /** ISO 3166-1 alpha-2, e.g. `"AT"`. Non-EU legal orders (e.g. `"UK"`) are included too. */
+  code: string;
+  name: string;
+  /** Whether customers can call this jurisdiction's endpoints today. */
+  live: boolean;
+  /** `null` before launch. */
+  launchedAt?: string | null;
+  legislation: NationalCoverageAvailability;
+  caseLaw: NationalCaseLawCoverageAvailability;
+  semanticSearch: NationalSemanticSearchAvailability;
+  sources: NationalSource[];
+  /** When this jurisdiction's corpus was last synced. `null` if never. */
+  lastSyncAt?: string | null;
+}
+
+/**
+ * `GET /national/coverage` — public, free, no API key or allowance headers
+ * required. Call this before `getNationalDocument` / `listNationalDocuments`
+ * / `nationalSemanticSearch` / `nationalLegislationSemanticSearch` to check
+ * whether a jurisdiction is live, so a 404 is never a surprise.
+ */
+export interface NationalCoverageResponse extends WithResponseHeaders {
+  updatedAt: string;
+  jurisdictions: NationalJurisdictionCoverage[];
+}
+
+/**
+ * How a national lane labels the text it serves (`content.source.textBasis`
+ * server-side) — present only for lanes that write it; absent elsewhere.
+ */
+export interface NationalTextBasis {
+  /** e.g. `"as announced"`, `"official consolidated text"`, `"superseded"`, `"none"`. */
+  basis: string;
+  /** The date the text speaks for (never "valid until"). */
+  asOf?: string;
+  newerConsolidationExists?: boolean;
+  newestPdfOnlyDate?: string;
+  newerPdfOnly?: string[];
+  amendedSince?: boolean;
+  /** ELI of the act this text was consolidated from, when applicable. */
+  textFrom?: string;
+}
+
+/** Summary fields shared by a `listNationalDocuments` row and a full `NationalDocument`. */
+export interface NationalDocumentSummary {
+  /** The national corpus id (e.g. `"AT-NOR-12345"`), analogous to a CELEX number. */
+  id: string;
+  /** ISO 3166-1 alpha-2 jurisdiction code. */
+  jurisdiction: string;
+  language: string;
+  title?: string | null;
+  documentType?: string | null;
+  ecli?: string | null;
+  eli?: string | null;
+  dateOfDocument?: string | null;
+  /** Monotonic corpus version for this id. */
+  version?: number;
+  fetchedAt?: string;
+  /** Present only once a lane has confirmed the act is no longer in force (the last day in force). */
+  validTo?: string;
+  /** Present only alongside `validTo`. */
+  inForce?: boolean;
+}
+
+/** Full national document — `GET /{jurisdiction}/documents/{id}`. */
+export interface NationalDocument extends NationalDocumentSummary {
+  /** `null` when the jurisdiction's source publishes no text for this id — check `textAvailability`. */
+  content?: DocumentContent | null;
+  textAvailability?: TextAvailability;
+  /** The jurisdiction's source attribution — always show this to users alongside the text. */
+  attribution: string;
+  textBasis?: NationalTextBasis;
+}
+
+/**
+ * `GET /{jurisdiction}/documents/{id}`. No `success` field (unlike the EU
+ * document endpoints). Credit cost: every national read is a corpus read
+ * (there is no live-fetch fallback) — reserved at the `document_fetch`
+ * weight (5) and settled to the corpus-hit weight (1).
+ */
+export interface NationalDocumentResponse extends CreditedResponse, WithResponseHeaders {
+  document: NationalDocument;
+}
+
+export interface NationalDocumentListParams {
+  page?: number;
+  /** Default 20, max 100. */
+  limit?: number;
+  /** Case-insensitive title search. */
+  q?: string;
+  /** Case-insensitive substring match on `documentType` (wire param: `type`). */
+  documentType?: string;
+  /** Repealed acts are hidden by default; `true` includes them. */
+  includeRepealed?: boolean;
+}
+
+/**
+ * `GET /{jurisdiction}/documents`. No `success` field. 3 credits per call
+ * (flat — pagination does not multiply the price, unlike `search`).
+ */
+export interface NationalDocumentListResponse extends CreditedResponse, WithResponseHeaders {
+  jurisdiction: string;
+  total: number;
+  page: number;
+  limit: number;
+  includeRepealed: boolean;
+  results: NationalDocumentSummary[];
+}
+
+/** Filters honoured by `POST /{jurisdiction}/search/semantic` (unknown keys are rejected with 400). */
+export interface NationalCaseLawFilters {
+  court?: string;
+  date_from?: string;
+  date_to?: string;
+  ecli?: string;
+  language?: string;
+  [key: string]: unknown;
+}
+
+/** Filters honoured by `POST /{jurisdiction}/legislation/semantic`. `law_id`/`in_force`/`law_type` are clausly's own names, accepted as aliases. */
+export interface NationalLegislationFilters {
+  id?: string;
+  law_id?: string;
+  inForce?: boolean;
+  in_force?: boolean;
+  documentType?: string;
+  law_type?: string;
+  language?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Options for `nationalSemanticSearch`. `hyde` is accepted for API
+ * compatibility but is always a no-op here: the national index never
+ * rewrites, so the response reports `hyde: false` (never `true`) when the
+ * request set it, and billing stays the flat 5 credits (no 15-credit tier).
+ */
+export interface NationalSemanticCaseLawOptions extends SemanticSearchOptions {
+  hyde?: boolean;
+  filters?: NationalCaseLawFilters;
+}
+
+/** Options for `nationalLegislationSemanticSearch`. No `hyde`, no `asOf` — both are EU-only. */
+export interface NationalSemanticLegislationOptions extends SemanticSearchOptions {
+  filters?: NationalLegislationFilters;
+}
+
+/** Single hit from `nationalSemanticSearch`, same shape as {@link SemanticCaseLawResult} plus national fields. */
+export interface NationalSemanticCaseLawResult extends SemanticCaseLawResult {
+  /** The national corpus id this hit resolved to (also mirrored into `metadata.celex_id`). */
+  documentId?: string;
+  /** ISO 3166-1 alpha-2 jurisdiction code. */
+  jurisdiction?: string;
+  /** Present only once a lane has confirmed the act is no longer in force. */
+  validTo?: string;
+  /** Present only alongside `validTo`. */
+  inForce?: boolean;
+  attribution?: string;
+}
+
+/**
+ * Single hit from `nationalLegislationSemanticSearch`, same shape as
+ * {@link SemanticLegislationResult} plus national fields. NOTE: `in_force`
+ * and `valid_to` are deliberately snake_case here — that is what the server
+ * actually sends (a quirk of the national controller, unlike the camelCase
+ * `inForce`/`validTo` used everywhere else in this SDK) — do not "fix" the
+ * casing without changing the server first.
+ */
+export interface NationalSemanticLegislationResult extends SemanticLegislationResult {
+  documentId?: string;
+  jurisdiction?: string;
+  /** Only ever sent as `false`, when a confirmed repeal overrides the hit toward NOT in force. */
+  in_force?: false;
+  /** Present only alongside `in_force: false`. */
+  valid_to?: string;
+  attribution?: string;
+}
+
+/**
+ * `POST /{jurisdiction}/search/semantic` — national case-law semantic
+ * search. Like the EU semantic endpoints, this route does not run
+ * `attachCreditsEnvelope`, so `credits` is normally absent from the body
+ * (optional via `CreditedResponse`).
+ */
+export interface NationalSemanticCaseLawResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  searchType?: "semantic-case-law";
+  jurisdiction?: string;
+  query?: string;
+  resultCount?: number;
+  results: NationalSemanticCaseLawResult[];
+  /** Present only when the request set `hyde: true` — always `false` (see {@link NationalSemanticCaseLawOptions}). */
+  hyde?: boolean;
+  metadata?: Record<string, unknown>;
+  hint?: string;
+  /** The jurisdiction's source attribution — always show this to users alongside results. */
+  attribution?: string;
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: { tier?: SubscriptionTier; maxResults?: number };
+}
+
+/** `POST /{jurisdiction}/legislation/semantic` — national legislation semantic search. */
+export interface NationalSemanticLegislationResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  searchType?: "semantic-legislation";
+  jurisdiction?: string;
+  query?: string;
+  resultCount?: number;
+  results: NationalSemanticLegislationResult[];
+  metadata?: Record<string, unknown>;
+  hint?: string;
+  attribution?: string;
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: { tier?: SubscriptionTier; maxResults?: number };
+}
+
 // ── Webhooks ────────────────────────────────────────────────────────
 
 /** Operational state. `FAILED` is set automatically when one delivery fails all 7 attempts (~24 h). */

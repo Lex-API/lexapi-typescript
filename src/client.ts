@@ -29,6 +29,14 @@ import type {
   DocumentVersionResponse,
   DocumentVersionsResponse,
   InfoResponse,
+  NationalCoverageResponse,
+  NationalDocumentListParams,
+  NationalDocumentListResponse,
+  NationalDocumentResponse,
+  NationalSemanticCaseLawOptions,
+  NationalSemanticCaseLawResponse,
+  NationalSemanticLegislationOptions,
+  NationalSemanticLegislationResponse,
   RecentDocumentsParams,
   RecentDocumentsResponse,
   RelatedDocumentsParams,
@@ -564,6 +572,131 @@ export class LexAPI {
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  // ── National law ──────────────────────────────────────────────────
+  // Member-state (and non-EU) legal orders alongside EUR-Lex. BUSINESS and
+  // above get full access; FREE/STARTER/PROFESSIONAL get it within a
+  // monthly allowance of national calls (`X-National-Limit`/
+  // `X-National-Remaining`/`X-National-Reset`, `result.headers.nationalAllowance`;
+  // a used-up allowance is `NationalAllowanceExhaustedError`, 402). An
+  // unlaunched or unknown jurisdiction answers 404 exactly like a path that
+  // doesn't exist — call `getNationalCoverage()` first.
+
+  /**
+   * `GET /national/coverage` — which jurisdictions are live, what each one
+   * covers (legislation / case law, semantic search, sources with their
+   * attribution), and when each was last synced. Public: no API key or
+   * allowance required, free.
+   */
+  async getNationalCoverage(options?: CallOptions): Promise<NationalCoverageResponse> {
+    return this.call<NationalCoverageResponse>({
+      method: "GET",
+      path: "/national/coverage",
+      free: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `GET /{jurisdiction}/documents/{id}` — one national document by its
+   * corpus id (e.g. `"AT-NOR-12345"`), analogous to `getDocument`.
+   *
+   * **Cost: 1 credit** — every national read is a corpus read (there is no
+   * live-fetch fallback), so the 5-credit upfront reservation always
+   * settles to 1. Check `document.textAvailability.available` before
+   * reading `content`, and always show `document.attribution` to the user
+   * alongside the text.
+   */
+  async getNationalDocument(
+    jurisdiction: string,
+    id: string,
+    params: { language?: string } = {},
+    options?: CallOptions,
+  ): Promise<NationalDocumentResponse> {
+    return this.call<NationalDocumentResponse>({
+      method: "GET",
+      path: `/${jurisdiction.toLowerCase()}/documents/${encodeURIComponent(id)}`,
+      query: { language: params.language },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `GET /{jurisdiction}/documents` — browse a jurisdiction's corpus by
+   * title (`q`), type, and in-force status.
+   *
+   * **Cost: 3 credits per call** — flat; pagination (`page`) does not
+   * multiply the price, unlike `search`.
+   */
+  async listNationalDocuments(
+    jurisdiction: string,
+    params: NationalDocumentListParams = {},
+    options?: CallOptions,
+  ): Promise<NationalDocumentListResponse> {
+    return this.call<NationalDocumentListResponse>({
+      method: "GET",
+      path: `/${jurisdiction.toLowerCase()}/documents`,
+      query: {
+        page: params.page,
+        limit: params.limit,
+        q: params.q,
+        type: params.documentType,
+        includeRepealed: params.includeRepealed,
+      },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `POST /{jurisdiction}/search/semantic` — embedding-based semantic
+   * search over a jurisdiction's case law. Same request/response shape as
+   * `semanticSearch`, plus `jurisdiction`/`documentId`/`attribution` on
+   * every hit.
+   *
+   * **Cost: a flat 5 credits** — `hyde` is accepted but never changes the
+   * price or the billing tier here: the national index never rewrites, so
+   * the response reports `hyde: false` (never `true`) when requested.
+   */
+  async nationalSemanticSearch(
+    jurisdiction: string,
+    request: NationalSemanticCaseLawOptions,
+    options?: CallOptions,
+  ): Promise<NationalSemanticCaseLawResponse> {
+    return this.call<NationalSemanticCaseLawResponse>({
+      method: "POST",
+      path: `/${jurisdiction.toLowerCase()}/search/semantic`,
+      body: semanticWireBody(request),
+      idempotent: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `POST /{jurisdiction}/legislation/semantic` — embedding-based semantic
+   * search over a jurisdiction's legislation; article-level matches. Same
+   * shape as `semanticLegislationSearch`, plus `jurisdiction`/`documentId`/
+   * `attribution` on every hit. No `hyde`, no `asOf` — both are EU-only.
+   *
+   * **Cost: 5 credits.**
+   */
+  async nationalLegislationSemanticSearch(
+    jurisdiction: string,
+    request: NationalSemanticLegislationOptions,
+    options?: CallOptions,
+  ): Promise<NationalSemanticLegislationResponse> {
+    return this.call<NationalSemanticLegislationResponse>({
+      method: "POST",
+      path: `/${jurisdiction.toLowerCase()}/legislation/semantic`,
+      body: semanticWireBody(request),
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });

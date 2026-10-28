@@ -40,6 +40,9 @@ export type ErrorCode =
   | "INVALID_RESPONSE"
   // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
   | "INCOMPLETE_EXPORT"
+  // 402 on a national-law call from a plan below BUSINESS: the monthly
+  // allowance of national calls is used up (lex-api PR #306) — `NationalAllowanceExhaustedError`.
+  | "NATIONAL_ALLOWANCE_EXHAUSTED"
   // Forward compatibility: unknown codes are kept as-is.
   | (string & {});
 
@@ -254,6 +257,8 @@ export class LexAPIError extends Error {
         return new TierForbiddenError(message, status, details, retryAfter, context);
       case "CREDITS_EXHAUSTED":
         return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
+      case "NATIONAL_ALLOWANCE_EXHAUSTED":
+        return new NationalAllowanceExhaustedError(message, status, details, retryAfter, context);
       case "UPSTREAM_ERROR":
         return new UpstreamError(message, status, details, retryAfter, context);
       case "TIMEOUT":
@@ -466,6 +471,72 @@ export class CreditsExhaustedError extends LexAPIError {
   /** The refused operation (`details.operation`). */
   get operation(): string | undefined {
     return readString(this.details?.operation);
+  }
+}
+
+/** `error.details` on a 402 `NATIONAL_ALLOWANCE_EXHAUSTED` envelope. */
+export interface NationalAllowanceExhaustedDetails {
+  /** ISO 3166-1 alpha-2 jurisdiction code of the call that was refused. */
+  jurisdiction?: string;
+  /** The tier's monthly allowance of national calls. */
+  limit?: number;
+  /** Always `0` on this error. */
+  remaining?: number;
+  /** When the allowance resets (ISO date-time: start of the next UTC month). */
+  resetsAt?: string;
+  /** `/pricing` — upgrading to BUSINESS removes the allowance entirely. */
+  upgradeUrl?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * 402 — the monthly national-law call allowance of a plan below BUSINESS
+ * (FREE/STARTER/PROFESSIONAL) is used up (`NATIONAL_ALLOWANCE_EXHAUSTED`,
+ * lex-api PR #306). A usage shortfall, not a credit shortfall: no credits
+ * were charged for the refused call. Resolves at `resetsAt` (start of next
+ * UTC month) or immediately on upgrading to BUSINESS/SCALE/ENTERPRISE, which
+ * have no separate limit. Mirrors `X-National-Limit`/`X-National-Remaining`/
+ * `X-National-Reset` on the response that triggered it.
+ */
+export class NationalAllowanceExhaustedError extends LexAPIError {
+  static override readonly kind: string = "NationalAllowanceExhaustedError";
+  /** Typed view of `error.details` (jurisdiction, limit, remaining, resetsAt, upgradeUrl). */
+  declare readonly details: NationalAllowanceExhaustedDetails | undefined;
+
+  constructor(
+    message: string,
+    status = 402,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("NATIONAL_ALLOWANCE_EXHAUSTED", message, status, details, retryAfter, context);
+    this.name = "NationalAllowanceExhaustedError";
+  }
+
+  /** The jurisdiction code of the refused call (`details.jurisdiction`). */
+  get jurisdiction(): string | undefined {
+    return readString(this.details?.jurisdiction);
+  }
+
+  /** The tier's monthly allowance of national calls (`details.limit`). */
+  get limit(): number | undefined {
+    return readNumber(this.details?.limit);
+  }
+
+  /** Always `0` (`details.remaining`). */
+  get remaining(): number | undefined {
+    return readNumber(this.details?.remaining);
+  }
+
+  /** When the allowance resets (`details.resetsAt`, ISO date-time). */
+  get resetsAt(): string | undefined {
+    return readString(this.details?.resetsAt);
+  }
+
+  /** `/pricing` (`details.upgradeUrl`). */
+  get upgradeUrl(): string | undefined {
+    return readString(this.details?.upgradeUrl);
   }
 }
 

@@ -5,6 +5,35 @@ versioning: [SemVer](https://semver.org/) — while the package is `0.x`, a **mi
 breaking changes (documented below with a migration note); `npm install @lexapi/client@^0.1.0` never
 picks up `0.2.0` on its own.
 
+## [0.3.0] — 2026-10-28
+
+Adds national (member-state, and non-EU) law support ahead of the LexAPI national-law launch
+(2026-11-03).
+
+### Added
+
+- **National law**: `getNationalCoverage()` (`GET /national/coverage`, public, free — which
+  jurisdictions are live, what each covers, sources and their attribution), `getNationalDocument()`
+  (`GET /{jurisdiction}/documents/{id}`, 1 credit), `listNationalDocuments()`
+  (`GET /{jurisdiction}/documents`, 3 credits flat), `nationalSemanticSearch()`
+  (`POST /{jurisdiction}/search/semantic`, 5 credits — `hyde` accepted but never rewrites or
+  changes price here) and `nationalLegislationSemanticSearch()`
+  (`POST /{jurisdiction}/legislation/semantic`, 5 credits; no `hyde`/`asOf`). New types:
+  `NationalCoverageResponse`, `NationalDocument`, `NationalDocumentSummary`,
+  `NationalDocumentResponse`, `NationalDocumentListParams`, `NationalDocumentListResponse`,
+  `NationalSemanticCaseLawOptions`/`Result`/`Response`, `NationalSemanticLegislationOptions`/
+  `Result`/`Response`, `NationalSource`, `NationalJurisdictionCoverage` and friends. Every
+  document/result carries `attribution` — always show it alongside the text.
+- **`NationalAllowanceExhaustedError`** (`NATIONAL_ALLOWANCE_EXHAUSTED`, 402): FREE/STARTER/
+  PROFESSIONAL get national law within a monthly allowance of calls; BUSINESS and above have no
+  separate limit. Typed `jurisdiction`/`limit`/`remaining`/`resetsAt`/`upgradeUrl` getters.
+- **`result.headers.nationalAllowance`** (`{ limit, remaining, resetsAt }`), parsed from
+  `X-National-Limit`/`X-National-Remaining`/`X-National-Reset` — present only for
+  FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints.
+
+Validate against the live API once lex-api PR #306 (the allowance) and the national-law launch
+are deployed — this SDK was built from the server source and PR #306's diff ahead of merge.
+
 ## [0.2.0] — 2026-10-26
 
 Full re-sync with the LexAPI API (validated against lex-api `main` @ `633eb67`, PR #298, and

@@ -38,8 +38,12 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
+| 0 | `getNationalCoverage` (public) |
+| 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 |
+| 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
+| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law |
 
-Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge.
+Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge. The national-law call allowance follows the same rule: a failed call (other than a 404) gives its call back too.
 
 ## Search & documents
 
@@ -169,6 +173,32 @@ const stats = await client.getCitationStats();
 
 `citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles.
 
+## National law
+
+Member-state (and non-EU) legal orders alongside EUR-Lex. BUSINESS, SCALE and ENTERPRISE get full
+access; FREE, STARTER and PROFESSIONAL get it within a monthly allowance of national calls. A
+jurisdiction that isn't launched yet answers 404, exactly like a path that doesn't exist — check
+`getNationalCoverage()` first.
+
+```ts
+const coverage = await client.getNationalCoverage(); // public, free — no allowance consumed
+for (const j of coverage.jurisdictions) {
+  if (j.live) console.log(j.code, j.name, j.legislation.documents, j.sources.map((s) => s.attribution));
+}
+
+const doc = await client.getNationalDocument("AT", "AT-NOR-12345"); // 1 credit
+console.log(doc.document.attribution); // always show this alongside the text
+
+const page = await client.listNationalDocuments("AT", { q: "Datenschutz", limit: 20 }); // 3 credits flat
+
+const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei Bankgeschäften" }); // 5 credits
+const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
+```
+
+A used-up allowance is `NationalAllowanceExhaustedError` (402); its headroom is also on
+`result.headers.nationalAllowance` (`{ limit, remaining, resetsAt }`) on every admitted call from a
+plan below BUSINESS.
+
 ## Webhooks
 
 ```ts
@@ -273,6 +303,8 @@ r.headers?.corpusVersion;     // X-Corpus-Version
 
 Also: `searchSource`, `searchCache`, `warning`, `ignoredDocumentTypes`, `postFilteredBy`, `documentTypeFanOut`, `batch`. The older `xWarning` (and `corpusVersion` on version responses) are still set.
 
+On the four national document/semantic endpoints, `headers.nationalAllowance` (`{ limit, remaining, resetsAt }`, from `X-National-Limit`/`X-National-Remaining`/`X-National-Reset`) reports the monthly national-call allowance left — present only for FREE/STARTER/PROFESSIONAL callers (absent for BUSINESS and above, and for `getNationalCoverage`).
+
 ## Configuration
 
 ```ts
@@ -339,6 +371,7 @@ try {
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
+| `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
