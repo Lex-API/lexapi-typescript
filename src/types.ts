@@ -1558,10 +1558,8 @@ export interface NationalDocumentListParams {
 }
 
 /**
- * `GET /{jurisdiction}/documents`. No `success` field. 1 credit per call
- * (flat — pagination does not multiply the price, unlike `search`; this
- * dropped from 3 credits in API 2.5.0 — confirm against the live API /
- * docs.md before relying on it).
+ * `GET /{jurisdiction}/documents`. No `success` field. 3 credits per call
+ * (flat — pagination does not multiply the price, unlike `search`).
  *
  * Results are newest-first by the document's own date (undated rows last),
  * then by id — a total order, so pages never repeat or skip a row even

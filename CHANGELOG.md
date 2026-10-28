@@ -9,16 +9,15 @@ picks up `0.2.0` on its own.
 
 Adds national (member-state, and non-EU) law support ahead of the LexAPI national-law launch
 (2026-11-03). **Requires LexAPI API 2.5.0** (lex-api PRs #306, #314, #320 — the allowance, the
-documented contract and the pre-launch hardening pass). Re-verify once all three are deployed; see
-the per-item notes below for what is still provisional (the listing's credit weight).
+documented contract and the pre-launch hardening pass). Re-verify once all three are deployed.
 
 ### Added
 
 - **National law**: `getNationalCoverage()` (`GET /national/coverage`, public, free — which
   jurisdictions are live, what each covers, sources and their attribution), `getNationalDocument()`
   (`GET /{jurisdiction}/documents/{id}`, 1 credit), `listNationalDocuments()` /
-  `paginateNationalDocuments()` (`GET /{jurisdiction}/documents`, 1 credit flat — API 2.5.0 dropped
-  this from 3, **pending Nejc's confirmation**; cursor paging past the first 1,000 rows, newest-first
+  `paginateNationalDocuments()` (`GET /{jurisdiction}/documents`, 3 credits flat per call — pagination
+  does not multiply the price; cursor paging past the first 1,000 rows, newest-first
   by document date), `nationalSemanticSearch()`
   (`POST /{jurisdiction}/search/semantic`, 5 credits — `hyde` accepted but never rewrites or
   changes price here) and `nationalLegislationSemanticSearch()`

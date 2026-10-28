@@ -697,11 +697,10 @@ export class LexAPI {
    * title (`q`), type, and in-force status. Newest-first by the document's
    * own date.
    *
-   * **Cost: 1 credit per call** — flat; pagination does not multiply the
-   * price, unlike `search` (API 2.5.0 dropped this from 3 — confirm against
-   * the live API before relying on it). **Paging:** `page` only reaches the
-   * first 1,000 rows (a 400 past that); page further with `cursor` (each
-   * response's `nextCursor`), which works at any depth — see
+   * **Cost: 3 credits per call** — flat; pagination does not multiply the
+   * price, unlike `search`. **Paging:** `page` only reaches the first 1,000
+   * rows (a 400 past that); page further with `cursor` (each response's
+   * `nextCursor`), which works at any depth — see
    * `paginateNationalDocuments` for a ready-made walk. A slow page is a
    * retry-safe `TimeoutError` (504, refunded); the `total` count is capped
    * at 10,000 and flagged `totalExact: false` past that or on a slow count.
