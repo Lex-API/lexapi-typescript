@@ -191,8 +191,9 @@ for (const j of coverage.jurisdictions) {
   if (j.live) console.log(j.code, j.name, j.legislation.documents, j.sources.map((s) => s.attribution));
 }
 
-const doc = await client.getNationalDocument("AT", "AT-NOR-12345"); // 1 credit
-console.log(doc.document.attribution); // always show this alongside the text
+const { document } = await client.getNationalDocument("AT", "AT-NOR-10001597"); // 1 credit
+console.log(document.attribution); // always show this alongside the text
+for (const a of document.content?.articles ?? []) console.log(a.number, a.title, a.text ?? "(no text)");
 
 const page = await client.listNationalDocuments("AT", { q: "Datenschutz", limit: 20 }); // 3 credits flat
 for await (const p of client.paginateNationalDocuments("AT", { q: "Datenschutz", limit: 100 })) {
@@ -200,7 +201,37 @@ for await (const p of client.paginateNationalDocuments("AT", { q: "Datenschutz",
 }
 
 const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei Bankgeschäften" }); // 5 credits
+for (const h of hits.results) console.log(h.document.documentKind, h.document.ecli, h.document.dateOfDocument);
 const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
+```
+
+**One shape for every country (requires LexAPI API 2.8.0).** National documents have the same
+fields, types and formats in every jurisdiction, so code written for one country works for all of
+them. Every field is always present — one the source does not provide is `null` (or `[]`), never
+missing:
+
+- `documentKind` (`"act"` | `"decision"`) tells legislation from case law everywhere; `documentType`
+  is the source's own label, in its language.
+- `decision` — on a decision, `{ court, chamber, caseNumbers, citedNorms: [{ text, documentId }] }`,
+  read server-side from whichever fields the source uses (also when the decision has no text);
+  `null` for acts. `isNationalDecision(document)` narrows it.
+- `content` (or `null` when there is no text — see `textAvailability`) is always
+  `{ fullText, articles, textLanguages, textLanguage, embeddedForeignText, repeal, source, details }`;
+  every article is `{ number, title, section, text, inForceFrom, inForceTo, details }` (`text: null`
+  when the source publishes no text for that unit). What a source adds beyond these fields is under
+  `content.details` / `articles[].details` — source-specific, keys differ by country.
+- Semantic hits carry `document` (the listing's summary of the matched document); legislation hits
+  always carry `law_title`, `article_ref`, `section`, `language`, `in_force`, `valid_from`,
+  `valid_to` and `law_type`, `null` when the index has nothing.
+
+```ts
+import { isNationalDecision } from "@lexapi/client";
+
+const { document: d } = await client.getNationalDocument("DE", "DE-JUD-BFH-KBRE202550123");
+if (isNationalDecision(d)) {
+  console.log(d.decision.court, d.decision.caseNumbers.join(", ")); // "BFH 3. Senat" "III R 27/24"
+  for (const n of d.decision.citedNorms) console.log(n.text, n.documentId ?? "(not identified)");
+}
 ```
 
 A document its source withdrew (a takedown, a pseudonymisation fix) throws `DocumentWithdrawnError` (410) from `getNationalDocument` and from the citation methods for a withdrawn national id — nothing of it is served, not even the title; drop any copy you hold.

@@ -8,8 +8,33 @@ picks up `0.2.0` on its own.
 ## [0.3.0] — 2026-10-28
 
 Adds national (member-state, and non-EU) law support ahead of the LexAPI national-law launch
-(2026-11-03). **Requires LexAPI API 2.5.0** (lex-api PRs #306, #314, #320 — the allowance, the
-documented contract and the pre-launch hardening pass). Re-verify once all three are deployed.
+(2026-11-03). **Requires LexAPI API 2.8.0** (lex-api PRs #306, #314, #320 — the allowance, the
+documented contract and the pre-launch hardening pass — plus #335, the one national document shape
+for every jurisdiction). Re-verify once all of them are deployed.
+
+### National document shape (lex-api PR #335, API 2.8.0)
+
+The national types follow the normalized cross-jurisdiction contract — a client written for one
+country now works for every other:
+
+- `NationalDocumentSummary` (listing rows, documents, and every semantic hit's `document`): every
+  field is required and `null` when the source has nothing — `title`, `documentType`, `ecli`,
+  `eli`, `dateOfDocument` (`YYYY-MM-DD`), `validTo`, `inForce` — plus the new **`documentKind`**
+  (`"act"` | `"decision"`, type `NationalDocumentKind`).
+- `NationalDocument` gains **`decision: NationalDecision | null`** (`court`, `chamber`,
+  `caseNumbers[]`, `citedNorms[]` of `NationalCitedNorm { text, documentId }`) and `content` is the
+  closed `NationalDocumentContent` (`fullText`, `articles: NationalArticle[]`, `textLanguages`,
+  `textLanguage`, `embeddedForeignText`, `repeal: NationalRepeal | null`, `source`, `details`) instead
+  of the EU `DocumentContent`. Articles are `{ number, title, section, text, inForceFrom, inForceTo,
+  details }`. `textAvailability` is required; `textBasis` is `NationalTextBasis | null`. Source-
+  specific keys (Austria's `gericht`, Germany's `aktenzeichen`, unit ids, …) live only under
+  `content.details` / `articles[].details` — read `decision` instead.
+- New helper **`isNationalDecision(document)`** — a type guard narrowing to
+  `NationalDecisionDocument` (non-null `decision`).
+- `NationalSemanticCaseLawResult` / `NationalSemanticLegislationResult`: required `document`
+  (`NationalDocumentSummary`), `documentId`, `jurisdiction`, `attribution`; legislation hits always
+  carry `law_title`, `article_ref`, `section`, `language`, `in_force`, `valid_from`, `valid_to`,
+  `law_type` (each nullable).
 
 ### Added
 

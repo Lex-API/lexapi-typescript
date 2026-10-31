@@ -672,6 +672,10 @@ export class LexAPI {
    * settles to 1 (an unknown id too). Check
    * `document.textAvailability.available` before reading `content`, and
    * always show `document.attribution` to the user alongside the text.
+   * The document has one shape for every jurisdiction (API 2.8.0):
+   * `documentKind` (`act` | `decision`), `decision` (court, chamber,
+   * caseNumbers, citedNorms — `null` for acts; see `isNationalDecision`)
+   * and the closed `content` key set.
    *
    * A document its source withdrew (a takedown, a pseudonymisation fix)
    * throws `DocumentWithdrawnError` (410) instead of answering — nothing of
@@ -759,8 +763,9 @@ export class LexAPI {
   /**
    * `POST /{jurisdiction}/search/semantic` — embedding-based semantic
    * search over a jurisdiction's case law. Same request/response shape as
-   * `semanticSearch`, plus `jurisdiction`/`documentId`/`attribution` on
-   * every hit.
+   * `semanticSearch`, plus `jurisdiction`/`documentId`/`attribution` and
+   * `document` (the matched decision as the listing returns it — the same
+   * fields in every jurisdiction, API 2.8.0) on every hit.
    *
    * **Cost: a flat 5 credits** — `hyde` is accepted but never changes the
    * price or the billing tier here: the national index never rewrites, so
@@ -785,7 +790,10 @@ export class LexAPI {
    * `POST /{jurisdiction}/legislation/semantic` — embedding-based semantic
    * search over a jurisdiction's legislation; article-level matches. Same
    * shape as `semanticLegislationSearch`, plus `jurisdiction`/`documentId`/
-   * `attribution` on every hit. No `hyde`, no `asOf` — both are EU-only.
+   * `attribution` and `document` (the matched act's listing summary) on
+   * every hit; the index fields (`law_title`, `article_ref`, `section`,
+   * `language`, `in_force`, `valid_from`, `valid_to`, `law_type`) are
+   * always present, `null` when the index has nothing (API 2.8.0). No `hyde`, no `asOf` — both are EU-only.
    * `NationalSemanticLegislationOptions` has no `hyde` field, and this SDK
    * never forwards one on this call even if a caller bypasses the type
    * system — the server now validates `hyde` as a boolean on this route too

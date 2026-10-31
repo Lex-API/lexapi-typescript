@@ -1468,10 +1468,6 @@ export interface NationalCoverageResponse extends WithResponseHeaders {
   jurisdictions: NationalJurisdictionCoverage[];
 }
 
-/**
- * How a national lane labels the text it serves (`content.source.textBasis`
- * server-side) — present only for lanes that write it; absent elsewhere.
- */
 /** Known `NationalTextBasis.basis` wire values (snake_case). Open for forward compatibility. */
 export type NationalTextBasisKind =
   | "as_announced"
@@ -1480,6 +1476,11 @@ export type NationalTextBasisKind =
   | "none"
   | (string & {});
 
+/**
+ * `NationalDocument.textBasis` — which text a source says it publishes
+ * (e.g. Poland). `null` (since API 2.8.0, no longer absent) for every
+ * source that does not say.
+ */
 export interface NationalTextBasis {
   basis: NationalTextBasisKind;
   /** The date the text speaks for (never "valid until"). */
@@ -1492,35 +1493,173 @@ export interface NationalTextBasis {
   textFrom?: string;
 }
 
-/** Summary fields shared by a `listNationalDocuments` row and a full `NationalDocument`. */
+/**
+ * What a national document is, in one vocabulary for every jurisdiction
+ * (API 2.8.0): `"act"` (legislation) or `"decision"` (case law). Use it —
+ * not `documentType`, the source's own label — to tell them apart.
+ */
+export type NationalDocumentKind = "act" | "decision";
+
+/**
+ * A national document's metadata, as the listing returns it — the same
+ * fields, types and formats for every jurisdiction (API 2.8.0). Every field
+ * is always present; one the source does not provide is `null`, never
+ * absent.
+ */
 export interface NationalDocumentSummary {
   /** The national corpus id (e.g. `"AT-NOR-12345"`), analogous to a CELEX number. */
   id: string;
   /** ISO 3166-1 alpha-2 jurisdiction code. */
   jurisdiction: string;
+  /** ISO 639-1 code of the source language. */
   language: string;
-  title?: string | null;
-  documentType?: string | null;
-  ecli?: string | null;
-  eli?: string | null;
-  dateOfDocument?: string | null;
-  /** Monotonic corpus version for this id. */
-  version?: number;
-  fetchedAt?: string;
-  /** Present only once a lane has confirmed the act is no longer in force (the last day in force). */
-  validTo?: string;
-  /** Present only alongside `validTo`. */
-  inForce?: boolean;
+  /**
+   * `"act"` | `"decision"` — see {@link NationalDocumentKind}. `null` only
+   * for an id that matches no collection LexAPI knows for the jurisdiction.
+   */
+  documentKind: NationalDocumentKind | null;
+  title: string | null;
+  /**
+   * The source's own type label, in its language (`"Bundesgesetz (konsolidiert)"`,
+   * `"Uitspraak (NL)"`) — different in every jurisdiction. Use `documentKind`
+   * for act / decision.
+   */
+  documentType: string | null;
+  /** The decision's ECLI. `null` for acts and where the source gives none. */
+  ecli: string | null;
+  /** The act's ELI (a URI). `null` where the source gives none. */
+  eli: string | null;
+  /** The document's own date, `YYYY-MM-DD`; `null` when the source gives none. */
+  dateOfDocument: string | null;
+  /** LexAPI's version counter for this document (bumped when its text changes). */
+  version: number;
+  /** When LexAPI last stored real content for it (ISO 8601). */
+  fetchedAt: string;
+  /**
+   * Last day in force (`YYYY-MM-DD`), set once the source confirmed the act
+   * is no longer in force. `null` when there is no known end (an act in
+   * force, case law, a source that does not record repeals).
+   */
+  validTo: string | null;
+  /** `false` once `validTo` has passed (UTC), `true` while it is today or later; `null` when `validTo` is `null`. */
+  inForce: boolean | null;
 }
 
-/** Full national document — `GET /{jurisdiction}/documents/{id}`. */
+/** Legislation a decision cites — {@link NationalDecision.citedNorms}. */
+export interface NationalCitedNorm {
+  /** The source's citation string (`"§ 62 Abs 1a S 3 EStG 2009"`, `"§ 7 177/1996 Sb."`). */
+  text: string;
+  /**
+   * LexAPI id of the cited act when the source identifies it (CZ, SI, PL,
+   * SE) — whether or not LexAPI holds that act; `null` otherwise.
+   */
+  documentId: string | null;
+}
+
+/**
+ * A decision's case-law metadata (`documentKind: "decision"`). Values are
+ * the source's own (local language and spelling); the field set and types
+ * are the same in every jurisdiction — the server reads them from whichever
+ * field the source uses (Austria's `gericht`, Germany's `aktenzeichen`, …),
+ * so read these, never the raw source keys under `content.details`.
+ */
+export interface NationalDecision {
+  /** The deciding court as the source names it (`"OGH"`, `"BFH 3. Senat"`, `"Gerechtshof Amsterdam"`). */
+  court: string | null;
+  /**
+   * The chamber, section or department, where the source names it apart
+   * from the court (`"Sección Cuarta"`, `"Civilni oddelek"`). `null`
+   * otherwise (Austria and Germany name the panel inside `court`).
+   */
+  chamber: string | null;
+  /** The case (docket) numbers as the source writes them (`["III R 27/24"]`); `[]` when none. */
+  caseNumbers: string[];
+  /** Legislation the decision cites, where the source lists it; `[]` otherwise. */
+  citedNorms: NationalCitedNorm[];
+}
+
+/** One unit of an act (article, section, annex) — the same fields in every jurisdiction. */
+export interface NationalArticle {
+  /** The source's own label (`"§ 1"`, `"Art. 1"`, `"1 kap. 1 §"`); `null` for an unnumbered unit. */
+  number: string | null;
+  /** The unit's heading. */
+  title: string | null;
+  /** The part or chapter it sits in (`"Kapitel 1 — …"`, `"1 luku"`). */
+  section: string | null;
+  /** The unit's text; `null` when the source has no text for it — never an empty provision. */
+  text: string | null;
+  /** The unit's own validity start (`YYYY-MM-DD`), where the source dates units (AT, ES, FR). */
+  inForceFrom: string | null;
+  inForceTo: string | null;
+  /** The source's other unit fields (unit ids, kinds, notes). Source-specific. */
+  details: Record<string, unknown>;
+}
+
+/** `content.repeal` — the source's confirmation behind `validTo`. */
+export interface NationalRepeal {
+  /** Last day in force (`YYYY-MM-DD`). */
+  validTo: string | null;
+  /** What the source says, in its words. */
+  basis: string | null;
+  /** When LexAPI recorded it. */
+  detectedAt: string | null;
+}
+
+/**
+ * The parsed text of a national document — a closed key set, the same in
+ * every jurisdiction (API 2.8.0). What a source adds beyond these keys is
+ * under `source` (provenance) and `details`, both source-specific.
+ */
+export interface NationalDocumentContent {
+  fullText: string;
+  /** The act's units in order. `[]` for decisions and for acts the source publishes without units. */
+  articles: NationalArticle[];
+  /**
+   * The languages the text is in (ISO 639-1). Dutch treaties (`NL-BWBV…`):
+   * the languages BWB publishes the treaty in, in order (`["en", "nl"]`);
+   * otherwise the one language of the text.
+   */
+  textLanguages: string[];
+  /** Set when the whole text is in one language other than the document's `language`; else `null`. */
+  textLanguage: string | null;
+  /** `true` when the text includes text in a language other than the document's `language`. */
+  embeddedForeignText: boolean;
+  /** The source's confirmation that the act is no longer in force (the basis of `validTo`); `null` otherwise. */
+  repeal: NationalRepeal | null;
+  /** Provenance from the upstream (system, its ids and URLs). Keys vary by jurisdiction. */
+  source: Record<string, unknown>;
+  /** Everything else the source provides, under its own field names. Keys vary by jurisdiction. */
+  details: Record<string, unknown>;
+}
+
+/** Full national document — `GET /{jurisdiction}/documents/{id}` (API 2.8.0 shape). */
 export interface NationalDocument extends NationalDocumentSummary {
+  /**
+   * Case-law metadata when `documentKind` is `"decision"` (served also when
+   * the decision has no text); `null` for acts. See {@link isNationalDecision}.
+   */
+  decision: NationalDecision | null;
   /** `null` when the jurisdiction's source publishes no text for this id — check `textAvailability`. */
-  content?: DocumentContent | null;
-  textAvailability?: TextAvailability;
+  content: NationalDocumentContent | null;
+  textAvailability: TextAvailability;
   /** The jurisdiction's source attribution — always show this to users alongside the text. */
   attribution: string;
-  textBasis?: NationalTextBasis;
+  /** Only from sources that say which text they publish (e.g. Poland); `null` for every other source. */
+  textBasis: NationalTextBasis | null;
+}
+
+/** A {@link NationalDocument} narrowed to a decision (`decision` is non-null). */
+export type NationalDecisionDocument = NationalDocument & {
+  documentKind: "decision";
+  decision: NationalDecision;
+};
+
+/**
+ * Narrow a national document to a decision: `documentKind === "decision"`
+ * with its `decision` block. Works the same for every jurisdiction.
+ */
+export function isNationalDecision(document: NationalDocument): document is NationalDecisionDocument {
+  return document.documentKind === "decision" && document.decision != null;
 }
 
 /**
@@ -1655,41 +1794,67 @@ export interface NationalSemanticLegislationOptions {
   filters?: NationalLegislationFilters;
 }
 
-/** Single hit from `nationalSemanticSearch`, same shape as {@link SemanticCaseLawResult} plus national fields. */
+/**
+ * Single hit from `nationalSemanticSearch`, same shape as
+ * {@link SemanticCaseLawResult} (which index metadata fields are filled
+ * depends on the national source) plus national fields. For metadata that
+ * is the same in every jurisdiction, read `document` — the matched decision
+ * as the listing returns it (API 2.8.0).
+ */
 export interface NationalSemanticCaseLawResult extends SemanticCaseLawResult {
   /** The national corpus id this hit resolved to (also mirrored into `metadata.celex_id`). */
-  documentId?: string;
+  documentId: string;
   /** ISO 3166-1 alpha-2 jurisdiction code. */
-  jurisdiction?: string;
-  /** Present only once a lane has confirmed the act is no longer in force. */
+  jurisdiction: string;
+  /**
+   * The matched decision as the listing returns it, from LexAPI's own
+   * record — the same fields in every jurisdiction, whatever metadata the
+   * index carries for it (API 2.8.0).
+   */
+  document: NationalDocumentSummary;
+  /** When the source recorded an end of validity (also a future one). */
   validTo?: string;
-  /** Present only alongside `validTo`. */
+  /** Only `false`, and only once `validTo` has passed. */
   inForce?: boolean;
-  attribution?: string;
+  attribution: string;
 }
 
 /**
  * Single hit from `nationalLegislationSemanticSearch`, same shape as
- * {@link SemanticLegislationResult} plus national fields. NOTE: `in_force`
- * and `valid_to` are deliberately snake_case here — that is what the server
- * actually sends (a quirk of the national controller, unlike the camelCase
- * `inForce`/`validTo` used everywhere else in this SDK) — do not "fix" the
- * casing without changing the server first.
+ * {@link SemanticLegislationResult} plus national fields. Unlike the EU hit,
+ * a national hit always carries `law_title`, `article_ref`, `section`,
+ * `language`, `in_force`, `valid_from`, `valid_to` and `law_type` — `null`
+ * when the index has nothing for the unit (API 2.8.0). NOTE: these index
+ * fields are deliberately snake_case — that is what the server sends — do
+ * not "fix" the casing without changing the server first. The act's
+ * cross-jurisdiction metadata is under `document`.
  */
-export interface NationalSemanticLegislationResult extends SemanticLegislationResult {
-  documentId?: string;
-  jurisdiction?: string;
+export interface NationalSemanticLegislationResult
+  extends Omit<SemanticLegislationResult, "law_id" | "law_title" | "article_ref" | "section" | "language"> {
+  /** LexAPI id of the act. */
+  law_id: string;
+  /** Same as `law_id`. */
+  documentId: string;
+  jurisdiction: string;
+  law_title: string | null;
+  /** The unit's label, as in `content.articles[].number` of the document. */
+  article_ref: string | null;
+  section: string | null;
+  language: string | null;
   /**
-   * From the semantic index's own `valid_from`/`valid_to`, computed at query
-   * time — present on EVERY hit as `true` or `false`, same as the EU field.
-   * LexAPI never asserts `true` on its own; it only ever *overrides* this
-   * toward `false` (and adds `valid_to`) when the LexAPI corpus has a
-   * confirmed repeal the index hasn't caught up to yet.
+   * From the index, as of today; `false` (with `valid_to`) when LexAPI
+   * knows the act is repealed (LexAPI only ever overrides it toward
+   * `false`); `null` when unknown.
    */
-  in_force?: boolean;
-  /** Present only alongside a LexAPI-asserted `in_force: false` override — never on the index's own value. */
-  valid_to?: string;
-  attribution?: string;
+  in_force: boolean | null;
+  /** The unit's validity start (`YYYY-MM-DD`), where the source dates units. */
+  valid_from: string | null;
+  valid_to: string | null;
+  /** The index's type code of the act. */
+  law_type: string | null;
+  /** The matched act as the listing returns it, from LexAPI's own record (API 2.8.0). */
+  document: NationalDocumentSummary;
+  attribution: string;
 }
 
 /**

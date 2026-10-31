@@ -67,7 +67,7 @@ export type {
   ExportHeaderInfo,
   ExportStream,
 } from "./export.js";
-export { AS_OF_REASONS } from "./types.js";
+export { AS_OF_REASONS, isNationalDecision } from "./types.js";
 export type {
   SubscriptionTier,
   Language,
@@ -160,8 +160,16 @@ export type {
   NationalJurisdictionCoverage,
   NationalCoverageResponse,
   NationalTextBasis,
+  NationalTextBasisKind,
+  NationalDocumentKind,
   NationalDocumentSummary,
   NationalDocument,
+  NationalDecisionDocument,
+  NationalDecision,
+  NationalCitedNorm,
+  NationalDocumentContent,
+  NationalArticle,
+  NationalRepeal,
   NationalDocumentResponse,
   NationalDocumentListParams,
   NationalDocumentListResponse,

@@ -10,8 +10,10 @@ import {
   NotFoundError,
   ServiceUnavailableError,
   TimeoutError,
+  isNationalDecision,
   type NationalSemanticLegislationOptions,
 } from "../src/index.js";
+import { AT_ACT, AT_CASE_LAW_HIT, DE_DECISION, DE_LEGISLATION_HIT, summary } from "./fixtures/national.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
 function client(fetchMock: typeof fetch) {
@@ -84,18 +86,7 @@ describe("getNationalDocument", () => {
       jsonResponse(
         200,
         {
-          document: {
-            id: "AT-NOR-12345",
-            jurisdiction: "AT",
-            language: "de",
-            title: "Datenschutzgesetz",
-            documentType: "Bundesgesetz",
-            version: 3,
-            fetchedAt: "2026-10-20T00:00:00.000Z",
-            content: { fullText: "§ 1..." },
-            textAvailability: { available: true },
-            attribution: "Data source: RIS, Bundeskanzleramt Österreich.",
-          },
+          document: { ...AT_ACT, id: "AT-NOR-12345" },
           credits: { operation_weight: 1, remaining: 29 },
         },
         ALLOWANCE_HEADERS,
@@ -114,13 +105,79 @@ describe("getNationalDocument", () => {
 
   it("lower-cases an upper-case jurisdiction code and URL-encodes the id", async () => {
     const fetchMock = fetchSequence(
-      jsonResponse(200, { document: { id: "DE-X/1", jurisdiction: "DE", language: "de", version: 1, attribution: "x" } }),
+      jsonResponse(200, { document: { ...DE_DECISION, id: "DE-X/1" } }),
     );
 
     await client(fetchMock).getNationalDocument("DE", "DE-X/1");
 
     const [url] = lastCall(fetchMock);
     expect(url).toBe("https://lex-api.com/api/v1/de/documents/DE-X%2F1");
+  });
+});
+
+describe("national document shape (API 2.8.0 — one shape for every jurisdiction)", () => {
+  const SUMMARY_KEYS = [
+    "id", "jurisdiction", "language", "documentKind", "title", "documentType", "ecli", "eli",
+    "dateOfDocument", "version", "fetchedAt", "validTo", "inForce",
+  ].sort();
+  const CONTENT_KEYS = ["fullText", "articles", "textLanguages", "textLanguage", "embeddedForeignText", "repeal", "source", "details"].sort();
+  const ARTICLE_KEYS = ["number", "title", "section", "text", "inForceFrom", "inForceTo", "details"].sort();
+
+  it("an act: decision null, closed content/article key sets, null-filled summary fields", async () => {
+    const fetchMock = fetchSequence(jsonResponse(200, { document: AT_ACT }));
+    const { document } = await client(fetchMock).getNationalDocument("AT", AT_ACT.id);
+    expect(document.documentKind).toBe("act");
+    expect(document.decision).toBeNull();
+    expect(isNationalDecision(document)).toBe(false);
+    expect(document.textBasis).toBeNull();
+    expect(document.ecli).toBeNull();
+    expect(document.inForce).toBeNull();
+    expect(Object.keys(document.content!).sort()).toEqual(CONTENT_KEYS);
+    for (const a of document.content!.articles) expect(Object.keys(a).sort()).toEqual(ARTICLE_KEYS);
+    expect(document.content!.articles[0]).toMatchObject({ number: "§ 1", inForceFrom: "2018-05-25" });
+    // A unit the source publishes no text for: text null, never "".
+    expect(document.content!.articles[1]?.text).toBeNull();
+  });
+
+  it("a decision: court/caseNumbers/citedNorms under `decision`, narrowed by isNationalDecision", async () => {
+    const fetchMock = fetchSequence(jsonResponse(200, { document: DE_DECISION }));
+    const { document } = await client(fetchMock).getNationalDocument("DE", DE_DECISION.id);
+    expect(isNationalDecision(document)).toBe(true);
+    if (!isNationalDecision(document)) throw new Error("unreachable");
+    expect(document.decision.court).toBe("BFH 3. Senat");
+    expect(document.decision.chamber).toBeNull();
+    expect(document.decision.caseNumbers).toEqual(["III R 27/24"]);
+    expect(document.decision.citedNorms).toEqual([{ text: "§ 62 Abs 1a S 3 EStG 2009", documentId: null }]);
+    expect(document.content!.articles).toEqual([]);
+    expect(document.dateOfDocument).toBe("2025-06-12");
+  });
+
+  it("a decision held without text still carries `decision`", async () => {
+    const noText = {
+      ...DE_DECISION,
+      content: null,
+      textAvailability: { available: false, reason: "pdf_only" },
+    };
+    const fetchMock = fetchSequence(jsonResponse(200, { document: noText }));
+    const { document } = await client(fetchMock).getNationalDocument("DE", DE_DECISION.id);
+    expect(document.content).toBeNull();
+    expect(isNationalDecision(document)).toBe(true);
+    expect(document.decision?.caseNumbers).toEqual(["III R 27/24"]);
+  });
+
+  it("isNationalDecision is false for a decision-kind row missing its block (defensive)", () => {
+    expect(isNationalDecision({ ...DE_DECISION, decision: null })).toBe(false);
+  });
+
+  it("listing rows carry the full summary key set", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, {
+        jurisdiction: "AT", total: 1, totalExact: true, page: 1, limit: 20, includeRepealed: false,
+        hasMore: false, nextCursor: null, results: [summary()],
+      }),
+    );
+    const result = await client(fetchMock).listNationalDocuments("AT");
+    expect(Object.keys(result.results[0]!).sort()).toEqual(SUMMARY_KEYS);
   });
 });
 
@@ -137,8 +194,8 @@ describe("listNationalDocuments", () => {
         hasMore: false,
         nextCursor: null,
         results: [
-          { id: "AT-NOR-1", jurisdiction: "AT", language: "de", title: "A", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" },
-          { id: "AT-NOR-2", jurisdiction: "AT", language: "de", title: "B", version: 2, fetchedAt: "2026-10-02T00:00:00.000Z" },
+          summary({ id: "AT-NOR-1", title: "A", version: 1 }),
+          summary({ id: "AT-JUD-2", documentKind: "decision", title: null, documentType: "Entscheidungstext (Justiz)", dateOfDocument: "2026-10-02", version: 2 }),
         ],
       }),
     );
@@ -181,17 +238,17 @@ describe("listNationalDocuments", () => {
       jsonResponse(200, {
         jurisdiction: "AT", total: 3, totalExact: true, limit: 2, includeRepealed: false,
         hasMore: true, nextCursor: "c1",
-        results: [{ id: "AT-NOR-1", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" }],
+        results: [summary({ id: "AT-NOR-1" })],
       }),
       jsonResponse(200, {
         jurisdiction: "AT", total: 3, totalExact: true, limit: 2, includeRepealed: false,
         hasMore: false, nextCursor: null,
-        results: [{ id: "AT-NOR-2", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-02T00:00:00.000Z" }],
+        results: [summary({ id: "AT-NOR-2" })],
       }),
     );
     const seen: string[] = [];
     for await (const page of client(fetchMock).paginateNationalDocuments("AT", { limit: 2 })) {
-      seen.push(...page.results.map((r) => r.id!));
+      seen.push(...page.results.map((r) => r.id));
     }
     expect(seen).toEqual(["AT-NOR-1", "AT-NOR-2"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -205,12 +262,12 @@ describe("listNationalDocuments", () => {
       jsonResponse(200, {
         jurisdiction: "AT", total: 2, totalExact: true, limit: 1, includeRepealed: false,
         hasMore: true, nextCursor: "c1",
-        results: [{ id: "AT-NOR-1", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-01T00:00:00.000Z" }],
+        results: [summary({ id: "AT-NOR-1" })],
       }),
       jsonResponse(200, {
         jurisdiction: "AT", total: 2, totalExact: true, limit: 1, includeRepealed: false,
         hasMore: false, nextCursor: null,
-        results: [{ id: "AT-NOR-2", jurisdiction: "AT", language: "de", version: 1, fetchedAt: "2026-10-02T00:00:00.000Z" }],
+        results: [summary({ id: "AT-NOR-2" })],
       }),
     );
     // `Omit<NationalDocumentListParams, "page">` only guards TypeScript — a
@@ -218,7 +275,7 @@ describe("listNationalDocuments", () => {
     const bypassed = { limit: 1, page: 3 } as unknown as Record<string, unknown>;
     const seen: string[] = [];
     for await (const page of client(fetchMock).paginateNationalDocuments("AT", bypassed)) {
-      seen.push(...page.results.map((r) => r.id!));
+      seen.push(...page.results.map((r) => r.id));
     }
     expect(seen).toEqual(["AT-NOR-1", "AT-NOR-2"]);
     for (const call of fetchMock.mock.calls) {
@@ -312,15 +369,7 @@ describe("nationalSemanticSearch", () => {
         query: "Datenschutz bei Bankgeschäften",
         resultCount: 1,
         results: [
-          {
-            score: 0.81,
-            snippet: "…",
-            case_number: "12 Os 1/20",
-            metadata: { celex_id: "AT-JUD-OGH-1" },
-            documentId: "AT-JUD-OGH-1",
-            jurisdiction: "AT",
-            attribution: "Data source: RIS.",
-          },
+          AT_CASE_LAW_HIT,
         ],
         hyde: false,
         attribution: "Data source: RIS.",
@@ -344,8 +393,12 @@ describe("nationalSemanticSearch", () => {
       filters: { court: "OGH" },
       hyde: true,
     });
-    expect(result.results[0]?.documentId).toBe("AT-JUD-OGH-1");
+    expect(result.results[0]?.documentId).toBe(AT_CASE_LAW_HIT.documentId);
     expect(result.results[0]?.attribution).toContain("RIS");
+    // API 2.8.0: every hit carries the listing-shaped `document` summary.
+    expect(result.results[0]?.document.documentKind).toBe("decision");
+    expect(result.results[0]?.document.id).toBe(result.results[0]?.documentId);
+    expect(result.results[0]?.document.validTo).toBeNull();
     // hyde was requested but the national index never rewrites.
     expect(result.hyde).toBe(false);
   });
@@ -361,16 +414,7 @@ describe("nationalLegislationSemanticSearch", () => {
         query: "Kündigungsfrist",
         resultCount: 1,
         results: [
-          {
-            score: 0.77,
-            law_id: "DE-BGB-622",
-            article_ref: "622",
-            documentId: "DE-BGB-622",
-            jurisdiction: "DE",
-            in_force: false,
-            valid_to: "2020-01-01",
-            attribution: "Source: gesetze-im-internet.de.",
-          },
+          DE_LEGISLATION_HIT,
         ],
         attribution: "Source: gesetze-im-internet.de.",
         subscription: { tier: "STARTER", maxResults: 20 },
@@ -391,7 +435,12 @@ describe("nationalLegislationSemanticSearch", () => {
     const hit = result.results[0]!;
     expect(hit.in_force).toBe(false);
     expect(hit.valid_to).toBe("2020-01-01");
-    expect(hit.documentId).toBe("DE-BGB-622");
+    expect(hit.documentId).toBe("DE-BJNR001950896");
+    // API 2.8.0: the index fields are always present, null when the index has nothing.
+    expect(hit.section).toBeNull();
+    expect(hit.valid_from).toBeNull();
+    expect(hit.law_type).toBeNull();
+    expect(hit.document).toMatchObject({ documentKind: "act", validTo: "2020-01-01", inForce: false });
   });
 });
 
