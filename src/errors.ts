@@ -40,6 +40,22 @@ export type ErrorCode =
   | "INVALID_RESPONSE"
   // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
   | "INCOMPLETE_EXPORT"
+  // 402 on a national-law call from a plan below BUSINESS: the monthly
+  // allowance of national calls is used up — `NationalAllowanceExhaustedError`.
+  | "NATIONAL_ALLOWANCE_EXHAUSTED"
+  // 409 — this jurisdiction has no semantic index to search (legacy shape,
+  // top-level `jurisdiction`) — `NationalSemanticNotEnabledError`.
+  | "NATIONAL_SEMANTIC_NOT_ENABLED"
+  // 503 — a jurisdiction's semantic index is temporarily unreachable
+  // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
+  | "NATIONAL_SEMANTIC_UNAVAILABLE"
+  // 410 — a national document its source withdrew: served
+  // nowhere, no title/metadata/text. Two envelope shapes carry it: the typed
+  // envelope on a direct document read (`details: {id, jurisdiction,
+  // withdrawnAt}`), and the legacy shape with those three as TOP-LEVEL
+  // sibling fields on the citation routes — `DocumentWithdrawnError` reads
+  // either.
+  | "DOCUMENT_WITHDRAWN"
   // Forward compatibility: unknown codes are kept as-is.
   | (string & {});
 
@@ -254,6 +270,14 @@ export class LexAPIError extends Error {
         return new TierForbiddenError(message, status, details, retryAfter, context);
       case "CREDITS_EXHAUSTED":
         return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
+      case "NATIONAL_ALLOWANCE_EXHAUSTED":
+        return new NationalAllowanceExhaustedError(message, status, details, retryAfter, context);
+      case "NATIONAL_SEMANTIC_NOT_ENABLED":
+        return new NationalSemanticNotEnabledError(message, status, details, retryAfter, context);
+      case "NATIONAL_SEMANTIC_UNAVAILABLE":
+        return new NationalSemanticUnavailableError(message, status, details, retryAfter, context);
+      case "DOCUMENT_WITHDRAWN":
+        return new DocumentWithdrawnError(message, status, details, retryAfter, context);
       case "UPSTREAM_ERROR":
         return new UpstreamError(message, status, details, retryAfter, context);
       case "TIMEOUT":
@@ -469,6 +493,72 @@ export class CreditsExhaustedError extends LexAPIError {
   }
 }
 
+/** `error.details` on a 402 `NATIONAL_ALLOWANCE_EXHAUSTED` envelope. */
+export interface NationalAllowanceExhaustedDetails {
+  /** ISO 3166-1 alpha-2 jurisdiction code of the call that was refused. */
+  jurisdiction?: string;
+  /** The tier's monthly allowance of national calls. */
+  limit?: number;
+  /** Always `0` on this error. */
+  remaining?: number;
+  /** When the allowance resets (ISO date-time: start of the next UTC month). */
+  resetsAt?: string;
+  /** `/pricing` — upgrading to BUSINESS removes the allowance entirely. */
+  upgradeUrl?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * 402 — the monthly national-law call allowance of a plan below BUSINESS
+ * (FREE/STARTER/PROFESSIONAL) is used up (`NATIONAL_ALLOWANCE_EXHAUSTED`).
+ * A usage shortfall, not a credit shortfall: no credits
+ * were charged for the refused call. Resolves at `resetsAt` (start of next
+ * UTC month) or immediately on upgrading to BUSINESS/SCALE/ENTERPRISE, which
+ * have no separate limit. Mirrors `X-National-Limit`/`X-National-Remaining`/
+ * `X-National-Reset` on the response that triggered it.
+ */
+export class NationalAllowanceExhaustedError extends LexAPIError {
+  static override readonly kind: string = "NationalAllowanceExhaustedError";
+  /** Typed view of `error.details` (jurisdiction, limit, remaining, resetsAt, upgradeUrl). */
+  declare readonly details: NationalAllowanceExhaustedDetails | undefined;
+
+  constructor(
+    message: string,
+    status = 402,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("NATIONAL_ALLOWANCE_EXHAUSTED", message, status, details, retryAfter, context);
+    this.name = "NationalAllowanceExhaustedError";
+  }
+
+  /** The jurisdiction code of the refused call (`details.jurisdiction`). */
+  get jurisdiction(): string | undefined {
+    return readString(this.details?.jurisdiction);
+  }
+
+  /** The tier's monthly allowance of national calls (`details.limit`). */
+  get limit(): number | undefined {
+    return readNumber(this.details?.limit);
+  }
+
+  /** Always `0` (`details.remaining`). */
+  get remaining(): number | undefined {
+    return readNumber(this.details?.remaining);
+  }
+
+  /** When the allowance resets (`details.resetsAt`, ISO date-time). */
+  get resetsAt(): string | undefined {
+    return readString(this.details?.resetsAt);
+  }
+
+  /** `/pricing` (`details.upgradeUrl`). */
+  get upgradeUrl(): string | undefined {
+    return readString(this.details?.upgradeUrl);
+  }
+}
+
 /** 502 — EUR-Lex returned an error (`UPSTREAM_ERROR`). Retry-safe on GETs. */
 export class UpstreamError extends LexAPIError {
   static override readonly kind: string = "UpstreamError";
@@ -516,9 +606,131 @@ export class ServiceUnavailableError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    // Internal: lets a subclass (`NationalSemanticUnavailableError`) keep its
+    // own, more specific `code` while still being `instanceof
+    // ServiceUnavailableError` (and retried the same way). Not part of the
+    // public constructor contract — always omitted by callers outside this file.
+    code: ErrorCode = "SERVICE_UNAVAILABLE",
   ) {
-    super("SERVICE_UNAVAILABLE", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "ServiceUnavailableError";
+  }
+}
+
+/**
+ * 409 — this jurisdiction's semantic index isn't enabled at all
+ * (`NATIONAL_SEMANTIC_NOT_ENABLED`). Legacy-shape body (`{code, error,
+ * message, jurisdiction}`, no `error.details`) — `jurisdiction` is read off
+ * the raw `body`, not `details`. Not retryable; the call was refunded in
+ * full and never reached the national allowance counter.
+ */
+export class NationalSemanticNotEnabledError extends LexAPIError {
+  static override readonly kind: string = "NationalSemanticNotEnabledError";
+
+  constructor(
+    message: string,
+    status = 409,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("NATIONAL_SEMANTIC_NOT_ENABLED", message, status, details, retryAfter, context);
+    this.name = "NationalSemanticNotEnabledError";
+  }
+
+  /** ISO 3166-1 alpha-2 jurisdiction code (top-level `jurisdiction` on the raw body). */
+  get jurisdiction(): string | undefined {
+    return readString(bodyField(this.body, "jurisdiction"));
+  }
+}
+
+/**
+ * 503 — a jurisdiction's semantic index exists but is temporarily
+ * unreachable (`NATIONAL_SEMANTIC_UNAVAILABLE`). Extends
+ * `ServiceUnavailableError` so `instanceof ServiceUnavailableError` still
+ * holds (and any existing 503-retry handling still catches it), while
+ * `code`/`name` stay specific. Legacy-shape body, same as
+ * `NationalSemanticNotEnabledError` — `jurisdiction` comes off `body`.
+ */
+export class NationalSemanticUnavailableError extends ServiceUnavailableError {
+  static override readonly kind: string = "NationalSemanticUnavailableError";
+
+  constructor(
+    message: string,
+    status = 503,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super(message, status, details, retryAfter, context, "NATIONAL_SEMANTIC_UNAVAILABLE");
+    this.name = "NationalSemanticUnavailableError";
+  }
+
+  get jurisdiction(): string | undefined {
+    return readString(bodyField(this.body, "jurisdiction"));
+  }
+}
+
+/** `error.details` (typed envelope) or the raw body (legacy envelope) on a `DOCUMENT_WITHDRAWN` 410. */
+export interface DocumentWithdrawnDetails {
+  id?: string;
+  jurisdiction?: string;
+  /** ISO date-time the source withdrew the document; `null` when unknown. */
+  withdrawnAt?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * 410 — a national document its source withdrew (a takedown, a
+ * pseudonymisation fix, a robots.txt listing). LexAPI
+ * serves nothing of it: no title, no metadata, no text. Two envelope shapes
+ * carry this code: the TYPED envelope on a direct document read
+ * (`GET /{jurisdiction}/documents/{id}`, `error.details: {id, jurisdiction,
+ * withdrawnAt}`), and the LEGACY shape with those same three fields as
+ * top-level siblings of `code`/`error` on the citation routes (a withdrawn
+ * id queried directly, or via `includeNational`). The getters below check
+ * `details` first, then fall back to the raw `body` — correct for either
+ * shape without the caller needing to know which one answered.
+ *
+ * Not retryable (the document is gone, not temporarily failing); never
+ * charges anything (the credits/allowance refund rule already returns
+ * every non-404 4xx-or-5xx). If you hold a cached copy of this document,
+ * drop it — the source withdrew it for a reason that may include a legal
+ * takedown or a pseudonymisation fix (see docs §7, no re-identification).
+ */
+export class DocumentWithdrawnError extends LexAPIError {
+  static override readonly kind: string = "DocumentWithdrawnError";
+  declare readonly details: DocumentWithdrawnDetails | undefined;
+
+  constructor(
+    message: string,
+    status = 410,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("DOCUMENT_WITHDRAWN", message, status, details, retryAfter, context);
+    this.name = "DocumentWithdrawnError";
+  }
+
+  private field(key: "id" | "jurisdiction" | "withdrawnAt"): unknown {
+    const fromDetails = detailsField(this.details, key);
+    return fromDetails !== undefined ? fromDetails : bodyField(this.body, key);
+  }
+
+  /** The withdrawn document's id (e.g. `AT-NOR-10001597`). */
+  get id(): string | undefined {
+    return readString(this.field("id"));
+  }
+
+  /** Upper-case jurisdiction code. */
+  get jurisdiction(): string | undefined {
+    return readString(this.field("jurisdiction"));
+  }
+
+  /** ISO date-time the source withdrew the document; `undefined` when unknown. */
+  get withdrawnAt(): string | undefined {
+    return readString(this.field("withdrawnAt"));
   }
 }
 

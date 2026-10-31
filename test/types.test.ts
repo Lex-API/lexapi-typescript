@@ -5,6 +5,11 @@ import type {
   Document,
   DocumentContent,
   LexAPI,
+  NationalDecision,
+  NationalDocument,
+  NationalDocumentContent,
+  NationalDocumentKind,
+  NationalSemanticLegislationResult,
   ResolvedVia,
   SemanticLegislationSearchOptions,
   WebhookCreateRequest,
@@ -15,6 +20,16 @@ import type {
 describe("public types", () => {
   it("models nullable document content", () => {
     expectTypeOf<Document["content"]>().toEqualTypeOf<DocumentContent | null | undefined>();
+  });
+
+  it("models the API 2.8.0 national document shape (always-present nullable fields)", () => {
+    expectTypeOf<NationalDocument["documentKind"]>().toEqualTypeOf<NationalDocumentKind | null>();
+    expectTypeOf<NationalDocument["decision"]>().toEqualTypeOf<NationalDecision | null>();
+    expectTypeOf<NationalDocument["content"]>().toEqualTypeOf<NationalDocumentContent | null>();
+    expectTypeOf<NationalDocument["ecli"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<NationalDocument["inForce"]>().toEqualTypeOf<boolean | null>();
+    expectTypeOf<NationalSemanticLegislationResult["in_force"]>().toEqualTypeOf<boolean | null>();
+    expectTypeOf<NationalSemanticLegislationResult["language"]>().toEqualTypeOf<string | null>();
   });
 
   it("accepts asOf on legislation search options only", () => {

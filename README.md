@@ -38,8 +38,12 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
+| 0 | `getNationalCoverage` (public) |
+| 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 (an unknown id too) |
+| 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
+| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law |
 
-Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge.
+Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge. The national-law call allowance follows the same rule: a failed call (other than a 404) gives its call back too.
 
 ## Search & documents
 
@@ -165,9 +169,76 @@ if (!path.found) console.log(path.message);           // graceful 200, not an er
 
 const related = await client.getRelatedDocuments("32016R0679", { limit: 10 }); // bibliographic coupling
 const stats = await client.getCitationStats();
+
+// National documents in the graph (BUSINESS, SCALE, ENTERPRISE only — 403 TierForbiddenError below that):
+const withNational = await client.getCitedBy("32016R0679", { includeNational: true });
+console.log(withNational.includeNational); // present once honoured; absent while no jurisdiction is live
+const nationalEdges = await client.getCites("AT-NOR-10001597"); // a national id works directly, no flag needed
 ```
 
-`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles.
+`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles, and `includeNational` (`getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`) to also return/follow national documents of live jurisdictions — BUSINESS, SCALE and ENTERPRISE only. `celexNumber` (and `getCitationPath`'s `from`/`to`) accept a national document id (e.g. `"AT-NOR-10001597"`) directly, with or without the flag; such an id whose jurisdiction isn't live is a plain `NotFoundError`.
+
+## National law
+
+Member-state (and non-EU) legal orders alongside EUR-Lex. BUSINESS, SCALE and ENTERPRISE get full
+access; FREE, STARTER and PROFESSIONAL get it within a monthly allowance of national calls. A
+jurisdiction that isn't launched yet answers 404, exactly like a path that doesn't exist — check
+`getNationalCoverage()` first.
+
+```ts
+const coverage = await client.getNationalCoverage(); // public, free — no allowance consumed
+for (const j of coverage.jurisdictions) {
+  if (j.live) console.log(j.code, j.name, j.legislation.documents, j.sources.map((s) => s.attribution));
+}
+
+const { document } = await client.getNationalDocument("AT", "AT-NOR-10001597"); // 1 credit
+console.log(document.attribution); // always show this alongside the text
+for (const a of document.content?.articles ?? []) console.log(a.number, a.title, a.text ?? "(no text)");
+
+const page = await client.listNationalDocuments("AT", { q: "Datenschutz", limit: 20 }); // 3 credits flat
+for await (const p of client.paginateNationalDocuments("AT", { q: "Datenschutz", limit: 100 })) {
+  console.log(p.results.length, p.hasMore); // cursor paging — reaches past the first 1,000 rows, `page` doesn't
+}
+
+const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei Bankgeschäften" }); // 5 credits
+for (const h of hits.results) console.log(h.document.documentKind, h.document.ecli, h.document.dateOfDocument);
+const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
+```
+
+**One shape for every country (requires LexAPI API 2.8.0).** National documents have the same
+fields, types and formats in every jurisdiction, so code written for one country works for all of
+them. Every field is always present — one the source does not provide is `null` (or `[]`), never
+missing:
+
+- `documentKind` (`"act"` | `"decision"`) tells legislation from case law everywhere; `documentType`
+  is the source's own label, in its language.
+- `decision` — on a decision, `{ court, chamber, caseNumbers, citedNorms: [{ text, documentId }] }`,
+  read server-side from whichever fields the source uses (also when the decision has no text);
+  `null` for acts. `isNationalDecision(document)` narrows it.
+- `content` (or `null` when there is no text — see `textAvailability`) is always
+  `{ fullText, articles, textLanguages, textLanguage, embeddedForeignText, repeal, source, details }`;
+  every article is `{ number, title, section, text, inForceFrom, inForceTo, details }` (`text: null`
+  when the source publishes no text for that unit). What a source adds beyond these fields is under
+  `content.details` / `articles[].details` — source-specific, keys differ by country.
+- Semantic hits carry `document` (the listing's summary of the matched document); legislation hits
+  always carry `law_title`, `article_ref`, `section`, `language`, `in_force`, `valid_from`,
+  `valid_to` and `law_type`, `null` when the index has nothing.
+
+```ts
+import { isNationalDecision } from "@lexapi/client";
+
+const { document: d } = await client.getNationalDocument("DE", "DE-JUD-BFH-KBRE202550123");
+if (isNationalDecision(d)) {
+  console.log(d.decision.court, d.decision.caseNumbers.join(", ")); // "BFH 3. Senat" "III R 27/24"
+  for (const n of d.decision.citedNorms) console.log(n.text, n.documentId ?? "(not identified)");
+}
+```
+
+A document its source withdrew (a takedown, a pseudonymisation fix) throws `DocumentWithdrawnError` (410) from `getNationalDocument` and from the citation methods for a withdrawn national id — nothing of it is served, not even the title; drop any copy you hold.
+
+A used-up allowance is `NationalAllowanceExhaustedError` (402); its headroom is also on
+`result.headers.nationalAllowance` (`{ limit, remaining, resetsAt }`) on every admitted call from a
+plan below BUSINESS.
 
 ## Webhooks
 
@@ -273,6 +344,8 @@ r.headers?.corpusVersion;     // X-Corpus-Version
 
 Also: `searchSource`, `searchCache`, `warning`, `ignoredDocumentTypes`, `postFilteredBy`, `documentTypeFanOut`, `batch`. The older `xWarning` (and `corpusVersion` on version responses) are still set.
 
+On the four national document/semantic endpoints, `headers.nationalAllowance` (`{ limit, remaining, resetsAt }`, from `X-National-Limit`/`X-National-Remaining`/`X-National-Reset`) reports the monthly national-call allowance left — present only for FREE/STARTER/PROFESSIONAL callers (absent for BUSINESS and above, and for `getNationalCoverage`).
+
 ## Configuration
 
 ```ts
@@ -336,14 +409,18 @@ try {
 | Class | `code` | HTTP |
 | --- | --- | --- |
 | `NotFoundError` | `NOT_FOUND` | 404 |
+| `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
+| `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
+| `NationalSemanticNotEnabledError` | `NATIONAL_SEMANTIC_NOT_ENABLED` | 409 — this jurisdiction has no semantic index to search; `.jurisdiction`; not retryable, refunded |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
+| `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable; `.jurisdiction`; retry later |
 | `TimeoutError` | `TIMEOUT` (504, 524) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |

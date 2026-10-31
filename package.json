@@ -1,6 +1,6 @@
 {
   "name": "@lexapi/client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official TypeScript SDK for LexAPI - EU legislation, CJEU case law and the Official Journal, parsed to article level.",
   "license": "MIT",
   "author": "Arieta Labs Ltd <support@lex-api.com> (https://lex-api.com)",
