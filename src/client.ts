@@ -689,7 +689,7 @@ export class LexAPI {
   ): Promise<NationalDocumentResponse> {
     return this.call<NationalDocumentResponse>({
       method: "GET",
-      path: `/${jurisdiction.toLowerCase()}/documents/${encodeURIComponent(id)}`,
+      path: `/${jurisdictionSegment(jurisdiction)}/documents/${encodeURIComponent(id)}`,
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -716,7 +716,7 @@ export class LexAPI {
   ): Promise<NationalDocumentListResponse> {
     return this.call<NationalDocumentListResponse>({
       method: "GET",
-      path: `/${jurisdiction.toLowerCase()}/documents`,
+      path: `/${jurisdictionSegment(jurisdiction)}/documents`,
       query: {
         page: params.page,
         cursor: params.cursor,
@@ -778,7 +778,7 @@ export class LexAPI {
   ): Promise<NationalSemanticCaseLawResponse> {
     return this.call<NationalSemanticCaseLawResponse>({
       method: "POST",
-      path: `/${jurisdiction.toLowerCase()}/search/semantic`,
+      path: `/${jurisdictionSegment(jurisdiction)}/search/semantic`,
       body: nationalSemanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -808,7 +808,7 @@ export class LexAPI {
   ): Promise<NationalSemanticLegislationResponse> {
     return this.call<NationalSemanticLegislationResponse>({
       method: "POST",
-      path: `/${jurisdiction.toLowerCase()}/legislation/semantic`,
+      path: `/${jurisdictionSegment(jurisdiction)}/legislation/semantic`,
       body: nationalSemanticWireBody(request, { allowHyde: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -995,6 +995,15 @@ function nationalSemanticWireBody(
   // validates it strictly as a boolean on this route too (400 otherwise).
   if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
   return body;
+}
+
+/**
+ * The jurisdiction path segment: lower-cased (the routes are registered in
+ * lower case) and URL-encoded like every other caller-supplied segment, so a
+ * stray "/" or "?" in a jurisdiction argument cannot reach another route.
+ */
+function jurisdictionSegment(jurisdiction: string): string {
+  return encodeURIComponent(jurisdiction.trim().toLowerCase());
 }
 
 /**

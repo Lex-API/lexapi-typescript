@@ -113,6 +113,17 @@ describe("getNationalDocument", () => {
     const [url] = lastCall(fetchMock);
     expect(url).toBe("https://lex-api.com/api/v1/de/documents/DE-X%2F1");
   });
+
+  it("URL-encodes the jurisdiction segment too, so it can never reach another route", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(200, { jurisdiction: "AT", total: 0, totalExact: true, limit: 20, includeRepealed: false, hasMore: false, nextCursor: null, results: [] }),
+    );
+
+    await client(fetchMock).listNationalDocuments("../citations/stats?x=");
+
+    const [url] = lastCall(fetchMock);
+    expect(new URL(url).pathname).toBe("/api/v1/..%2Fcitations%2Fstats%3Fx%3D/documents");
+  });
 });
 
 describe("national document shape (API 2.8.0 — one shape for every jurisdiction)", () => {

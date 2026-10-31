@@ -84,6 +84,7 @@ country now works for every other:
   options rather than silently read as `params` — this can't be caught at the type level for a
   non-literal variable or a JS caller, so it's detected at runtime too. Every response type
   carries an optional `includeNational` boolean, present once the flag was honoured.
+- The national methods URL-encode the `jurisdiction` path segment (lower-cased, as before), like every other caller-supplied segment — a stray `/` or `?` in that argument can no longer reach a different route.
 - `paginateNationalDocuments` strips `page` from its params at runtime (not just via the
   `Omit<…, "page">` type, which only guards TypeScript callers) — passing both `page` and
   `cursor` to the underlying `GET` is a 400 ("Use either cursor or page, not both").
