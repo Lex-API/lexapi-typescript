@@ -91,6 +91,20 @@ export interface ResponseHeaders {
   languagePartialKept?: number;
   /** Age in seconds of a cached answer (`X-Cache-Age`). */
   cacheAge?: number;
+  /**
+   * National-law monthly call allowance for plans below BUSINESS
+   * (`X-National-Limit`/`X-National-Remaining`/`X-National-Reset`). Sent on
+   * the four national document/semantic endpoints for FREE/STARTER/
+   * PROFESSIONAL callers only — absent for BUSINESS/SCALE/ENTERPRISE and
+   * `getNationalCoverage`. A used-up allowance is a
+   * 402 `NationalAllowanceExhaustedError`, not a header you need to poll.
+   */
+  nationalAllowance?: {
+    limit?: number;
+    remaining?: number;
+    /** ISO date-time: start of the next UTC month. */
+    resetsAt?: string;
+  };
 }
 
 /** Minimal `Headers` surface (works with polyfilled / injected fetch implementations). */
@@ -156,6 +170,11 @@ export function parseResponseHeaders(source: { headers: HeaderGetter } | HeaderG
       remaining: int(h, "ratelimit-remaining"),
       reset: int(h, "ratelimit-reset"),
       policy: str(h, "ratelimit-policy"),
+    }),
+    nationalAllowance: compact<NonNullable<ResponseHeaders["nationalAllowance"]>>({
+      limit: int(h, "x-national-limit"),
+      remaining: int(h, "x-national-remaining"),
+      resetsAt: str(h, "x-national-reset"),
     }),
   };
   return compact<ResponseHeaders>(parsed) ?? {};

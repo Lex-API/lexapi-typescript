@@ -879,6 +879,15 @@ export interface CitationEdgeParams {
   offset?: number;
   /** Language preferred for neighbour titles (default `en`). */
   language?: Language;
+  /**
+   * Also return national documents of live jurisdictions as neighbours
+   * (national acts/decisions that cite, implement or are cited by the EU
+   * graph, where the national source records the link). BUSINESS, SCALE
+   * and ENTERPRISE only — `403 TierForbiddenError` below that. A `celexNumber`
+   * that is itself a national id (`AT-…`) includes national neighbours
+   * without this flag.
+   */
+  includeNational?: boolean;
 }
 
 export interface CitedByResponse extends CreditedResponse, WithResponseHeaders {
@@ -893,6 +902,8 @@ export interface CitedByResponse extends CreditedResponse, WithResponseHeaders {
   offset?: number;
   citedBy: CitingDocumentGroup[];
   relationSync?: RelationSync;
+  /** Whether national documents were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
@@ -905,6 +916,8 @@ export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
   limit?: number;
   offset?: number;
   cites: CitedDocumentGroup[];
+  /** Whether national documents were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 /** A neighbour in the citation graph, deduplicated across edge types. */
@@ -927,6 +940,8 @@ export interface CitationNetworkParams {
   offset?: number;
   /** Language preferred for neighbour titles (default `en`). */
   language?: Language;
+  /** Also include national neighbours of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
 }
 
 export interface CitationNetworkResponse extends CreditedResponse, WithResponseHeaders {
@@ -962,6 +977,8 @@ export interface CitationNetworkResponse extends CreditedResponse, WithResponseH
   /** The server-side budget that expired (only on partial responses). */
   timeoutMs?: number;
   relationSync?: RelationSync;
+  /** Whether national neighbours were included (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface CitationStatsTopCited {
@@ -976,8 +993,16 @@ export interface CitationStatsTopCiting {
   citesCount?: number;
 }
 
+/** Params for {@link getCitationStats}. */
+export interface CitationStatsParams {
+  /** Also count national documents of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
+}
+
 export interface CitationStatsResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
+  /** Whether national documents were counted (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
   stats: {
     totalCitations: number;
     uniqueSourceDocuments: number;
@@ -1005,6 +1030,12 @@ export interface CitationPathParams {
   maxDepth?: number;
   /** Language preferred for node titles (default `en`). */
   language?: Language;
+  /**
+   * Also follow national documents of live jurisdictions. BUSINESS+ only —
+   * `403 TierForbiddenError` below that. `from`/`to` may themselves be
+   * national ids (`AT-…`) regardless of this flag.
+   */
+  includeNational?: boolean;
 }
 
 export interface CitationPathResponse extends CreditedResponse, WithResponseHeaders {
@@ -1020,6 +1051,8 @@ export interface CitationPathResponse extends CreditedResponse, WithResponseHead
   path: CitationPathNode[];
   /** Present when `found` is false. */
   message?: string;
+  /** Whether national documents were followed (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 export interface RelatedDocument {
@@ -1036,6 +1069,8 @@ export interface RelatedDocumentsParams {
   limit?: number;
   /** Language preferred for titles (default `en`). */
   language?: Language;
+  /** Also consider national documents of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
+  includeNational?: boolean;
 }
 
 export interface RelatedDocumentsResponse extends CreditedResponse, WithResponseHeaders {
@@ -1048,6 +1083,8 @@ export interface RelatedDocumentsResponse extends CreditedResponse, WithResponse
   related: RelatedDocument[];
   /** Present when the seed has no outbound citations to couple on. */
   message?: string;
+  /** Whether national documents were considered (see `includeNational`). Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
 }
 
 // ── Semantic search ─────────────────────────────────────────────────
@@ -1363,6 +1400,500 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
   tookMs?: number;
   /** Legacy daily-call plans only. */
   semanticUsage?: SemanticUsageInfo;
+}
+
+// ── National law ────────────────────────────────────────────────────
+// Member-state (and non-EU, e.g. UK) legal orders LexAPI serves alongside
+// EUR-Lex. BUSINESS and above get full access; FREE/STARTER/PROFESSIONAL get
+// it within a monthly allowance of national calls —
+// see `X-National-Limit`/`X-National-Remaining`/`X-National-Reset`
+// (`ResponseHeaders.nationalAllowance`) and `NationalAllowanceExhaustedError`.
+// A jurisdiction not yet launched answers 404, exactly like one that doesn't
+// exist — call `getNationalCoverage()` first to see what is live.
+
+/** Availability block shared by `legislation` and `caseLaw` on a coverage entry. */
+export interface NationalCoverageAvailability {
+  available: boolean;
+  description?: string;
+  /** Approximate document count. `null` whenever `available` is false (incl. every jurisdiction still in preparation). */
+  documents?: number | null;
+  /** Earliest year covered, as an integer. `null` when unknown — today, always `null` for `legislation`. */
+  from?: number | null;
+}
+
+/** `caseLaw` adds the courts covered. */
+export interface NationalCaseLawCoverageAvailability extends NationalCoverageAvailability {
+  courts?: string[];
+}
+
+/** Whether semantic search is indexed for this jurisdiction, per domain. */
+export interface NationalSemanticSearchAvailability {
+  legislation: boolean;
+  caseLaw: boolean;
+}
+
+/** One upstream data source a jurisdiction's corpus is built from. */
+export interface NationalSource {
+  name: string;
+  url: string;
+  licence: string;
+  attribution: string;
+}
+
+/** One jurisdiction's entry on `GET /national/coverage`. */
+export interface NationalJurisdictionCoverage {
+  /** ISO 3166-1 alpha-2, e.g. `"AT"`. Non-EU legal orders (e.g. `"UK"`) are included too. */
+  code: string;
+  name: string;
+  /** Whether customers can call this jurisdiction's endpoints today. */
+  live: boolean;
+  /** `null` before launch. */
+  launchedAt?: string | null;
+  legislation: NationalCoverageAvailability;
+  caseLaw: NationalCaseLawCoverageAvailability;
+  semanticSearch: NationalSemanticSearchAvailability;
+  sources: NationalSource[];
+  /** When this jurisdiction's corpus was last synced. `null` if never. */
+  lastSyncAt?: string | null;
+}
+
+/**
+ * `GET /national/coverage` — public, free, no API key or allowance headers
+ * required. Call this before `getNationalDocument` / `listNationalDocuments`
+ * / `nationalSemanticSearch` / `nationalLegislationSemanticSearch` to check
+ * whether a jurisdiction is live, so a 404 is never a surprise.
+ */
+export interface NationalCoverageResponse extends WithResponseHeaders {
+  updatedAt: string;
+  jurisdictions: NationalJurisdictionCoverage[];
+}
+
+/** Known `NationalTextBasis.basis` wire values (snake_case). Open for forward compatibility. */
+export type NationalTextBasisKind =
+  | "as_announced"
+  | "official_consolidated"
+  | "official_consolidated_superseded"
+  | "none"
+  | (string & {});
+
+/**
+ * `NationalDocument.textBasis` — which text a source says it publishes
+ * (e.g. Poland). `null` (since API 2.8.0, no longer absent) for every
+ * source that does not say.
+ */
+export interface NationalTextBasis {
+  basis: NationalTextBasisKind;
+  /** The date the text speaks for (never "valid until"). */
+  asOf?: string;
+  newerConsolidationExists?: boolean;
+  newestPdfOnlyDate?: string;
+  newerPdfOnly?: string[];
+  amendedSince?: boolean;
+  /** ELI of the act this text was consolidated from, when applicable. */
+  textFrom?: string;
+}
+
+/**
+ * What a national document is, in one vocabulary for every jurisdiction
+ * (API 2.8.0): `"act"` (legislation) or `"decision"` (case law). Use it —
+ * not `documentType`, the source's own label — to tell them apart.
+ */
+export type NationalDocumentKind = "act" | "decision";
+
+/**
+ * A national document's metadata, as the listing returns it — the same
+ * fields, types and formats for every jurisdiction (API 2.8.0). Every field
+ * is always present; one the source does not provide is `null`, never
+ * absent.
+ */
+export interface NationalDocumentSummary {
+  /** The national corpus id (e.g. `"AT-NOR-12345"`), analogous to a CELEX number. */
+  id: string;
+  /** ISO 3166-1 alpha-2 jurisdiction code. */
+  jurisdiction: string;
+  /** ISO 639-1 code of the source language. */
+  language: string;
+  /**
+   * `"act"` | `"decision"` — see {@link NationalDocumentKind}. `null` only
+   * for an id that matches no collection LexAPI knows for the jurisdiction.
+   */
+  documentKind: NationalDocumentKind | null;
+  title: string | null;
+  /**
+   * The source's own type label, in its language (`"Bundesgesetz (konsolidiert)"`,
+   * `"Uitspraak (NL)"`) — different in every jurisdiction. Use `documentKind`
+   * for act / decision.
+   */
+  documentType: string | null;
+  /** The decision's ECLI. `null` for acts and where the source gives none. */
+  ecli: string | null;
+  /** The act's ELI (a URI). `null` where the source gives none. */
+  eli: string | null;
+  /** The document's own date, `YYYY-MM-DD`; `null` when the source gives none. */
+  dateOfDocument: string | null;
+  /** LexAPI's version counter for this document (bumped when its text changes). */
+  version: number;
+  /** When LexAPI last stored real content for it (ISO 8601). */
+  fetchedAt: string;
+  /**
+   * Last day in force (`YYYY-MM-DD`), set once the source confirmed the act
+   * is no longer in force. `null` when there is no known end (an act in
+   * force, case law, a source that does not record repeals).
+   */
+  validTo: string | null;
+  /** `false` once `validTo` has passed (UTC), `true` while it is today or later; `null` when `validTo` is `null`. */
+  inForce: boolean | null;
+}
+
+/** Legislation a decision cites — {@link NationalDecision.citedNorms}. */
+export interface NationalCitedNorm {
+  /** The source's citation string (`"§ 62 Abs 1a S 3 EStG 2009"`, `"§ 7 177/1996 Sb."`). */
+  text: string;
+  /**
+   * LexAPI id of the cited act when the source identifies it (CZ, SI, PL,
+   * SE) — whether or not LexAPI holds that act; `null` otherwise.
+   */
+  documentId: string | null;
+}
+
+/**
+ * A decision's case-law metadata (`documentKind: "decision"`). Values are
+ * the source's own (local language and spelling); the field set and types
+ * are the same in every jurisdiction — the server reads them from whichever
+ * field the source uses (Austria's `gericht`, Germany's `aktenzeichen`, …),
+ * so read these, never the raw source keys under `content.details`.
+ */
+export interface NationalDecision {
+  /** The deciding court as the source names it (`"OGH"`, `"BFH 3. Senat"`, `"Gerechtshof Amsterdam"`). */
+  court: string | null;
+  /**
+   * The chamber, section or department, where the source names it apart
+   * from the court (`"Sección Cuarta"`, `"Civilni oddelek"`). `null`
+   * otherwise (Austria and Germany name the panel inside `court`).
+   */
+  chamber: string | null;
+  /** The case (docket) numbers as the source writes them (`["III R 27/24"]`); `[]` when none. */
+  caseNumbers: string[];
+  /** Legislation the decision cites, where the source lists it; `[]` otherwise. */
+  citedNorms: NationalCitedNorm[];
+}
+
+/** One unit of an act (article, section, annex) — the same fields in every jurisdiction. */
+export interface NationalArticle {
+  /** The source's own label (`"§ 1"`, `"Art. 1"`, `"1 kap. 1 §"`); `null` for an unnumbered unit. */
+  number: string | null;
+  /** The unit's heading. */
+  title: string | null;
+  /** The part or chapter it sits in (`"Kapitel 1 — …"`, `"1 luku"`). */
+  section: string | null;
+  /** The unit's text; `null` when the source has no text for it — never an empty provision. */
+  text: string | null;
+  /** The unit's own validity start (`YYYY-MM-DD`), where the source dates units (AT, ES, FR). */
+  inForceFrom: string | null;
+  inForceTo: string | null;
+  /** The source's other unit fields (unit ids, kinds, notes). Source-specific. */
+  details: Record<string, unknown>;
+}
+
+/** `content.repeal` — the source's confirmation behind `validTo`. */
+export interface NationalRepeal {
+  /** Last day in force (`YYYY-MM-DD`). */
+  validTo: string | null;
+  /** What the source says, in its words. */
+  basis: string | null;
+  /** When LexAPI recorded it. */
+  detectedAt: string | null;
+}
+
+/**
+ * The parsed text of a national document — a closed key set, the same in
+ * every jurisdiction (API 2.8.0). What a source adds beyond these keys is
+ * under `source` (provenance) and `details`, both source-specific.
+ */
+export interface NationalDocumentContent {
+  fullText: string;
+  /** The act's units in order. `[]` for decisions and for acts the source publishes without units. */
+  articles: NationalArticle[];
+  /**
+   * The languages the text is in (ISO 639-1). Dutch treaties (`NL-BWBV…`):
+   * the languages BWB publishes the treaty in, in order (`["en", "nl"]`);
+   * otherwise the one language of the text.
+   */
+  textLanguages: string[];
+  /** Set when the whole text is in one language other than the document's `language`; else `null`. */
+  textLanguage: string | null;
+  /** `true` when the text includes text in a language other than the document's `language`. */
+  embeddedForeignText: boolean;
+  /** The source's confirmation that the act is no longer in force (the basis of `validTo`); `null` otherwise. */
+  repeal: NationalRepeal | null;
+  /** Provenance from the upstream (system, its ids and URLs). Keys vary by jurisdiction. */
+  source: Record<string, unknown>;
+  /** Everything else the source provides, under its own field names. Keys vary by jurisdiction. */
+  details: Record<string, unknown>;
+}
+
+/** Full national document — `GET /{jurisdiction}/documents/{id}` (API 2.8.0 shape). */
+export interface NationalDocument extends NationalDocumentSummary {
+  /**
+   * Case-law metadata when `documentKind` is `"decision"` (served also when
+   * the decision has no text); `null` for acts. See {@link isNationalDecision}.
+   */
+  decision: NationalDecision | null;
+  /** `null` when the jurisdiction's source publishes no text for this id — check `textAvailability`. */
+  content: NationalDocumentContent | null;
+  textAvailability: TextAvailability;
+  /** The jurisdiction's source attribution — always show this to users alongside the text. */
+  attribution: string;
+  /** Only from sources that say which text they publish (e.g. Poland); `null` for every other source. */
+  textBasis: NationalTextBasis | null;
+}
+
+/** A {@link NationalDocument} narrowed to a decision (`decision` is non-null). */
+export type NationalDecisionDocument = NationalDocument & {
+  documentKind: "decision";
+  decision: NationalDecision;
+};
+
+/**
+ * Narrow a national document to a decision: `documentKind === "decision"`
+ * with its `decision` block. Works the same for every jurisdiction.
+ */
+export function isNationalDecision(document: NationalDocument): document is NationalDecisionDocument {
+  return document.documentKind === "decision" && document.decision != null;
+}
+
+/**
+ * `GET /{jurisdiction}/documents/{id}`. No `success` field (unlike the EU
+ * document endpoints). Credit cost: every national read is a corpus read
+ * (there is no live-fetch fallback) — reserved at the `document_fetch`
+ * weight (5) and settled to the corpus-hit weight (1).
+ */
+export interface NationalDocumentResponse extends CreditedResponse, WithResponseHeaders {
+  document: NationalDocument;
+}
+
+export interface NationalDocumentListParams {
+  /**
+   * 1-based page, within the first `LISTING_MAX_OFFSET` (1,000) rows only —
+   * `(page - 1) * limit >= 1000` is a 400 `InvalidParamsError`. Mutually
+   * exclusive with `cursor`; omit both for page 1. Beyond the first 1,000
+   * rows, page through with `cursor` (each response's `nextCursor`) instead.
+   */
+  page?: number;
+  /**
+   * Opaque keyset cursor from a previous response's `nextCursor`. Works at
+   * any depth (unlike `page`, which only reaches the first 1,000 rows). An
+   * invalid cursor is a 400.
+   */
+  cursor?: string;
+  /** Default 20, max 100. */
+  limit?: number;
+  /** Case-insensitive title search, 3–200 characters (Unicode code points). */
+  q?: string;
+  /** Case-insensitive substring match on `documentType` (wire param: `type`), at most 200 characters. */
+  documentType?: string;
+  /** Repealed acts are hidden by default; `true` includes them. */
+  includeRepealed?: boolean;
+}
+
+/**
+ * `GET /{jurisdiction}/documents`. No `success` field. 3 credits per call
+ * (flat — pagination does not multiply the price, unlike `search`).
+ *
+ * Results are newest-first by the document's own date (undated rows last),
+ * then by id — a total order, so pages never repeat or skip a row even
+ * while the corpus keeps changing underneath the walk.
+ */
+export interface NationalDocumentListResponse extends CreditedResponse, WithResponseHeaders {
+  jurisdiction: string;
+  /** Matching rows, counted up to 10,000 — see `totalExact`. */
+  total: number;
+  /** `false` when `total` is a lower bound (more than 10,000 rows matched, or the count timed out). */
+  totalExact: boolean;
+  /** Present only when the request paged with `page` (absent in cursor mode). */
+  page?: number;
+  limit: number;
+  includeRepealed: boolean;
+  /** `true` when another page follows — page with `nextCursor`. */
+  hasMore: boolean;
+  /** Opaque cursor for the next page (via `cursor`), or `null` on the last page. */
+  nextCursor: string | null;
+  results: NationalDocumentSummary[];
+}
+
+/**
+ * Filters honoured by `POST /{jurisdiction}/search/semantic` — deliberately
+ * an EXACT interface (no index signature): the server 400s any unsupported
+ * key (`"Unsupported filter"`), so a typo here should be a compile error,
+ * not a silent 400 at runtime. `jurisdiction` must equal the path's
+ * jurisdiction, or be omitted.
+ */
+export interface NationalCaseLawFilters {
+  court?: string;
+  date_from?: string;
+  date_to?: string;
+  ecli?: string;
+  language?: string;
+  jurisdiction?: string;
+}
+
+/**
+ * Filters honoured by `POST /{jurisdiction}/legislation/semantic` — exact,
+ * like {@link NationalCaseLawFilters}. `law_id`/`in_force`/`law_type` are
+ * the semantic index's own names, accepted as aliases.
+ */
+export interface NationalLegislationFilters {
+  id?: string;
+  law_id?: string;
+  inForce?: boolean;
+  in_force?: boolean;
+  documentType?: string;
+  law_type?: string;
+  language?: string;
+  jurisdiction?: string;
+}
+
+/**
+ * Options for `nationalSemanticSearch`. `hyde` is accepted for API
+ * compatibility but is always a no-op here: the national index never
+ * rewrites, so the response reports `hyde: false` (never `true`) when the
+ * request set it, and billing stays the flat 5 credits (no 15-credit tier).
+ *
+ * Deliberately NOT `extends SemanticSearchOptions`: `language` here is a
+ * plain `string` (the jurisdiction's own language — anything else is a
+ * 400), not the 10-code EU `SemanticLanguage` enum, and `filters` is the
+ * exact {@link NationalCaseLawFilters} rather than a free-form record.
+ */
+export interface NationalSemanticCaseLawOptions {
+  /** Natural-language query to embed. */
+  query: string;
+  /** Max results. Default 10. */
+  limit?: number;
+  /** Drop results below this cosine similarity (wire: `min_score`). */
+  minScore?: number;
+  /** Omit, or the jurisdiction's own language — any other value is a 400. */
+  language?: string;
+  /** Receive the full matched text per hit (wire: `include: ["text"]`) instead of a `snippet`. */
+  includeText?: boolean;
+  hyde?: boolean;
+  filters?: NationalCaseLawFilters;
+}
+
+/**
+ * Options for `nationalLegislationSemanticSearch`. No `hyde`, no `asOf` —
+ * both are EU-only. See {@link NationalSemanticCaseLawOptions} for why this
+ * does not extend `SemanticSearchOptions`.
+ */
+export interface NationalSemanticLegislationOptions {
+  query: string;
+  limit?: number;
+  minScore?: number;
+  /** Omit, or the jurisdiction's own language — any other value is a 400. */
+  language?: string;
+  includeText?: boolean;
+  filters?: NationalLegislationFilters;
+}
+
+/**
+ * Single hit from `nationalSemanticSearch`, same shape as
+ * {@link SemanticCaseLawResult} (which index metadata fields are filled
+ * depends on the national source) plus national fields. For metadata that
+ * is the same in every jurisdiction, read `document` — the matched decision
+ * as the listing returns it (API 2.8.0).
+ */
+export interface NationalSemanticCaseLawResult extends SemanticCaseLawResult {
+  /** The national corpus id this hit resolved to (also mirrored into `metadata.celex_id`). */
+  documentId: string;
+  /** ISO 3166-1 alpha-2 jurisdiction code. */
+  jurisdiction: string;
+  /**
+   * The matched decision as the listing returns it, from LexAPI's own
+   * record — the same fields in every jurisdiction, whatever metadata the
+   * index carries for it (API 2.8.0).
+   */
+  document: NationalDocumentSummary;
+  /** When the source recorded an end of validity (also a future one). */
+  validTo?: string;
+  /** Only `false`, and only once `validTo` has passed. */
+  inForce?: boolean;
+  attribution: string;
+}
+
+/**
+ * Single hit from `nationalLegislationSemanticSearch`, same shape as
+ * {@link SemanticLegislationResult} plus national fields. Unlike the EU hit,
+ * a national hit always carries `law_title`, `article_ref`, `section`,
+ * `language`, `in_force`, `valid_from`, `valid_to` and `law_type` — `null`
+ * when the index has nothing for the unit (API 2.8.0). NOTE: these index
+ * fields are deliberately snake_case — that is what the server sends — do
+ * not "fix" the casing without changing the server first. The act's
+ * cross-jurisdiction metadata is under `document`.
+ */
+export interface NationalSemanticLegislationResult
+  extends Omit<SemanticLegislationResult, "law_id" | "law_title" | "article_ref" | "section" | "language"> {
+  /** LexAPI id of the act. */
+  law_id: string;
+  /** Same as `law_id`. */
+  documentId: string;
+  jurisdiction: string;
+  law_title: string | null;
+  /** The unit's label, as in `content.articles[].number` of the document. */
+  article_ref: string | null;
+  section: string | null;
+  language: string | null;
+  /**
+   * From the index, as of today; `false` (with `valid_to`) when LexAPI
+   * knows the act is repealed (LexAPI only ever overrides it toward
+   * `false`); `null` when unknown.
+   */
+  in_force: boolean | null;
+  /** The unit's validity start (`YYYY-MM-DD`), where the source dates units. */
+  valid_from: string | null;
+  valid_to: string | null;
+  /** The index's type code of the act. */
+  law_type: string | null;
+  /** The matched act as the listing returns it, from LexAPI's own record (API 2.8.0). */
+  document: NationalDocumentSummary;
+  attribution: string;
+}
+
+/**
+ * `POST /{jurisdiction}/search/semantic` — national case-law semantic
+ * search. `credits` is present on the body, like every other credit-metered
+ * route, typed optional only via the shared `CreditedResponse` shape.
+ */
+export interface NationalSemanticCaseLawResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  searchType?: "semantic-case-law";
+  jurisdiction?: string;
+  query?: string;
+  resultCount?: number;
+  results: NationalSemanticCaseLawResult[];
+  /** Present only when the request set `hyde: true` — always `false` (see {@link NationalSemanticCaseLawOptions}). */
+  hyde?: boolean;
+  metadata?: Record<string, unknown>;
+  hint?: string;
+  /** The jurisdiction's source attribution — always show this to users alongside results. */
+  attribution?: string;
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: { tier?: SubscriptionTier; maxResults?: number };
+}
+
+/** `POST /{jurisdiction}/legislation/semantic` — national legislation semantic search. */
+export interface NationalSemanticLegislationResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  searchType?: "semantic-legislation";
+  jurisdiction?: string;
+  query?: string;
+  resultCount?: number;
+  results: NationalSemanticLegislationResult[];
+  metadata?: Record<string, unknown>;
+  hint?: string;
+  attribution?: string;
+  tookMs?: number;
+  semanticUsage?: SemanticUsageInfo;
+  subscription?: { tier?: SubscriptionTier; maxResults?: number };
 }
 
 // ── Webhooks ────────────────────────────────────────────────────────

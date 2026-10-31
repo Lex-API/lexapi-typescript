@@ -5,6 +5,90 @@ versioning: [SemVer](https://semver.org/) — while the package is `0.x`, a **mi
 breaking changes (documented below with a migration note); `npm install @lexapi/client@^0.1.0` never
 picks up `0.2.0` on its own.
 
+## [0.3.0] — 2026-10-28
+
+Adds national (member-state, and non-EU) law support. **Requires LexAPI API 2.8.0.**
+
+### National document shape (API 2.8.0)
+
+The national types follow the normalized cross-jurisdiction contract — a client written for one
+country now works for every other:
+
+- `NationalDocumentSummary` (listing rows, documents, and every semantic hit's `document`): every
+  field is required and `null` when the source has nothing — `title`, `documentType`, `ecli`,
+  `eli`, `dateOfDocument` (`YYYY-MM-DD`), `validTo`, `inForce` — plus the new **`documentKind`**
+  (`"act"` | `"decision"`, type `NationalDocumentKind`).
+- `NationalDocument` gains **`decision: NationalDecision | null`** (`court`, `chamber`,
+  `caseNumbers[]`, `citedNorms[]` of `NationalCitedNorm { text, documentId }`) and `content` is the
+  closed `NationalDocumentContent` (`fullText`, `articles: NationalArticle[]`, `textLanguages`,
+  `textLanguage`, `embeddedForeignText`, `repeal: NationalRepeal | null`, `source`, `details`) instead
+  of the EU `DocumentContent`. Articles are `{ number, title, section, text, inForceFrom, inForceTo,
+  details }`. `textAvailability` is required; `textBasis` is `NationalTextBasis | null`. Source-
+  specific keys (Austria's `gericht`, Germany's `aktenzeichen`, unit ids, …) live only under
+  `content.details` / `articles[].details` — read `decision` instead.
+- New helper **`isNationalDecision(document)`** — a type guard narrowing to
+  `NationalDecisionDocument` (non-null `decision`).
+- `NationalSemanticCaseLawResult` / `NationalSemanticLegislationResult`: required `document`
+  (`NationalDocumentSummary`), `documentId`, `jurisdiction`, `attribution`; legislation hits always
+  carry `law_title`, `article_ref`, `section`, `language`, `in_force`, `valid_from`, `valid_to`,
+  `law_type` (each nullable).
+
+### Added
+
+- **National law**: `getNationalCoverage()` (`GET /national/coverage`, public, free — which
+  jurisdictions are live, what each covers, sources and their attribution), `getNationalDocument()`
+  (`GET /{jurisdiction}/documents/{id}`, 1 credit), `listNationalDocuments()` /
+  `paginateNationalDocuments()` (`GET /{jurisdiction}/documents`, 3 credits flat per call — pagination
+  does not multiply the price; cursor paging past the first 1,000 rows, newest-first
+  by document date), `nationalSemanticSearch()`
+  (`POST /{jurisdiction}/search/semantic`, 5 credits — `hyde` accepted but never rewrites or
+  changes price here) and `nationalLegislationSemanticSearch()`
+  (`POST /{jurisdiction}/legislation/semantic`, 5 credits; no `hyde`/`asOf` — and never forwards a
+  bypassed `hyde` either, now that the server validates it strictly as a boolean on this route
+  too). New types:
+  `NationalCoverageResponse`, `NationalDocument`, `NationalDocumentSummary`,
+  `NationalDocumentResponse`, `NationalDocumentListParams`, `NationalDocumentListResponse`,
+  `NationalSemanticCaseLawOptions`/`Result`/`Response`, `NationalSemanticLegislationOptions`/
+  `Result`/`Response`, `NationalSource`, `NationalJurisdictionCoverage` and friends. Every
+  document/result carries `attribution` — always show it alongside the text.
+- **`NationalAllowanceExhaustedError`** (`NATIONAL_ALLOWANCE_EXHAUSTED`, 402): FREE/STARTER/
+  PROFESSIONAL get national law within a monthly allowance of calls; BUSINESS and above have no
+  separate limit. Typed `jurisdiction`/`limit`/`remaining`/`resetsAt`/`upgradeUrl` getters.
+- **`NationalSemanticNotEnabledError`** (409 `NATIONAL_SEMANTIC_NOT_ENABLED` — a jurisdiction has
+  no semantic index at all) and **`NationalSemanticUnavailableError`** (503
+  `NATIONAL_SEMANTIC_UNAVAILABLE` — temporarily unreachable; extends `ServiceUnavailableError`, so
+  `instanceof ServiceUnavailableError` still holds). Both legacy-shape bodies; `.jurisdiction` is
+  read off the raw `body`, not `details`.
+- **`DocumentWithdrawnError`** (`DOCUMENT_WITHDRAWN`, 410): a national document
+  its source withdrew (a takedown, a pseudonymisation fix) is served nowhere — no title, no
+  metadata, no text. Thrown by `getNationalDocument` (typed envelope, `details: {id, jurisdiction,
+  withdrawnAt}`) and by the citation methods for a withdrawn national id (legacy shape, the same
+  three fields as top-level siblings instead). `.id`/`.jurisdiction`/`.withdrawnAt` read whichever
+  shape answered. Not retryable; nothing is ever charged for it.
+- **`result.headers.nationalAllowance`** (`{ limit, remaining, resetsAt }`), parsed from
+  `X-National-Limit`/`X-National-Remaining`/`X-National-Reset` — present only for
+  FREE/STARTER/PROFESSIONAL callers on the four national document/semantic endpoints (also on the
+  402 error itself, via `err.headers`).
+- **`includeNational`** on all six citation-graph methods (`getCites`, `getCitedBy`,
+  `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`): also
+  returns/follows national documents of live jurisdictions as neighbours — BUSINESS, SCALE and
+  ENTERPRISE only (`403 TierForbiddenError` below that). `celexNumber` and `getCitationPath`'s
+  `from`/`to` accept a national document id directly (e.g. `"AT-NOR-10001597"`); an id whose
+  jurisdiction is not live is a plain `404 NotFoundError`. `getCitationStats` gained an optional
+  `params` argument before `options`.
+  Back-compatible with 0.2.0's `getCitationStats(options?)`: a first argument shaped like
+  `CallOptions` (`timeoutMs`/`signal`, not `includeNational`) is still honoured as the per-call
+  options rather than silently read as `params` — this can't be caught at the type level for a
+  non-literal variable or a JS caller, so it's detected at runtime too. Every response type
+  carries an optional `includeNational` boolean, present once the flag was honoured.
+- The national methods URL-encode the `jurisdiction` path segment (lower-cased, as before), like every other caller-supplied segment — a stray `/` or `?` in that argument can no longer reach a different route.
+- `paginateNationalDocuments` strips `page` from its params at runtime (not just via the
+  `Omit<…, "page">` type, which only guards TypeScript callers) — passing both `page` and
+  `cursor` to the underlying `GET` is a 400 ("Use either cursor or page, not both").
+
+National semantic responses (`nationalSemanticSearch`/`nationalLegislationSemanticSearch`) carry
+the `credits` block, like every other credit-metered route.
+
 ## [0.2.0] — 2026-10-26
 
 Full re-sync with the LexAPI API (validated against lex-api `main` @ `633eb67`, PR #298, and

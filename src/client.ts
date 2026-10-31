@@ -15,6 +15,7 @@ import type {
   CitationNetworkResponse,
   CitationPathParams,
   CitationPathResponse,
+  CitationStatsParams,
   CitationStatsResponse,
   CitedByResponse,
   CitesResponse,
@@ -29,6 +30,14 @@ import type {
   DocumentVersionResponse,
   DocumentVersionsResponse,
   InfoResponse,
+  NationalCoverageResponse,
+  NationalDocumentListParams,
+  NationalDocumentListResponse,
+  NationalDocumentResponse,
+  NationalSemanticCaseLawOptions,
+  NationalSemanticCaseLawResponse,
+  NationalSemanticLegislationOptions,
+  NationalSemanticLegislationResponse,
   RecentDocumentsParams,
   RecentDocumentsResponse,
   RelatedDocumentsParams,
@@ -417,6 +426,12 @@ export class LexAPI {
    * `GET /citations/cites/{celexNumber}` — documents this one cites
    * (outbound edges), grouped by target. The document must first have been
    * crawled via `extractCitations` to appear here. 1 credit.
+   *
+   * `celexNumber` may be a national document id (e.g. `AT-NOR-10001597`);
+   * `params.includeNational` also pulls in national neighbours of live
+   * jurisdictions — BUSINESS, SCALE and ENTERPRISE only (`403
+   * TierForbiddenError` below that, refunded in full). A national id whose
+   * jurisdiction is not live is `404 NotFoundError`.
    */
   async getCites(
     celexNumber: string,
@@ -437,6 +452,10 @@ export class LexAPI {
    * (inbound edges), grouped by source. 1 credit. For legislation, inbound
    * amendment / corrigendum / repeal edges are refreshed from Cellar when
    * older than 7 days (waits ≤ ~2.5 s) — see `relationSync`.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also pulls in national neighbours of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitedBy(
     celexNumber: string,
@@ -498,6 +517,10 @@ export class LexAPI {
    * If the server-side wall-clock budget expires the endpoint still
    * returns 200 with `partial: true`, an EMPTY `network`, and `null`
    * paging totals — check `partial` before treating the network as empty.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also pulls in national neighbours of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitationNetwork(
     celexNumber: string,
@@ -512,6 +535,7 @@ export class LexAPI {
         limit: params.limit,
         offset: params.offset,
         language: params.language,
+        includeNational: params.includeNational,
       },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -523,6 +547,10 @@ export class LexAPI {
    * outbound edges). 20 credits. `found: false` is a graceful HTTP 200,
    * not an error. Default `maxDepth` 3 (max 8); the visited set is bounded
    * to 5000 nodes.
+   *
+   * `from`/`to` may be national document ids; `params.includeNational` also
+   * follows national documents of live jurisdictions along the way —
+   * BUSINESS+ only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getCitationPath(
     from: string,
@@ -533,7 +561,7 @@ export class LexAPI {
     return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
-      query: { maxDepth: params.maxDepth, language: params.language },
+      query: { maxDepth: params.maxDepth, language: params.language, includeNational: params.includeNational },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -544,6 +572,10 @@ export class LexAPI {
    * neighbours (documents sharing the most outbound citation targets with
    * the seed). 20 credits. Returns a graceful empty list with `message`
    * when the seed has no outbound citations to couple on.
+   *
+   * `celexNumber` may be a national document id; `params.includeNational`
+   * also considers national documents of live jurisdictions — BUSINESS+
+   * only (`403 TierForbiddenError` below that). See `getCites`.
    */
   async getRelatedDocuments(
     celexNumber: string,
@@ -553,17 +585,232 @@ export class LexAPI {
     return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
-      query: { limit: params.limit, language: params.language },
+      query: { limit: params.limit, language: params.language, includeNational: params.includeNational },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
   }
 
-  /** `GET /citations/stats` — global citation graph statistics. 20 credits. */
-  async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse> {
+  /**
+   * `GET /citations/stats` — global citation graph statistics. 20 credits.
+   *
+   * `params.includeNational` also counts national documents of live
+   * jurisdictions — BUSINESS+ only (`403 TierForbiddenError` below that).
+   *
+   * **Back-compat:** 0.2.0's signature was `getCitationStats(options?:
+   * CallOptions)`. Both the single-argument form (`getCitationStats({
+   * timeoutMs, signal })`) and the current two-argument form
+   * (`getCitationStats(params, options)`) keep working — overloaded here so
+   * TypeScript callers on either shape type-check, and a first argument
+   * that looks like `CallOptions` rather than `CitationStatsParams` is also
+   * detected at runtime (for a non-literal variable or a JS caller, which
+   * the overloads alone can't catch) and honoured as the per-call options
+   * rather than silently read as `params` with the timeout or abort signal
+   * dropped.
+   */
+  async getCitationStats(options?: CallOptions): Promise<CitationStatsResponse>;
+  async getCitationStats(params: CitationStatsParams, options?: CallOptions): Promise<CitationStatsResponse>;
+  async getCitationStats(
+    params?: CitationStatsParams | CallOptions,
+    options?: CallOptions,
+  ): Promise<CitationStatsResponse> {
+    // Back-compat: 0.2.0's signature was
+    // `getCitationStats(options?: CallOptions)`. A caller passing a single
+    // argument shaped like `CallOptions` (`{ timeoutMs }` / `{ signal }`,
+    // and nothing from `CitationStatsParams`) is honoured as `options`, not
+    // silently read as `params` with the timeout/signal dropped — this
+    // can't be caught at the type level (TS object literals get an excess-
+    // property error, but a non-literal variable or a JS caller wouldn't).
+    let effectiveParams: CitationStatsParams | undefined;
+    let effectiveOptions: CallOptions | undefined;
+    if (isLegacyCitationStatsCallOptions(params)) {
+      effectiveOptions = params;
+    } else {
+      effectiveParams = params;
+      effectiveOptions = options;
+    }
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
+      query: { includeNational: effectiveParams?.includeNational },
+      timeoutMs: effectiveOptions?.timeoutMs,
+      signal: effectiveOptions?.signal,
+    });
+  }
+
+  // ── National law ──────────────────────────────────────────────────
+  // Member-state (and non-EU) legal orders alongside EUR-Lex. BUSINESS and
+  // above get full access; FREE/STARTER/PROFESSIONAL get it within a
+  // monthly allowance of national calls (`X-National-Limit`/
+  // `X-National-Remaining`/`X-National-Reset`, `result.headers.nationalAllowance`;
+  // a used-up allowance is `NationalAllowanceExhaustedError`, 402). An
+  // unlaunched or unknown jurisdiction answers 404 exactly like a path that
+  // doesn't exist — call `getNationalCoverage()` first.
+
+  /**
+   * `GET /national/coverage` — which jurisdictions are live, what each one
+   * covers (legislation / case law, semantic search, sources with their
+   * attribution), and when each was last synced. Public: no API key or
+   * allowance required, free.
+   */
+  async getNationalCoverage(options?: CallOptions): Promise<NationalCoverageResponse> {
+    return this.call<NationalCoverageResponse>({
+      method: "GET",
+      path: "/national/coverage",
+      free: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `GET /{jurisdiction}/documents/{id}` — one national document by its
+   * corpus id (e.g. `"AT-NOR-12345"`), analogous to `getDocument`.
+   *
+   * **Cost: 1 credit** — every national read is a corpus read (there is no
+   * live-fetch fallback), so the 5-credit upfront reservation always
+   * settles to 1 (an unknown id too). Check
+   * `document.textAvailability.available` before reading `content`, and
+   * always show `document.attribution` to the user alongside the text.
+   * The document has one shape for every jurisdiction (API 2.8.0):
+   * `documentKind` (`act` | `decision`), `decision` (court, chamber,
+   * caseNumbers, citedNorms — `null` for acts; see `isNationalDecision`)
+   * and the closed `content` key set.
+   *
+   * A document its source withdrew (a takedown, a pseudonymisation fix)
+   * throws `DocumentWithdrawnError` (410) instead of answering — nothing of
+   * it is served, not even the title; drop any copy you hold.
+   */
+  async getNationalDocument(
+    jurisdiction: string,
+    id: string,
+    params: { language?: string } = {},
+    options?: CallOptions,
+  ): Promise<NationalDocumentResponse> {
+    return this.call<NationalDocumentResponse>({
+      method: "GET",
+      path: `/${jurisdictionSegment(jurisdiction)}/documents/${encodeURIComponent(id)}`,
+      query: { language: params.language },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `GET /{jurisdiction}/documents` — browse a jurisdiction's corpus by
+   * title (`q`), type, and in-force status. Newest-first by the document's
+   * own date.
+   *
+   * **Cost: 3 credits per call** — flat; pagination does not multiply the
+   * price, unlike `search`. **Paging:** `page` only reaches the first 1,000
+   * rows (a 400 past that); page further with `cursor` (each response's
+   * `nextCursor`), which works at any depth — see
+   * `paginateNationalDocuments` for a ready-made walk. A slow page is a
+   * retry-safe `TimeoutError` (504, refunded); the `total` count is capped
+   * at 10,000 and flagged `totalExact: false` past that or on a slow count.
+   */
+  async listNationalDocuments(
+    jurisdiction: string,
+    params: NationalDocumentListParams = {},
+    options?: CallOptions,
+  ): Promise<NationalDocumentListResponse> {
+    return this.call<NationalDocumentListResponse>({
+      method: "GET",
+      path: `/${jurisdictionSegment(jurisdiction)}/documents`,
+      query: {
+        page: params.page,
+        cursor: params.cursor,
+        limit: params.limit,
+        q: params.q,
+        type: params.documentType,
+        includeRepealed: params.includeRepealed,
+      },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * Walk every page of `listNationalDocuments` via `cursor` (works past the
+   * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
+   * a separate billed call. Stops after a page with `hasMore: false` (or an
+   * empty page). Any `params.page` is ignored and never sent — pass
+   * `params.cursor` only to resume a walk you saved partway through;
+   * `page` together with `cursor` is a 400 ("Use either cursor or page,
+   * not both"), so this strips `page` at runtime, not just in the type
+   * (`Omit` alone only guards TypeScript callers — a JS caller, or one
+   * using `as`, could otherwise still pass it through).
+   */
+  async *paginateNationalDocuments(
+    jurisdiction: string,
+    params: Omit<NationalDocumentListParams, "page"> = {},
+    options?: CallOptions,
+  ): AsyncGenerator<NationalDocumentListResponse, void> {
+    const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
+    let cursor = rest.cursor;
+    for (;;) {
+      const page = await this.listNationalDocuments(
+        jurisdiction,
+        cursor !== undefined ? { ...rest, cursor } : { ...rest },
+        options,
+      );
+      yield page;
+      if (!page.hasMore || !page.nextCursor || page.results.length === 0) return;
+      cursor = page.nextCursor;
+    }
+  }
+
+  /**
+   * `POST /{jurisdiction}/search/semantic` — embedding-based semantic
+   * search over a jurisdiction's case law. Same request/response shape as
+   * `semanticSearch`, plus `jurisdiction`/`documentId`/`attribution` and
+   * `document` (the matched decision as the listing returns it — the same
+   * fields in every jurisdiction, API 2.8.0) on every hit.
+   *
+   * **Cost: a flat 5 credits** — `hyde` is accepted but never changes the
+   * price or the billing tier here: the national index never rewrites, so
+   * the response reports `hyde: false` (never `true`) when requested.
+   */
+  async nationalSemanticSearch(
+    jurisdiction: string,
+    request: NationalSemanticCaseLawOptions,
+    options?: CallOptions,
+  ): Promise<NationalSemanticCaseLawResponse> {
+    return this.call<NationalSemanticCaseLawResponse>({
+      method: "POST",
+      path: `/${jurisdictionSegment(jurisdiction)}/search/semantic`,
+      body: nationalSemanticWireBody(request),
+      idempotent: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `POST /{jurisdiction}/legislation/semantic` — embedding-based semantic
+   * search over a jurisdiction's legislation; article-level matches. Same
+   * shape as `semanticLegislationSearch`, plus `jurisdiction`/`documentId`/
+   * `attribution` and `document` (the matched act's listing summary) on
+   * every hit; the index fields (`law_title`, `article_ref`, `section`,
+   * `language`, `in_force`, `valid_from`, `valid_to`, `law_type`) are
+   * always present, `null` when the index has nothing (API 2.8.0). No `hyde`, no `asOf` — both are EU-only.
+   * `NationalSemanticLegislationOptions` has no `hyde` field, and this SDK
+   * never forwards one on this call even if a caller bypasses the type
+   * system — the server now validates `hyde` as a boolean on this route too
+   * (400 otherwise), so a stray non-boolean value would 400 for nothing.
+   *
+   * **Cost: 5 credits.**
+   */
+  async nationalLegislationSemanticSearch(
+    jurisdiction: string,
+    request: NationalSemanticLegislationOptions,
+    options?: CallOptions,
+  ): Promise<NationalSemanticLegislationResponse> {
+    return this.call<NationalSemanticLegislationResponse>({
+      method: "POST",
+      path: `/${jurisdictionSegment(jurisdiction)}/legislation/semantic`,
+      body: nationalSemanticWireBody(request, { allowHyde: false }),
+      idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -717,12 +964,68 @@ function semanticWireBody(
   return body;
 }
 
-function edgeQuery(params: CitationEdgeParams): Record<string, string | number | undefined> {
+/**
+ * Same mapping as `semanticWireBody`, for the national options types: those
+ * deliberately don't extend `SemanticSearchOptions` (a narrower `language`,
+ * exact `filters` interfaces — see `NationalSemanticCaseLawOptions`), so
+ * `filters` is read as `unknown` here rather than `Record<string, unknown>`
+ * to avoid the missing-index-signature assignability error. Never forwards
+ * `asOf` — the national legislation options type has no such field.
+ */
+function nationalSemanticWireBody(
+  request: {
+    query: string;
+    limit?: number;
+    minScore?: number;
+    language?: string;
+    includeText?: boolean;
+    filters?: unknown;
+    hyde?: boolean;
+  },
+  { allowHyde = true }: { allowHyde?: boolean } = {},
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { query: request.query };
+  if (request.limit !== undefined) body["limit"] = request.limit;
+  if (request.minScore !== undefined) body["min_score"] = request.minScore;
+  if (request.language !== undefined) body["language"] = request.language;
+  if (request.includeText) body["include"] = ["text"];
+  if (request.filters !== undefined) body["filters"] = request.filters;
+  // Legislation never sends hyde, even if a caller bypassing the type
+  // system set one on the (typed hyde-less) request object — the server
+  // validates it strictly as a boolean on this route too (400 otherwise).
+  if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
+  return body;
+}
+
+/**
+ * The jurisdiction path segment: lower-cased (the routes are registered in
+ * lower case) and URL-encoded like every other caller-supplied segment, so a
+ * stray "/" or "?" in a jurisdiction argument cannot reach another route.
+ */
+function jurisdictionSegment(jurisdiction: string): string {
+  return encodeURIComponent(jurisdiction.trim().toLowerCase());
+}
+
+/**
+ * True when `value` looks like a 0.2.0-era `getCitationStats(options?)`
+ * call (a `CallOptions`: `timeoutMs` and/or `signal`, never
+ * `includeNational`) rather than the current `CitationStatsParams`.
+ */
+function isLegacyCitationStatsCallOptions(
+  value: CitationStatsParams | CallOptions | undefined,
+): value is CallOptions {
+  if (!value || typeof value !== "object") return false;
+  if ("includeNational" in value) return false;
+  return "timeoutMs" in value || "signal" in value;
+}
+
+function edgeQuery(params: CitationEdgeParams): Record<string, string | number | boolean | undefined> {
   return {
     citationType: params.citationType,
     limit: params.limit,
     offset: params.offset,
     language: params.language,
+    includeNational: params.includeNational,
   };
 }
 
