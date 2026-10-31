@@ -268,7 +268,7 @@ describe("listNationalDocuments", () => {
     expect(secondUrl.searchParams.get("cursor")).toBe("c1");
   });
 
-  it("paginateNationalDocuments strips a bypassed `page` so it's never sent alongside `cursor` (review round 2 — the server 400s that combination)", async () => {
+  it("paginateNationalDocuments strips a bypassed `page` so it's never sent alongside `cursor` (the server 400s that combination)", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(200, {
         jurisdiction: "AT", total: 2, totalExact: true, limit: 1, includeRepealed: false,
@@ -317,7 +317,7 @@ describe("listNationalDocuments", () => {
   });
 });
 
-describe("DocumentWithdrawnError (410, lex-api PR #320)", () => {
+describe("DocumentWithdrawnError (410)", () => {
   it("getNationalDocument: typed envelope, details nested", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(410, {

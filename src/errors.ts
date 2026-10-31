@@ -41,7 +41,7 @@ export type ErrorCode =
   // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
   | "INCOMPLETE_EXPORT"
   // 402 on a national-law call from a plan below BUSINESS: the monthly
-  // allowance of national calls is used up (lex-api PR #306) — `NationalAllowanceExhaustedError`.
+  // allowance of national calls is used up — `NationalAllowanceExhaustedError`.
   | "NATIONAL_ALLOWANCE_EXHAUSTED"
   // 409 — this jurisdiction has no semantic index to search (legacy shape,
   // top-level `jurisdiction`) — `NationalSemanticNotEnabledError`.
@@ -49,7 +49,7 @@ export type ErrorCode =
   // 503 — a jurisdiction's semantic index is temporarily unreachable
   // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
   | "NATIONAL_SEMANTIC_UNAVAILABLE"
-  // 410 — a national document its source withdrew (lex-api PR #320): served
+  // 410 — a national document its source withdrew: served
   // nowhere, no title/metadata/text. Two envelope shapes carry it: the typed
   // envelope on a direct document read (`details: {id, jurisdiction,
   // withdrawnAt}`), and the legacy shape with those three as TOP-LEVEL
@@ -510,8 +510,8 @@ export interface NationalAllowanceExhaustedDetails {
 
 /**
  * 402 — the monthly national-law call allowance of a plan below BUSINESS
- * (FREE/STARTER/PROFESSIONAL) is used up (`NATIONAL_ALLOWANCE_EXHAUSTED`,
- * lex-api PR #306). A usage shortfall, not a credit shortfall: no credits
+ * (FREE/STARTER/PROFESSIONAL) is used up (`NATIONAL_ALLOWANCE_EXHAUSTED`).
+ * A usage shortfall, not a credit shortfall: no credits
  * were charged for the refused call. Resolves at `resetsAt` (start of next
  * UTC month) or immediately on upgrading to BUSINESS/SCALE/ENTERPRISE, which
  * have no separate limit. Mirrors `X-National-Limit`/`X-National-Remaining`/
@@ -682,7 +682,7 @@ export interface DocumentWithdrawnDetails {
 
 /**
  * 410 — a national document its source withdrew (a takedown, a
- * pseudonymisation fix, a robots.txt listing — lex-api PR #320). LexAPI
+ * pseudonymisation fix, a robots.txt listing). LexAPI
  * serves nothing of it: no title, no metadata, no text. Two envelope shapes
  * carry this code: the TYPED envelope on a direct document read
  * (`GET /{jurisdiction}/documents/{id}`, `error.details: {id, jurisdiction,

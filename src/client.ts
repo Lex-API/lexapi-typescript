@@ -614,7 +614,7 @@ export class LexAPI {
     params?: CitationStatsParams | CallOptions,
     options?: CallOptions,
   ): Promise<CitationStatsResponse> {
-    // Back-compat (review round 2): 0.2.0's signature was
+    // Back-compat: 0.2.0's signature was
     // `getCitationStats(options?: CallOptions)`. A caller passing a single
     // argument shaped like `CallOptions` (`{ timeoutMs }` / `{ signal }`,
     // and nothing from `CitationStatsParams`) is honoured as `options`, not

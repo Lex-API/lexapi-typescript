@@ -95,8 +95,8 @@ export interface ResponseHeaders {
    * National-law monthly call allowance for plans below BUSINESS
    * (`X-National-Limit`/`X-National-Remaining`/`X-National-Reset`). Sent on
    * the four national document/semantic endpoints for FREE/STARTER/
-   * PROFESSIONAL callers only — absent for BUSINESS/SCALE/ENTERPRISE,
-   * preview accounts, and `getNationalCoverage`. A used-up allowance is a
+   * PROFESSIONAL callers only — absent for BUSINESS/SCALE/ENTERPRISE and
+   * `getNationalCoverage`. A used-up allowance is a
    * 402 `NationalAllowanceExhaustedError`, not a header you need to poll.
    */
   nationalAllowance?: {

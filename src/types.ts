@@ -1405,7 +1405,7 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
 // ── National law ────────────────────────────────────────────────────
 // Member-state (and non-EU, e.g. UK) legal orders LexAPI serves alongside
 // EUR-Lex. BUSINESS and above get full access; FREE/STARTER/PROFESSIONAL get
-// it within a monthly allowance of national calls (lex-api PR #306) —
+// it within a monthly allowance of national calls —
 // see `X-National-Limit`/`X-National-Remaining`/`X-National-Reset`
 // (`ResponseHeaders.nationalAllowance`) and `NationalAllowanceExhaustedError`.
 // A jurisdiction not yet launched answers 404, exactly like one that doesn't
@@ -1740,7 +1740,7 @@ export interface NationalCaseLawFilters {
 /**
  * Filters honoured by `POST /{jurisdiction}/legislation/semantic` — exact,
  * like {@link NationalCaseLawFilters}. `law_id`/`in_force`/`law_type` are
- * clausly's own names, accepted as aliases.
+ * the semantic index's own names, accepted as aliases.
  */
 export interface NationalLegislationFilters {
   id?: string;
@@ -1859,10 +1859,8 @@ export interface NationalSemanticLegislationResult
 
 /**
  * `POST /{jurisdiction}/search/semantic` — national case-law semantic
- * search. `credits` is present on the body (lex-api #314 round 2 restored
- * it on the semantic routes generally — `api.js`'s router-level
- * `attachCreditsEnvelope` wraps `res.json` before the semantic router
- * charges), typed optional only via the shared `CreditedResponse` shape.
+ * search. `credits` is present on the body, like every other credit-metered
+ * route, typed optional only via the shared `CreditedResponse` shape.
  */
 export interface NationalSemanticCaseLawResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;

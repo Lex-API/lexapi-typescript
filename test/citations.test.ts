@@ -450,7 +450,7 @@ describe("includeNational (citation graph + national ids, API 2.5.0)", () => {
     expect(new URL(lastCall(fetchMock)[0]).searchParams.get("includeNational")).toBeNull();
   });
 
-  it("getCitationStats(options) — a 0.2.0-shaped single CallOptions argument is still honoured as options, not silently read as params (review round 2)", async () => {
+  it("getCitationStats(options) — a 0.2.0-shaped single CallOptions argument is still honoured as options, not silently read as params", async () => {
     const fetchMock = fetchSequence(jsonResponse(200, { success: true, stats: {} }));
     // A JS-shaped (or non-literal-variable) 0.2.0 call: getCitationStats({ signal }).
     // If `signal` were silently read as `params.signal` instead of `options.signal`,
@@ -484,7 +484,7 @@ describe("includeNational (citation graph + national ids, API 2.5.0)", () => {
     expect(err.body).toMatchObject({ upgradeUrl: "/pricing" });
   });
 
-  it("a national id of a jurisdiction that is not live is a 404 NotFoundError (legacy shape, top-level code since #320)", async () => {
+  it("a national id of a jurisdiction that is not live is a 404 NotFoundError (legacy shape, top-level code)", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(404, { success: false, code: "NOT_FOUND", error: "Document not found: XX-NOR-99999999" }),
     );

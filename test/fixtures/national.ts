@@ -1,9 +1,8 @@
 /**
- * National-law fixtures in the API 2.8.0 shape (lex-api PR #335 —
- * `openapi.yaml` NationalDocument / NationalDocumentSummary /
- * NationalDecision / NationalDocumentContent / NationalArticle, and
- * `server/utils/nationalDocumentView.js`): every documented field always
- * present, `null` / `[]` when the source has nothing; lane extras only under
+ * National-law fixtures in the API 2.8.0 shape (`NationalDocument` /
+ * `NationalDocumentSummary` / `NationalDecision` / `NationalDocumentContent` /
+ * `NationalArticle`): every documented field always present, `null` / `[]`
+ * when the source has nothing; source extras only under
  * `content.details` / `articles[].details`.
  */
 import type {

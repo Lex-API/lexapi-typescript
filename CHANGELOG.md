@@ -7,12 +7,9 @@ picks up `0.2.0` on its own.
 
 ## [0.3.0] — 2026-10-28
 
-Adds national (member-state, and non-EU) law support ahead of the LexAPI national-law launch
-(2026-11-03). **Requires LexAPI API 2.8.0** (lex-api PRs #306, #314, #320 — the allowance, the
-documented contract and the pre-launch hardening pass — plus #335, the one national document shape
-for every jurisdiction). Re-verify once all of them are deployed.
+Adds national (member-state, and non-EU) law support. **Requires LexAPI API 2.8.0.**
 
-### National document shape (lex-api PR #335, API 2.8.0)
+### National document shape (API 2.8.0)
 
 The national types follow the normalized cross-jurisdiction contract — a client written for one
 country now works for every other:
@@ -62,7 +59,7 @@ country now works for every other:
   `NATIONAL_SEMANTIC_UNAVAILABLE` — temporarily unreachable; extends `ServiceUnavailableError`, so
   `instanceof ServiceUnavailableError` still holds). Both legacy-shape bodies; `.jurisdiction` is
   read off the raw `body`, not `details`.
-- **`DocumentWithdrawnError`** (`DOCUMENT_WITHDRAWN`, 410 — lex-api PR #320): a national document
+- **`DocumentWithdrawnError`** (`DOCUMENT_WITHDRAWN`, 410): a national document
   its source withdrew (a takedown, a pseudonymisation fix) is served nowhere — no title, no
   metadata, no text. Thrown by `getNationalDocument` (typed envelope, `details: {id, jurisdiction,
   withdrawnAt}`) and by the citation methods for a withdrawn national id (legacy shape, the same
@@ -75,10 +72,10 @@ country now works for every other:
 - **`includeNational`** on all six citation-graph methods (`getCites`, `getCitedBy`,
   `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`): also
   returns/follows national documents of live jurisdictions as neighbours — BUSINESS, SCALE and
-  ENTERPRISE only (`403 TierForbiddenError` below that; no account/code change needed, it already
-  throws the existing error). `celexNumber` and `getCitationPath`'s `from`/`to` accept a national
-  document id directly (e.g. `"AT-NOR-10001597"`); an id whose jurisdiction is not live is a plain
-  `404 NotFoundError`. `getCitationStats` gained an optional `params` argument before `options`.
+  ENTERPRISE only (`403 TierForbiddenError` below that). `celexNumber` and `getCitationPath`'s
+  `from`/`to` accept a national document id directly (e.g. `"AT-NOR-10001597"`); an id whose
+  jurisdiction is not live is a plain `404 NotFoundError`. `getCitationStats` gained an optional
+  `params` argument before `options`.
   Back-compatible with 0.2.0's `getCitationStats(options?)`: a first argument shaped like
   `CallOptions` (`timeoutMs`/`signal`, not `includeNational`) is still honoured as the per-call
   options rather than silently read as `params` — this can't be caught at the type level for a
@@ -89,13 +86,8 @@ country now works for every other:
   `Omit<…, "page">` type, which only guards TypeScript callers) — passing both `page` and
   `cursor` to the underlying `GET` is a 400 ("Use either cursor or page, not both").
 
-Validated against lex-api **PR #320** (`fix/national-api-hardening` @ `e49881b`: `openapi.yaml`
-2.5.0, `docs.md`, the national controllers, `nationalWithdrawn.js`, `jurisdiction.js`,
-`utils/errors.js`, `operationWeights.js`), stacked on PR #314 (the documented contract) and PR
-#306 (the allowance), plus the real `nationalCoverageController.js` on `feat/national-launch-switch`.
-National semantic responses (`nationalSemanticSearch`/`nationalLegislationSemanticSearch`) DO
-carry the `credits` block — PR #314 round 2 restored the envelope on the semantic routes
-generally; an earlier note here said otherwise and was wrong.
+National semantic responses (`nationalSemanticSearch`/`nationalLegislationSemanticSearch`) carry
+the `credits` block, like every other credit-metered route.
 
 ## [0.2.0] — 2026-10-26
 
