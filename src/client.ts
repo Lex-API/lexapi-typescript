@@ -710,7 +710,8 @@ export class LexAPI {
    * **20 credits; BUSINESS, SCALE and ENTERPRISE only** (`403
    * TierForbiddenError` below that, refunded). A lookup past its 20-second
    * server-side budget throws `TimeoutError` (503, `err.partial === true`),
-   * refunded — retry, or narrow with `jurisdictions`.
+   * refunded. The SDK does not retry it (the same lookup would hit the same
+   * budget); retry yourself, or narrow with `jurisdictions`.
    */
   async getCounterparts(
     id: string,

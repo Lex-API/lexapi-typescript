@@ -199,7 +199,7 @@ const edges = await client.getCitedBy("32016L0680", {
 for (const g of edges.citedBy) console.log(g.jurisdiction, g.id, g.citations?.map((c) => c.provenance));
 console.log(edges.totalEdges, edges.countsSource);    // page until offset + limit >= totalEdges
 
-const refs = await client.getCites("AT-JUS-1", { unresolved: true }); // national id: references with no edge
+const refs = await client.getCites("DE-JUD-BFH-KBRE202550123", { unresolved: true }); // national id: references with no edge
 for (const r of refs.unresolved ?? []) console.log(r.kind, r.text, r.status, r.targetId);
 ```
 
@@ -237,7 +237,8 @@ is not an EU act is a `NotFoundError`.
 `getCounterparts` returns a national document's counterparts in the other live jurisdictions,
 through the EU acts it transposes or implements, ranked `1` (the national source records it), `2`
 (a notified measure LexAPI holds) or `3` (a notified measure LexAPI does not hold, `id: null`). A
-lookup past the server's budget throws `TimeoutError` (503, `err.partial`), refunded.
+lookup past the server's budget throws `TimeoutError` (503, `err.partial`), refunded. The SDK does
+not retry it; retry yourself, or narrow with `jurisdictions`.
 
 ## National law
 
@@ -478,7 +479,7 @@ try {
 | --- | --- | --- |
 | `NotFoundError` | `NOT_FOUND` | 404 |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
-| `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.allowed` name a refused filter and its allowed values |
+| `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.value` / `.allowed` name a refused filter, the value sent and the allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |

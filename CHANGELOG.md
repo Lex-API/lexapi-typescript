@@ -7,8 +7,14 @@ picks up `0.2.0` on its own.
 
 ## [0.4.0] — 2026-11-11
 
-Cross-border citation graph. **Requires LexAPI API 2.13.0.** Additive: no existing signature or
-field changes meaning.
+Cross-border citation graph. **Requires LexAPI API 2.13.0.** Additive at runtime: no existing
+signature or field changes meaning. Type-level changes to check when upgrading:
+
+- `CitationType` gains `"transposition"` — an exhaustive `switch` over it needs a new case.
+- `citationType` params are now `OneOrMany<CitationType>`: code that reads the param back as a
+  single value must handle a list.
+- `NationalDocumentContent` gains the required `textSource` and `ocr` fields — objects you build
+  yourself (test fixtures, mocks) need them (`null` is valid for both).
 
 ### Added
 
@@ -26,7 +32,8 @@ field changes meaning.
 - **`getCounterparts(id, params?, options?)`** (`GET /citations/counterparts/{id}`, 20 credits,
   BUSINESS and above): a national document's counterparts in the other live jurisdictions, through
   the EU acts it transposes or implements, ranked 1–3. A lookup past the server's budget throws
-  `TimeoutError` (503, `partial`), refunded. Types: `CounterpartsParams`, `CounterpartsResponse`,
+  `TimeoutError` (503, `partial`), refunded; the SDK does not retry it — retry yourself, or narrow
+  with `jurisdictions`. Other 503s keep the existing retry policy. Types: `CounterpartsParams`, `CounterpartsResponse`,
   `CounterpartVia`, `Counterpart`.
 - **Edge filters** on `getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath` and
   `getRelatedDocuments` (and the `paginate*` helpers): `citationType` now takes one value or a
@@ -53,7 +60,8 @@ field changes meaning.
   `measuredAt`, `nimResolvedRate`, `nimMeasuredAt`, `floors`.
 - **National content**: `content.textSource` (`html` | `pdf-text` | `ocr` | `null`) and
   `content.ocr` (`NationalOcrInfo` | `null`) — API 2.9.0.
-- **`InvalidParamsError.param` / `.allowed`**: the refused parameter and its allowed values, read
+- **`InvalidParamsError.param` / `.value` / `.allowed`**: the refused parameter, the value sent
+  (when the server echoes it) and its allowed values, read
   from either error shape. **`TimeoutError.partial` / `.serverTimeoutMs`** for a budget timeout.
 
 ## [0.3.0] — 2026-10-28

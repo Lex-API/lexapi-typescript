@@ -146,6 +146,7 @@ describe("edge filters (API 2.11.0)", () => {
         code: "INVALID_PARAMS",
         error: "Invalid provenance",
         param: "provenance",
+        value: "source",
         allowed: ["notice", "cellar", "notice+cellar"],
       }),
     );
@@ -154,6 +155,7 @@ describe("edge filters (API 2.11.0)", () => {
       .catch((e: unknown) => e);
     expect(err1).toBeInstanceOf(InvalidParamsError);
     expect((err1 as InvalidParamsError).param).toBe("provenance");
+    expect((err1 as InvalidParamsError).value).toBe("source");
     expect((err1 as InvalidParamsError).allowed).toEqual(["notice", "cellar", "notice+cellar"]);
     expect(legacy).toHaveBeenCalledTimes(1);
 
@@ -161,7 +163,7 @@ describe("edge filters (API 2.11.0)", () => {
     const typed = fetchSequence(
       jsonResponse(400, {
         success: false,
-        error: { code: "INVALID_PARAMS", message: "Invalid resolution", details: { param: "resolution", allowed: [] } },
+        error: { code: "INVALID_PARAMS", message: "Invalid resolution", details: { param: "resolution", value: "id", allowed: [] } },
       }),
     );
     const err2 = await client(typed)
@@ -169,6 +171,7 @@ describe("edge filters (API 2.11.0)", () => {
       .catch((e: unknown) => e);
     expect(err2).toBeInstanceOf(InvalidParamsError);
     expect((err2 as InvalidParamsError).param).toBe("resolution");
+    expect((err2 as InvalidParamsError).value).toBe("id");
     expect((err2 as InvalidParamsError).allowed).toEqual([]);
   });
 
@@ -226,7 +229,7 @@ describe("edge provenance, node identity and totals", () => {
       jsonResponse(200, {
         success: true,
         includeNational: true,
-        sourceDocument: "AT-JUS-1",
+        sourceDocument: "DE-JUD-BFH-KBRE202550123",
         totalCitations: 1,
         totalEdges: 1,
         countsSource: "counted",
@@ -247,7 +250,7 @@ describe("edge provenance, node identity and totals", () => {
       }),
     );
 
-    const result = await client(fetchMock).getCites("AT-JUS-1", { unresolved: true });
+    const result = await client(fetchMock).getCites("DE-JUD-BFH-KBRE202550123", { unresolved: true });
 
     expect(result.countsSource).toBe("counted");
     expect(result.cites[0]?.citations?.[0]?.resolution).toBe("abbreviation");
@@ -535,9 +538,23 @@ describe("getCounterparts", () => {
     expect(timeout.serverTimeoutMs).toBe(20000);
   });
 
-  it("an app-origin 503 TIMEOUT is retried like any GET", async () => {
+  it("an app-origin 503 budget TIMEOUT (partialReason) is not retried", async () => {
     const fetchMock = fetchSequence(
-      jsonResponse(503, { success: false, code: "TIMEOUT", error: "timed out", partial: true }, { "x-lexapi-version": "2.13.0" }),
+      jsonResponse(
+        503,
+        { success: false, code: "TIMEOUT", error: "timed out", partial: true, partialReason: "TIMEOUT", timeoutMs: 20000 },
+        { "x-lexapi-version": "2.13.0" },
+      ),
+      jsonResponse(200, body),
+    );
+
+    await expect(client(fetchMock).getCounterparts("AT-NOR-10001597")).rejects.toBeInstanceOf(TimeoutError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("other app-origin 503s keep the GET retry policy", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(503, { success: false, error: "Service unavailable" }, { "x-lexapi-version": "2.13.0" }),
       jsonResponse(200, body),
     );
 

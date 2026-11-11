@@ -385,6 +385,9 @@ function shouldRetryStatus(
   call: { isGet: boolean; free: boolean; readOnly: boolean },
 ): boolean {
   const status = error.status;
+  // A server-side budget timeout answered as a partial 503 would hit the same
+  // budget again: leave the retry (or a narrower request) to the caller.
+  if (status === 503 && isBudgetTimeout(error.body)) return false;
   if (status === 429) return !(error instanceof RateLimitedError && error.quotaExhausted);
   if (NEVER_REACHED_STATUSES.has(status)) return true;
   if (ORIGIN_DEPENDENT_STATUSES.has(status)) {
@@ -393,6 +396,10 @@ function shouldRetryStatus(
   }
   if (PROXY_STATUSES.has(status)) return call.free;
   return false;
+}
+
+function isBudgetTimeout(body: unknown): boolean {
+  return typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "TIMEOUT";
 }
 
 /** Read a body as text, restarting the inactivity timer on every chunk. */

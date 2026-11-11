@@ -363,6 +363,11 @@ export class InvalidParamsError extends LexAPIError {
     return readString(detailsOrBodyField(this.details, this.body, "param"));
   }
 
+  /** The refused value of {@link param}, when the server echoes it. */
+  get value(): unknown {
+    return detailsOrBodyField(this.details, this.body, "value");
+  }
+
   /** The allowed values of {@link param}, when the server lists them (may be empty). */
   get allowed(): string[] | undefined {
     const value = detailsOrBodyField(this.details, this.body, "allowed");
