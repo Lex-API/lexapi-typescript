@@ -70,3 +70,46 @@ describe("round 2 — R1", () => {
     >();
   });
 });
+
+describe("citation graph types (API 2.10.0–2.13.0)", () => {
+  it("CitationType includes transposition and the filters take one value or a list", () => {
+    expectTypeOf<"transposition">().toMatchTypeOf<import("../src/index.js").CitationType>();
+    type Filters = import("../src/index.js").CitationFilterParams;
+    expectTypeOf<{ citationType: ["amendment", "repeal"] }>().toMatchTypeOf<Filters>();
+    expectTypeOf<{ citationType: "amendment" }>().toMatchTypeOf<Filters>();
+    expectTypeOf<{ provenance: ["notice", "cellar-nim"]; resolution: ["id", "key"]; jurisdictions: ["eu", "at"] }>().toMatchTypeOf<Filters>();
+    expectTypeOf<{ citationType: "cites" }>().not.toMatchTypeOf<Filters>();
+    expectTypeOf<{ provenance: "unknown" }>().not.toMatchTypeOf<Filters>();
+  });
+
+  it("every graph method accepts the filters; unresolved only on cites and network", () => {
+    expectTypeOf<NonNullable<Parameters<LexAPI["getCites"]>[1]>>().toHaveProperty("unresolved");
+    expectTypeOf<NonNullable<Parameters<LexAPI["getCitationNetwork"]>[1]>>().toHaveProperty("unresolved");
+    expectTypeOf<NonNullable<Parameters<LexAPI["getCitedBy"]>[1]>>().toHaveProperty("provenance");
+    expectTypeOf<NonNullable<Parameters<LexAPI["getCitedBy"]>[1]>>().not.toHaveProperty("unresolved");
+    expectTypeOf<NonNullable<Parameters<LexAPI["getRelatedDocuments"]>[1]>>().toHaveProperty("resolution");
+    expectTypeOf<Parameters<LexAPI["getCitationPath"]>[2]>().toEqualTypeOf<import("../src/index.js").CitationPathParams | undefined>();
+    expectTypeOf<import("../src/index.js").CitationPathParams>().toHaveProperty("jurisdictions");
+  });
+
+  it("edge provenance / resolution are nullable; countsSource is stats | counted", () => {
+    type Edge = import("../src/index.js").CitationEdgeDetail;
+    expectTypeOf<NonNullable<Edge["provenance"]>>().toEqualTypeOf<import("../src/index.js").CitationProvenance>();
+    expectTypeOf<Edge["resolution"]>().toEqualTypeOf<import("../src/index.js").CitationResolution | null | undefined>();
+    expectTypeOf<NonNullable<import("../src/index.js").CitedByResponse["countsSource"]>>().toEqualTypeOf<"stats" | "counted">();
+    expectTypeOf<import("../src/index.js").CitationNetworkResponse["paging"]["countsSource"]>().toEqualTypeOf<
+      "stats" | "counted" | null | undefined
+    >();
+  });
+
+  it("new methods return their response types", () => {
+    expectTypeOf<ReturnType<LexAPI["getTransposition"]>>().toEqualTypeOf<Promise<import("../src/index.js").TranspositionResponse>>();
+    expectTypeOf<ReturnType<LexAPI["getCounterparts"]>>().toEqualTypeOf<Promise<import("../src/index.js").CounterpartsResponse>>();
+    expectTypeOf<import("../src/index.js").Counterpart["rank"]>().toEqualTypeOf<1 | 2 | 3>();
+  });
+
+  it("national content carries textSource / ocr (API 2.9.0)", () => {
+    expectTypeOf<NationalDocumentContent["ocr"]>().toEqualTypeOf<import("../src/index.js").NationalOcrInfo | null>();
+    expectTypeOf<"pdf-text">().toMatchTypeOf<NonNullable<NationalDocumentContent["textSource"]>>();
+  });
+});

@@ -36,8 +36,10 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 5 → 4 → 1 | `getDocument`, `getDocumentsBatch` (per item), `getDocumentByUrl`, `getDocumentMetadata` — 5 for a live browser fetch, settled to **4** when the Publications Office Cellar API answered, to **1** from the LexAPI corpus (`result.headers.source`); a text-unavailable answer settles at 1 |
 | 5 → 1 | `extractCitations` — refunded to 1 when the document was `alreadyExtracted` |
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
+| 5 | `getTransposition` — every plan |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
+| 20 | `getCounterparts` — BUSINESS, SCALE and ENTERPRISE only |
 | 0 | `getNationalCoverage` (public) |
 | 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 (an unknown id too) |
 | 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
@@ -176,7 +178,66 @@ console.log(withNational.includeNational); // present once honoured; absent whil
 const nationalEdges = await client.getCites("AT-NOR-10001597"); // a national id works directly, no flag needed
 ```
 
-`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`. All graph reads accept `language` for neighbour titles, and `includeNational` (`getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`) to also return/follow national documents of live jurisdictions — BUSINESS, SCALE and ENTERPRISE only. `celexNumber` (and `getCitationPath`'s `from`/`to`) accept a national document id (e.g. `"AT-NOR-10001597"`) directly, with or without the flag; such an id whose jurisdiction isn't live is a plain `NotFoundError`.
+`citationType` is one of `reference`, `amendment`, `repeal`, `corrigendum`, `implementation`, `legal-basis`, `proposal`, `transposition` (`CITATION_TYPES`). All graph reads accept `language` for neighbour titles, and `includeNational` (`getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats`) to also return/follow national documents of live jurisdictions — BUSINESS, SCALE and ENTERPRISE only. `celexNumber` (and `getCitationPath`'s `from`/`to`) accept a national document id (e.g. `"AT-NOR-10001597"`) directly, with or without the flag; such an id whose jurisdiction isn't live is a plain `NotFoundError`.
+
+### Provenance, filters and node identity
+
+Every edge says where it comes from (`provenance`: `notice`, `cellar`, `notice+cellar`,
+`cellar-nim`, `source`, `resolver`) and how its target was identified (`resolution`: `id`, `key`,
+`abbreviation`, `text-pattern`; `null` on EUR-Lex / Cellar edges) — on `citations[]` of
+`getCites` / `getCitedBy` and on `edgeDetails[]` of network neighbours. Every node carries `id`,
+`jurisdiction` (`EU`, `AT`, …) and `documentKind` (`act` | `decision` | `null`) next to
+`celexNumber`.
+
+```ts
+const edges = await client.getCitedBy("32016L0680", {
+  citationType: ["transposition", "implementation"], // one value or a list (sent comma-separated)
+  provenance: ["source", "cellar-nim"],
+  jurisdictions: ["eu", "at", "de"],                  // a national code implies includeNational (BUSINESS+)
+  resolution: ["id", "key"],                          // leave out abbreviation matches
+});
+for (const g of edges.citedBy) console.log(g.jurisdiction, g.id, g.citations?.map((c) => c.provenance));
+console.log(edges.totalEdges, edges.countsSource);    // page until offset + limit >= totalEdges
+
+const refs = await client.getCites("AT-JUS-1", { unresolved: true }); // national id: references with no edge
+for (const r of refs.unresolved ?? []) console.log(r.kind, r.text, r.status, r.targetId);
+```
+
+`getCitationNetwork`, `getCitationPath` and `getRelatedDocuments` take the same four filters;
+`getCitationNetwork` also takes `unresolved`. An unknown value is an `InvalidParamsError` with
+`err.param` and `err.allowed`, refunded. `countsSource` (`stats` | `counted`, and
+`paging.countsSource` on the network) says where the totals were read from; both are exact.
+With `includeNational: true`, `getCitationStats` adds `byJurisdiction`, `byProvenance` and
+`transposition`.
+
+### Notified measures and counterparts
+
+```ts
+const t = await client.getTransposition("32016L0680", { jurisdictions: ["es", "cz"] }); // 5 credits, every plan
+console.log(t.note); // a notification is not a finding that the measure transposes the act
+for (const c of t.jurisdictions) {
+  for (const m of c.measures) console.log(c.jurisdiction, m.title, m.officialJournal.date, m.id ?? "(not held)");
+}
+console.log(t.source.cellar?.attribution); // keep with anything you republish
+
+const cp = await client.getCounterparts("AT-NOR-10001597"); // 20 credits, BUSINESS+
+for (const v of cp.via) {
+  for (const c of v.counterparts) console.log(v.euAct.id, c.rank, c.jurisdiction, c.id ?? c.title);
+}
+```
+
+`getTransposition` lists the measures the member states notified to the Commission for an EU act
+(CELEX sector 3), from the Publications Office's Cellar records. On BUSINESS, SCALE and ENTERPRISE,
+for live jurisdictions, it also says which measures LexAPI holds (`id`, `resolved`, `resolution`,
+`counts.resolved`, `source.lanes`) and adds the documents whose national source records that they
+transpose or implement the act; `resolvedOnly: true` keeps only those. Otherwise those fields are
+`null` (and `termsRequired: true` while the national-source terms are not accepted). A CELEX that
+is not an EU act is a `NotFoundError`.
+
+`getCounterparts` returns a national document's counterparts in the other live jurisdictions,
+through the EU acts it transposes or implements, ranked `1` (the national source records it), `2`
+(a notified measure LexAPI holds) or `3` (a notified measure LexAPI does not hold, `id: null`). A
+lookup past the server's budget throws `TimeoutError` (503, `err.partial`), refunded.
 
 ## National law
 
@@ -216,7 +277,7 @@ missing:
   read server-side from whichever fields the source uses (also when the decision has no text);
   `null` for acts. `isNationalDecision(document)` narrows it.
 - `content` (or `null` when there is no text — see `textAvailability`) is always
-  `{ fullText, articles, textLanguages, textLanguage, embeddedForeignText, repeal, source, details }`;
+  `{ fullText, articles, textLanguages, textLanguage, embeddedForeignText, textSource, ocr, repeal, source, details }`;
   every article is `{ number, title, section, text, inForceFrom, inForceTo, details }` (`text: null`
   when the source publishes no text for that unit). What a source adds beyond these fields is under
   `content.details` / `articles[].details` — source-specific, keys differ by country.
@@ -235,6 +296,13 @@ if (isNationalDecision(d)) {
 ```
 
 A document its source withdrew (a takedown, a pseudonymisation fix) throws `DocumentWithdrawnError` (410) from `getNationalDocument` and from the citation methods for a withdrawn national id — nothing of it is served, not even the title; drop any copy you hold.
+
+`getNationalCoverage()` also reports each live jurisdiction's `citationGraph`: its extraction
+`methods` (with `unmeasured` rates and their reason codes), `edges`, the measured rates
+(`decisionResolutionRate`, `actEuRate`, `textPatternRate`, `nimResolvedRate`), `transposition`,
+`precision` and `floors` — `null` wherever nothing was measured. National `content` also carries
+`textSource` (`html` | `pdf-text` | `ocr` | `null`) and `ocr` (engine and confidence when the text
+was machine-read — never the official text).
 
 A used-up allowance is `NationalAllowanceExhaustedError` (402); its headroom is also on
 `result.headers.nationalAllowance` (`{ limit, remaining, resetsAt }`) on every admitted call from a
@@ -410,7 +478,7 @@ try {
 | --- | --- | --- |
 | `NotFoundError` | `NOT_FOUND` | 404 |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
-| `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 |
+| `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.allowed` name a refused filter and its allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
 | `CreditsExhaustedError` | `CREDITS_EXHAUSTED` | 402 |
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
@@ -421,7 +489,7 @@ try {
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
 | `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable; `.jurisdiction`; retry later |
-| `TimeoutError` | `TIMEOUT` (504, 524) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
+| `TimeoutError` | `TIMEOUT` (504, 524; 503 from `getCounterparts`, with `.partial` / `.serverTimeoutMs`) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |
 | `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx whose body was not JSON (e.g. a proxy HTML page) |

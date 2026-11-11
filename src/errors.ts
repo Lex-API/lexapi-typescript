@@ -353,6 +353,21 @@ export class InvalidParamsError extends LexAPIError {
     super("INVALID_PARAMS", message, status, details, retryAfter, context);
     this.name = "InvalidParamsError";
   }
+
+  /**
+   * The parameter that was refused, when the server names it — e.g. an
+   * unknown citation-graph filter value (API 2.11.0). Read from `details`
+   * (typed envelope) or the top level of the body (legacy shape).
+   */
+  get param(): string | undefined {
+    return readString(detailsOrBodyField(this.details, this.body, "param"));
+  }
+
+  /** The allowed values of {@link param}, when the server lists them (may be empty). */
+  get allowed(): string[] | undefined {
+    const value = detailsOrBodyField(this.details, this.body, "allowed");
+    return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : undefined;
+  }
 }
 
 /** 401 — missing, invalid, or revoked API key. */
@@ -576,7 +591,9 @@ export class UpstreamError extends LexAPIError {
 
 /**
  * A timeout. Two cases, told apart by `code` / `status`:
- * - `TIMEOUT` (504, 524): the server or Cloudflare gave up on the upstream.
+ * - `TIMEOUT` (504, 524): the server or Cloudflare gave up on the upstream;
+ *   also a 503 from `getCounterparts` when the lookup exceeded its
+ *   server-side budget (`partial === true`, refunded).
  * - `REQUEST_TIMEOUT` (`status === 0`): the SDK's own response timeout —
  *   no bytes for `timeoutMs` (SDK contract §1.6).
  */
@@ -591,6 +608,17 @@ export class TimeoutError extends LexAPIError {
   ) {
     super(status === 0 ? "REQUEST_TIMEOUT" : "TIMEOUT", message, status, details, retryAfter, context);
     this.name = "TimeoutError";
+  }
+
+  /** `true` when the server answered a budget timeout with `partial: true` (nothing else was returned). */
+  get partial(): boolean | undefined {
+    const value = bodyField(this.body, "partial");
+    return typeof value === "boolean" ? value : undefined;
+  }
+
+  /** The server-side budget that expired, in ms, when the body reports it. */
+  get serverTimeoutMs(): number | undefined {
+    return readNumber(bodyField(this.body, "timeoutMs"));
   }
 }
 
@@ -857,6 +885,11 @@ function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolea
   if (typeof resetsAt !== "string") return false;
   if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;
   return detailsField(body, "retryAfter") === undefined;
+}
+
+function detailsOrBodyField(details: unknown, body: unknown, key: string): unknown {
+  const fromDetails = detailsField(details, key);
+  return fromDetails !== undefined ? fromDetails : bodyField(body, key);
 }
 
 function bodyField(body: unknown, key: string): unknown {

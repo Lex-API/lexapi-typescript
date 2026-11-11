@@ -768,6 +768,10 @@ export interface ResolveResponse extends CreditedResponse, WithResponseHeaders {
 /**
  * Classification of a citation edge. `amendment`, `repeal` and
  * `corrigendum` are structural relations (from Cellar for legislation).
+ * `transposition` (API 2.11.0): a member-state measure → the EU act it was
+ * notified for or records that it transposes. A notified measure is a
+ * notification, not a finding that the measure transposes the act, or
+ * transposes it completely.
  */
 export type CitationType =
   | "reference"
@@ -776,7 +780,142 @@ export type CitationType =
   | "corrigendum"
   | "implementation"
   | "legal-basis"
-  | "proposal";
+  | "proposal"
+  | "transposition";
+
+/** Every {@link CitationType} value, for building filters or validating input. */
+export const CITATION_TYPES = [
+  "reference",
+  "amendment",
+  "repeal",
+  "corrigendum",
+  "implementation",
+  "legal-basis",
+  "proposal",
+  "transposition",
+] as const satisfies readonly CitationType[];
+
+/**
+ * Where an edge comes from (API 2.11.0): `notice` — the EUR-Lex notice page
+ * of the citing document; `cellar` — a relation recorded in the Publications
+ * Office's Cellar repository; `notice+cellar` — both; `cellar-nim` — a
+ * measure a member state notified to the Commission for an EU act (a
+ * notification, not a finding that the measure transposes the act);
+ * `source` — the national source itself records the relation; `resolver` —
+ * the national source records a textual reference that LexAPI's
+ * deterministic resolver matched (see {@link CitationResolution}).
+ */
+export type CitationProvenance = "notice" | "cellar" | "notice+cellar" | "cellar-nim" | "source" | "resolver";
+
+/** Every {@link CitationProvenance} value. */
+export const CITATION_PROVENANCES = [
+  "notice",
+  "cellar",
+  "notice+cellar",
+  "cellar-nim",
+  "source",
+  "resolver",
+] as const satisfies readonly CitationProvenance[];
+
+/**
+ * How the target of a national edge was identified (API 2.11.0): `id` — the
+ * source names it by its id or a one-to-one native id; `key` — a unique
+ * native key (an official number, a gazette position); `abbreviation` — a
+ * code abbreviation matched to its act (filter it out with
+ * `resolution: ["id", "key"]` if you need only id and key matches);
+ * `text-pattern` — an EU act number with its EU marker found in running
+ * text. Edges read from EUR-Lex or Cellar have no resolution (`null`).
+ */
+export type CitationResolution = "id" | "key" | "abbreviation" | "text-pattern";
+
+/** Every {@link CitationResolution} value. */
+export const CITATION_RESOLUTIONS = [
+  "id",
+  "key",
+  "abbreviation",
+  "text-pattern",
+] as const satisfies readonly CitationResolution[];
+
+/**
+ * A graph node's kind (API 2.11.0): `act` for an EU act (CELEX sector 3) or a
+ * national act, `decision` for an EU court decision (sector 6) or a national
+ * decision; `null` for every other CELEX sector.
+ */
+export type CitationDocumentKind = "act" | "decision";
+
+/**
+ * Where `totalCitations` / `totalEdges` (and the network's paging totals)
+ * come from (API 2.10.0): `stats` — the per-node counts the graph maintains
+ * with every write; `counted` — counted over the matching edge rows for this
+ * request. Both are exact for the request; the totals mean the same either way.
+ */
+export type CountsSource = "stats" | "counted";
+
+/**
+ * The identity of a graph node (API 2.11.0), on every `citedBy[]` /
+ * `cites[]` group, network neighbour, `path[]` node and `related[]` entry.
+ * `celexNumber` is unchanged and carries the same id.
+ */
+export interface CitationNode {
+  /** The CELEX number of an EU document; a national document's LexAPI id (`AT-NOR-10001597`). */
+  id?: string | null;
+  /** `EU` for an EU document, otherwise the upper-case national code (`AT`, `DE`, …). */
+  jurisdiction?: string | null;
+  documentKind?: CitationDocumentKind | null;
+}
+
+/**
+ * Edge filters shared by `getCites`, `getCitedBy`, `getCitationNetwork`,
+ * `getCitationPath` and `getRelatedDocuments` (API 2.11.0). Each takes one
+ * value or a list, sent comma-separated. An unknown value is a `400`
+ * `InvalidParamsError` naming the parameter (`err.param`) and its allowed
+ * values (`err.allowed`), refunded in full.
+ */
+export interface CitationFilterParams {
+  /** Keep only edges of these types (one value or a list). */
+  citationType?: OneOrMany<CitationType>;
+  /**
+   * Keep only edges with these provenances. `cellar-nim`, `source` and
+   * `resolver` are accepted only while a national jurisdiction is open to you.
+   */
+  provenance?: OneOrMany<CitationProvenance>;
+  /**
+   * Keep only neighbours in these jurisdictions: `eu` and the lower-case
+   * codes of the national jurisdictions open to you (`["eu", "at"]`). A
+   * national code asks for national documents exactly like
+   * `includeNational: true`, with the same plan gate (BUSINESS, SCALE and
+   * ENTERPRISE; `403 TierForbiddenError` below). Any other code is a `400`.
+   */
+  jurisdictions?: OneOrMany<string>;
+  /**
+   * Keep only edges whose target was identified by one of these methods
+   * (national edges only — EU edges never match). While no national
+   * jurisdiction is open to you every value is a `400`.
+   */
+  resolution?: OneOrMany<CitationResolution>;
+}
+
+/**
+ * A reference a national document records that LexAPI could not turn into
+ * an edge (API 2.11.0) — `unresolved: true` on `getCites` /
+ * `getCitationNetwork` for a national document id.
+ */
+export interface UnresolvedReference {
+  /** What the source recorded: a cited norm, an EU act, a relation field, a notified measure. */
+  kind: "norm" | "eu-act" | "relation" | "nim" | (string & {});
+  /** The source's own string (at most 500 characters). */
+  text: string;
+  /** What the resolver understood of `text`; `null` when nothing. */
+  parsedKey: Record<string, unknown> | null;
+  /**
+   * `unresolved` — not matched; `not-held` — identified, but LexAPI does not
+   * hold it; `ambiguous` — more than one candidate; `out-of-scope` — a target
+   * outside the graph.
+   */
+  status: "unresolved" | "not-held" | "ambiguous" | "out-of-scope" | (string & {});
+  /** The id the target would have, when it could be built and is visible to you. */
+  targetId: string | null;
+}
 
 /**
  * Where a neighbour's title came from: the corpus (in the requested
@@ -844,10 +983,14 @@ export interface CitationEdgeDetail {
   citationType?: CitationType;
   contextSnippet?: string | null;
   extractedAt?: string;
+  /** Where the edge comes from (API 2.11.0); `null` on a national edge not yet classified. */
+  provenance?: CitationProvenance | null;
+  /** How the target was identified (API 2.11.0); `null` on every EUR-Lex / Cellar edge. */
+  resolution?: CitationResolution | null;
 }
 
 /** All edges from one source document into the target (cited-by grouping). */
-export interface CitingDocumentGroup {
+export interface CitingDocumentGroup extends CitationNode {
   celexNumber?: string;
   title?: string | null;
   titleSource?: TitleSource;
@@ -861,7 +1004,7 @@ export interface CitingDocumentGroup {
 }
 
 /** All edges from the source document into one target (cites grouping). */
-export interface CitedDocumentGroup {
+export interface CitedDocumentGroup extends CitationNode {
   celexNumber?: string;
   title?: string | null;
   titleSource?: TitleSource;
@@ -869,10 +1012,8 @@ export interface CitedDocumentGroup {
   citations?: CitationEdgeDetail[];
 }
 
-/** Pagination filters shared by the cites / cited-by endpoints. */
-export interface CitationEdgeParams {
-  /** Filter to a single citation type. */
-  citationType?: CitationType;
+/** Pagination and filters shared by the cites / cited-by endpoints. */
+export interface CitationEdgeParams extends CitationFilterParams {
   /** Max edges to return per page. Default 100. */
   limit?: number;
   /** Pagination offset (in edges, not documents). Default 0. */
@@ -890,12 +1031,27 @@ export interface CitationEdgeParams {
   includeNational?: boolean;
 }
 
+/** Params for {@link getCites}: the shared edge params plus `unresolved`. */
+export interface CitesParams extends CitationEdgeParams {
+  /**
+   * `true` on a national document id adds `unresolved` /
+   * `unresolvedTruncated` to the response — the references the document
+   * records that could not be turned into an edge. Ignored on an EU id. No
+   * extra credits.
+   */
+  unresolved?: boolean;
+}
+
 export interface CitedByResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
   /** The CELEX whose inbound edges are being listed. */
   targetDocument: string;
-  /** Total inbound edges matching the filter (across all pages). */
+  /** Distinct citing→cited document pairs matching the filter (across all pages). */
   totalCitations?: number;
+  /** Edge rows matching the filter — what `offset` / `limit` page over. */
+  totalEdges?: number;
+  /** Where the totals come from (API 2.10.0). */
+  countsSource?: CountsSource;
   /** Citing documents in THIS page (not the global distinct total). */
   uniqueDocuments?: number;
   limit?: number;
@@ -910,7 +1066,12 @@ export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
   /** The CELEX whose outbound edges are being listed. */
   sourceDocument: string;
+  /** Distinct citing→cited document pairs matching the filter (across all pages). */
   totalCitations?: number;
+  /** Edge rows matching the filter — what `offset` / `limit` page over. */
+  totalEdges?: number;
+  /** Where the totals come from (API 2.10.0). */
+  countsSource?: CountsSource;
   /** Cited documents in THIS page (not the global distinct total). */
   uniqueDocuments?: number;
   limit?: number;
@@ -918,10 +1079,21 @@ export interface CitesResponse extends CreditedResponse, WithResponseHeaders {
   cites: CitedDocumentGroup[];
   /** Whether national documents were included (see `includeNational`). Absent while no national jurisdiction is live. */
   includeNational?: boolean;
+  /** With `unresolved: true` on a national document id: references that did not become an edge (at most 500). */
+  unresolved?: UnresolvedReference[];
+  /** `true` when the document has more than 500 such references. With `unresolved` only. */
+  unresolvedTruncated?: boolean;
+}
+
+/** One distinct (`citationType`, `provenance`, `resolution`) combination of a neighbour's edges (API 2.11.0). */
+export interface CitationEdgeKind {
+  citationType: CitationType;
+  provenance: CitationProvenance | null;
+  resolution: CitationResolution | null;
 }
 
 /** A neighbour in the citation graph, deduplicated across edge types. */
-export interface CitationNeighbour {
+export interface CitationNeighbour extends CitationNode {
   celexNumber?: string;
   title?: string | null;
   titleSource?: TitleSource;
@@ -929,11 +1101,11 @@ export interface CitationNeighbour {
   count?: number;
   /** Union of `citationType` values across all edges to/from it. */
   types?: CitationType[];
+  /** The distinct type / provenance / resolution of this page's edges to/from the neighbour (API 2.11.0). */
+  edgeDetails?: CitationEdgeKind[];
 }
 
-export interface CitationNetworkParams {
-  /** Filter both directions to a single citation type. */
-  citationType?: CitationType;
+export interface CitationNetworkParams extends CitationFilterParams {
   /** Max edges to fetch per direction (default 100, max 500). */
   limit?: number;
   /** Pagination offset (in edges, applied to both directions). */
@@ -942,6 +1114,8 @@ export interface CitationNetworkParams {
   language?: Language;
   /** Also include national neighbours of live jurisdictions. BUSINESS+ only — `403 TierForbiddenError` below that. */
   includeNational?: boolean;
+  /** `true` on a national document id adds `unresolved` / `unresolvedTruncated` (not on a partial response). No extra credits. */
+  unresolved?: boolean;
 }
 
 export interface CitationNetworkResponse extends CreditedResponse, WithResponseHeaders {
@@ -965,6 +1139,12 @@ export interface CitationNetworkResponse extends CreditedResponse, WithResponseH
     citesTotal: number | null;
     /** Total inbound edges matching the query. `null` when the response is partial. */
     citedByTotal: number | null;
+    /** Outbound edge ROWS — what `offset` pages over. `null` when partial. */
+    citesEdgeTotal?: number | null;
+    /** Inbound edge ROWS — what `offset` pages over. `null` when partial. */
+    citedByEdgeTotal?: number | null;
+    /** Where the totals come from (API 2.10.0); `null` when partial. */
+    countsSource?: CountsSource | null;
   };
   /**
    * Present and `true` when the server-side wall-clock budget expired —
@@ -979,6 +1159,10 @@ export interface CitationNetworkResponse extends CreditedResponse, WithResponseH
   relationSync?: RelationSync;
   /** Whether national neighbours were included (see `includeNational`). Absent while no national jurisdiction is live. */
   includeNational?: boolean;
+  /** With `unresolved: true` on a national document id: references that did not become an edge (at most 500). */
+  unresolved?: UnresolvedReference[];
+  /** `true` when the document has more than 500 such references. With `unresolved` only. */
+  unresolvedTruncated?: boolean;
 }
 
 export interface CitationStatsTopCited {
@@ -1011,6 +1195,26 @@ export interface CitationStatsResponse extends CreditedResponse, WithResponseHea
     mostCited: CitationStatsTopCited[];
     /** Top-10 documents with the most outbound citations. */
     mostCiting: CitationStatsTopCiting[];
+    /**
+     * With `includeNational: true` only (API 2.11.0): per jurisdiction (`EU`
+     * and each live one in scope), the edges whose citing end (`asSource`) or
+     * cited end (`asTarget`) is in it. Unclassified edges are counted under
+     * `unstamped`, only while there are any.
+     */
+    byJurisdiction?: Record<string, { asSource?: number; asTarget?: number }>;
+    /** With `includeNational: true` only: edges per `provenance` value (`unstamped` while edges remain unclassified). */
+    byProvenance?: Record<string, number>;
+    /**
+     * With `includeNational: true` only: the measures the in-scope member
+     * states notified to the Commission that Cellar still lists, and how many
+     * are matched to a document LexAPI holds — the same rule as `counts` on
+     * {@link TranspositionResponse}.
+     */
+    transposition?: {
+      measures?: number;
+      resolved?: number;
+      byCountry?: Record<string, { measures?: number; resolved?: number }>;
+    };
   };
   /** When these (cached) statistics were computed. */
   cachedAt?: string;
@@ -1018,14 +1222,14 @@ export interface CitationStatsResponse extends CreditedResponse, WithResponseHea
   cacheTtlSeconds?: number;
 }
 
-export interface CitationPathNode {
+export interface CitationPathNode extends CitationNode {
   celexNumber: string;
   /** Enriched at read time from the corpus where available. */
   title: string | null;
   titleSource?: TitleSource;
 }
 
-export interface CitationPathParams {
+export interface CitationPathParams extends CitationFilterParams {
   /** Hop budget (default 3, max 8). */
   maxDepth?: number;
   /** Language preferred for node titles (default `en`). */
@@ -1055,7 +1259,7 @@ export interface CitationPathResponse extends CreditedResponse, WithResponseHead
   includeNational?: boolean;
 }
 
-export interface RelatedDocument {
+export interface RelatedDocument extends CitationNode {
   celexNumber: string;
   title?: string | null;
   titleSource?: TitleSource;
@@ -1064,7 +1268,7 @@ export interface RelatedDocument {
   sharedTargets?: string[];
 }
 
-export interface RelatedDocumentsParams {
+export interface RelatedDocumentsParams extends CitationFilterParams {
   /** Max neighbours (default 10, max 50). */
   limit?: number;
   /** Language preferred for titles (default `en`). */
@@ -1085,6 +1289,183 @@ export interface RelatedDocumentsResponse extends CreditedResponse, WithResponse
   message?: string;
   /** Whether national documents were considered (see `includeNational`). Absent while no national jurisdiction is live. */
   includeNational?: boolean;
+}
+
+/** Params for {@link getTransposition}. */
+export interface TranspositionParams {
+  /**
+   * Countries to list, ISO-2 codes (`["es", "cz"]`; `EL` for Greece, `UK`
+   * for the United Kingdom); default all 28. `eu` is accepted and ignored;
+   * an unknown code is a `400`.
+   */
+  jurisdictions?: OneOrMany<string>;
+  /**
+   * `true`: only the measures resolved to a document LexAPI holds, in live
+   * jurisdictions. Does nothing when holdings are not joined (below
+   * BUSINESS, or `termsRequired`).
+   */
+  resolvedOnly?: boolean;
+  /** Language of the act's title (default `en`). */
+  language?: Language;
+}
+
+/**
+ * One notified measure for an EU act (API 2.11.0) — the same keys for every
+ * country; a field the record lacks is `null`. `id`, `resolved`,
+ * `resolution` and `resolutionBasis` come from LexAPI's holdings: filled on
+ * BUSINESS, SCALE and ENTERPRISE for a live jurisdiction, `null` otherwise.
+ */
+export interface TranspositionMeasure {
+  /** The LexAPI id of the document the measure resolves to, when held and not withdrawn. */
+  id: string | null;
+  /** Whether the measure is matched to a document LexAPI holds; `null` when holdings are not joined. */
+  resolved: boolean | null;
+  resolution: CitationResolution | null;
+  /** What the match used (e.g. the gazette number); `null` when not resolved or not joined. */
+  resolutionBasis: { keyKind?: string; key?: string } | null;
+  /**
+   * `cellar-nim` — the Cellar record of the member state's notification;
+   * `source` — the national source itself records that the document
+   * transposes or implements the act (`cellar` is then `null`).
+   */
+  provenance: "cellar-nim" | "source" | (string & {});
+  /** `transposition` when Cellar types the act as a directive or framework decision, else `implementation`. */
+  citationType: "transposition" | "implementation" | (string & {});
+  /** The measure's title as notified, in the member state's language. */
+  title: string | null;
+  /** The kind of measure as notified (`Ley Orgánica`, `Zákon`, …). */
+  typeAct: string | null;
+  /** Where the measure was published, as notified. */
+  officialJournal: { name?: string | null; number?: string | null; date?: string | null };
+  /** The member state's own reference for the measure. */
+  reference: string | null;
+  eli: string | null;
+  /** A link to the measure, as notified. */
+  link: string | null;
+  /** The Cellar record of the notification; `null` on a measure only a national source records. */
+  cellar: {
+    id?: string | null;
+    /** The record's sector-7 CELEX number for this act; `null` when it has none (never guessed). */
+    celex?: string | null;
+    /** Not mirrored — always `null`. */
+    commissionReference?: null;
+    dateDocument?: string | null;
+    dateNotification?: string | null;
+    entryIntoForce?: string | null;
+  } | null;
+}
+
+/** One country's measures for the act. */
+export interface TranspositionCountry {
+  /** Upper-case code of the member state (`EL` for Greece), or `UK`. */
+  jurisdiction: string;
+  /** Whether LexAPI serves this country's national law (the same `live` as `getNationalCoverage`). */
+  live: boolean;
+  counts: {
+    /** Measures for the act in this country (not only those in this page). */
+    measures?: number;
+    /** Of those, matched to a document LexAPI holds; `null` when holdings are not joined. */
+    resolved?: number | null;
+  };
+  measures: TranspositionMeasure[];
+}
+
+/** `GET /citations/transposition/{celexNumber}` (API 2.11.0). */
+export interface TranspositionResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  /** `true` when LexAPI's holdings are joined, `false` otherwise. Absent while no national jurisdiction is live. */
+  includeNational?: boolean;
+  /**
+   * Present (`true`) only when holdings would be joined but the account has
+   * not yet accepted the national-source terms: every holdings field is
+   * then `null`. Accept the terms once in the dashboard.
+   */
+  termsRequired?: true;
+  document: {
+    id?: string;
+    celexNumber?: string;
+    jurisdiction?: "EU" | (string & {});
+    documentKind?: "act" | (string & {});
+    title?: string | null;
+  };
+  source: {
+    cellar?: {
+      /** When the newest of the act's records was last read from Cellar; `null` when the act has none. */
+      syncedAt?: string | null;
+      /** All the act's measures across every country (not narrowed by `jurisdictions`). */
+      measures?: number;
+      /** The attribution the Publications Office's reuse terms require — keep it with anything you republish. */
+      attribution?: string;
+    };
+    /** The live jurisdictions whose own sources record a transposition or implementation of this act; `null` when holdings are not joined. */
+    lanes?: string[] | null;
+  };
+  /**
+   * Always: "Measures are those the member state notified to the Commission
+   * for this act. A notification is not a finding that the measure
+   * transposes the act, or transposes it completely."
+   */
+  note: string;
+  /** Per country with at least one measure (in the `jurisdictions` asked for), in code order. */
+  jurisdictions: TranspositionCountry[];
+  /** `true` when more than 2,000 measures matched (narrow with `jurisdictions`), or the national-source edge cap was hit. */
+  truncated: boolean;
+}
+
+/** Params for {@link getCounterparts}. */
+export interface CounterpartsParams {
+  /** Jurisdictions to look in, ISO-2 codes; default every live one. Codes that are not live are left out; an unknown code is a `400`. */
+  jurisdictions?: OneOrMany<string>;
+  /** Language of the titles (default `en`). */
+  language?: Language;
+}
+
+/** A measure of another live jurisdiction for the same EU act. */
+export interface Counterpart {
+  jurisdiction: string;
+  /** The LexAPI id of the counterpart; `null` for a notified Cellar record LexAPI does not hold (rank 3). */
+  id: string | null;
+  resolved: boolean;
+  title: string | null;
+  citationType: "transposition" | "implementation" | (string & {});
+  provenance: "source" | "cellar-nim" | (string & {});
+  /**
+   * `1` — the national source records the relation (`source`); `2` — a
+   * notified measure LexAPI holds (`cellar-nim`, resolved); `3` — a notified
+   * Cellar record LexAPI does not hold.
+   */
+  rank: 1 | 2 | 3;
+}
+
+/** One EU act the queried document transposes or implements, with the other jurisdictions' measures for it. */
+export interface CounterpartVia {
+  euAct: CitationNode & {
+    title?: string | null;
+    /** Measures all member states notified for the act. */
+    notifiedMeasures?: number;
+  };
+  /** The document's own edge to the act; `null` when the queried id is the EU act itself. */
+  edge: {
+    citationType?: "transposition" | "implementation" | (string & {});
+    provenance?: CitationProvenance | null;
+    resolution?: CitationResolution | null;
+  } | null;
+  /** By `rank`, then jurisdiction; at most 200. Never the queried document. */
+  counterparts: Counterpart[];
+  /** `true` when more than 200 counterparts matched for this act. */
+  truncated: boolean;
+}
+
+/** `GET /citations/counterparts/{id}` (API 2.11.0). */
+export interface CounterpartsResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  /** Always `true` when present; absent while no national jurisdiction is live. */
+  includeNational?: boolean;
+  document: CitationNode & { title?: string | null };
+  /** One entry per EU act the document transposes or implements (CELEX order, at most 200); for an EU act as id, the act itself. */
+  via: CounterpartVia[];
+  /** `true` when the document implements more than 200 EU acts. */
+  truncated: boolean;
 }
 
 // ── Semantic search ─────────────────────────────────────────────────
@@ -1440,6 +1821,93 @@ export interface NationalSource {
   attribution: string;
 }
 
+/**
+ * Reason a citation-graph rate is not measured (API 2.13.0):
+ * `not-collected` — LexAPI does not hold these references for the documents
+ * it already has; `source-empty` — the source leaves the field empty or
+ * absent on every document LexAPI holds.
+ */
+export type NationalCitationGraphUnmeasuredReason = "not-collected" | "source-empty" | (string & {});
+
+/** A citation-graph rate key, as used by `methods.unmeasured` and `floors`. */
+export type NationalCitationGraphRateKey = "decisionsToActs" | "actsToEu" | "textPattern";
+
+/** What a jurisdiction's citation extraction does. */
+export interface NationalCitationGraphMethods {
+  /** How court decisions' references to acts are resolved. */
+  decisions?: CitationResolution | null;
+  /** Resolution methods used for references to national acts. */
+  acts?: string[];
+  /** Resolution methods used for references to EU law. */
+  eu?: string[];
+  /**
+   * API 2.13.0 — absent when every rate is measured; otherwise rate →
+   * reason code for the rates the sources do not let LexAPI measure (such a
+   * rate is `null` and carries no floor), e.g. `{ decisionsToActs: "not-collected" }`.
+   */
+  unmeasured?: Partial<Record<NationalCitationGraphRateKey, NationalCitationGraphUnmeasuredReason>>;
+}
+
+/** The labelled-sample check of one resolution method of the jurisdiction's own extraction. */
+export interface NationalCitationGraphPrecision {
+  resolver?: string | null;
+  resolverVersion?: number | null;
+  /** `source` or `resolver` (API 2.12.0). */
+  provenance?: "source" | "resolver" | null;
+  /** Edges checked by hand. */
+  labelled?: number | null;
+  /** Clopper-Pearson 95 % upper bound on the error rate; `null` with no labels. */
+  errorUpperBound?: number | null;
+}
+
+/**
+ * API 2.12.0 — the lowest values the rates are expected to stay at (each the
+ * measured value minus 10 percentage points, never below 0, at a dated
+ * measurement). A rate that does not apply, is unmeasured, or was not
+ * measured when the floors were set is `null`.
+ */
+export interface NationalCitationGraphFloors {
+  /** Floor of `decisionResolutionRate`. */
+  decisionsToActs?: number | null;
+  /** Floor of `actEuRate`. */
+  actsToEu?: number | null;
+  /** Floor of `textPatternRate`. */
+  textPattern?: number | null;
+  /** Floor of `nimResolvedRate`. */
+  nimResolved?: number | null;
+  /** When the floors were set. */
+  derivedAt?: string;
+  /** The measurements the floors were taken from. */
+  measuredAt?: { rebuild?: string | null; nim?: string | null };
+}
+
+/**
+ * A jurisdiction's citation graph, as measured (API 2.11.0). Nothing is
+ * estimated: a value that was not measured is `null`.
+ */
+export interface NationalCitationGraph {
+  methods?: NationalCitationGraphMethods | null;
+  /** Edges whose citing document is in this jurisdiction and whose cited document is EU law or in a live jurisdiction. */
+  edges?: number;
+  /** Share of decisions with at least one structured reference that got an edge; `null` when not measured. */
+  decisionResolutionRate?: number | null;
+  /** Share of acts with recorded EU references that got an EU edge; `null` when not measured, and for a text-pattern-only jurisdiction. */
+  actEuRate?: number | null;
+  /** API 2.12.0. Share of EU act numbers found in running text that produced an edge; `null` when not measured. */
+  textPatternRate?: number | null;
+  /** The measures this member state notified to the Commission that Cellar still lists, and how many LexAPI holds. */
+  transposition?: { measures?: number; resolved?: number };
+  precision?: NationalCitationGraphPrecision;
+  /** When the rebuild rates were measured; `null` without. */
+  measuredAt?: string | null;
+  /** API 2.12.0. Share of the notified measures in scope for matching that were matched to a held document; `null` without a complete run. */
+  nimResolvedRate?: number | null;
+  /** API 2.12.0. When that matching run finished. */
+  nimMeasuredAt?: string | null;
+  /** API 2.12.0. `null` until LexAPI has set them. */
+  floors?: NationalCitationGraphFloors | null;
+}
+
 /** One jurisdiction's entry on `GET /national/coverage`. */
 export interface NationalJurisdictionCoverage {
   /** ISO 3166-1 alpha-2, e.g. `"AT"`. Non-EU legal orders (e.g. `"UK"`) are included too. */
@@ -1455,6 +1923,8 @@ export interface NationalJurisdictionCoverage {
   sources: NationalSource[];
   /** When this jurisdiction's corpus was last synced. `null` if never. */
   lastSyncAt?: string | null;
+  /** The jurisdiction's citation graph as measured (API 2.11.0); `null` for one that is not live, or when its numbers could not be read. */
+  citationGraph?: NationalCitationGraph | null;
 }
 
 /**
@@ -1624,12 +2094,44 @@ export interface NationalDocumentContent {
   textLanguage: string | null;
   /** `true` when the text includes text in a language other than the document's `language`. */
   embeddedForeignText: boolean;
+  /**
+   * Where the text was read from (API 2.9.0): `html` (the source's web
+   * rendition), `pdf-text` (the text layer of the source's PDF) or `ocr`
+   * (machine-read from a scanned page — see `ocr`). `null` for jurisdictions
+   * that do not label it. Treat unknown values as additive.
+   */
+  textSource: NationalTextSource | null;
+  /** `null` unless `textSource` is `ocr` (API 2.9.0). OCR text may contain recognition errors and is never the official text. */
+  ocr: NationalOcrInfo | null;
   /** The source's confirmation that the act is no longer in force (the basis of `validTo`); `null` otherwise. */
   repeal: NationalRepeal | null;
   /** Provenance from the upstream (system, its ids and URLs). Keys vary by jurisdiction. */
   source: Record<string, unknown>;
   /** Everything else the source provides, under its own field names. Keys vary by jurisdiction. */
   details: Record<string, unknown>;
+}
+
+/** Known `NationalDocumentContent.textSource` values. Open for forward compatibility. */
+export type NationalTextSource = "html" | "pdf-text" | "ocr" | (string & {});
+
+/** How an OCR'd national text was recognised (API 2.9.0). */
+export interface NationalOcrInfo {
+  engine: string | null;
+  engineVersion: string | null;
+  /** The version of the engine's recognition core. */
+  coreVersion: string | null;
+  /** The recognition model used. */
+  traineddata: string | null;
+  /** Recognition confidence, 0–100, averaged over the recognised characters. */
+  confidence: number | null;
+  /** The lowest page's confidence, 0–100. */
+  minPageConfidence: number | null;
+  /** The PDF pages read by OCR. */
+  pages: number[];
+  /** Pages of the same document read from the PDF's text layer. */
+  textLayerPages: number[];
+  /** Human-readable statement that the text is machine-read and not the official text. */
+  notice: string;
 }
 
 /** Full national document — `GET /{jurisdiction}/documents/{id}` (API 2.8.0 shape). */

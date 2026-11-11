@@ -11,6 +11,7 @@ import { WebhooksAPI } from "./webhooks.js";
 import type {
   CitationEdgeParams,
   CitationExtractResponse,
+  CitationFilterParams,
   CitationNetworkParams,
   CitationNetworkResponse,
   CitationPathParams,
@@ -18,7 +19,10 @@ import type {
   CitationStatsParams,
   CitationStatsResponse,
   CitedByResponse,
+  CitesParams,
   CitesResponse,
+  CounterpartsParams,
+  CounterpartsResponse,
   DocumentByUrlRequest,
   DocumentByUrlResponse,
   DocumentContentBatchRequest,
@@ -49,6 +53,8 @@ import type {
   SemanticCaseLawSearchResponse,
   SemanticLegislationSearchOptions,
   SemanticLegislationSearchResponse,
+  TranspositionParams,
+  TranspositionResponse,
   VersionParams,
 } from "./types.js";
 
@@ -432,16 +438,22 @@ export class LexAPI {
    * jurisdictions — BUSINESS, SCALE and ENTERPRISE only (`403
    * TierForbiddenError` below that, refunded in full). A national id whose
    * jurisdiction is not live is `404 NotFoundError`.
+   *
+   * Filters (API 2.11.0): `citationType`, `provenance`, `jurisdictions` and
+   * `resolution` each take one value or a list (sent comma-separated). On a
+   * national id, `unresolved: true` also returns the references the
+   * document records that could not be turned into an edge
+   * (`unresolved` / `unresolvedTruncated`), at no extra cost.
    */
   async getCites(
     celexNumber: string,
-    params: CitationEdgeParams = {},
+    params: CitesParams = {},
     options?: CallOptions,
   ): Promise<CitesResponse> {
     return this.call<CitesResponse>({
       method: "GET",
       path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
-      query: edgeQuery(params),
+      query: { ...edgeQuery(params), unresolved: params.unresolved },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -455,7 +467,7 @@ export class LexAPI {
    *
    * `celexNumber` may be a national document id; `params.includeNational`
    * also pulls in national neighbours of live jurisdictions — BUSINESS+
-   * only (`403 TierForbiddenError` below that). See `getCites`.
+   * only (`403 TierForbiddenError` below that). Filters as on `getCites`.
    */
   async getCitedBy(
     celexNumber: string,
@@ -482,7 +494,7 @@ export class LexAPI {
    */
   async *paginateCites(
     celexNumber: string,
-    params: CitationEdgeParams = {},
+    params: CitesParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitesResponse, void> {
     yield* paginateEdges(
@@ -531,11 +543,12 @@ export class LexAPI {
       method: "GET",
       path: `/citations/network/${encodeURIComponent(celexNumber)}`,
       query: {
-        citationType: params.citationType,
+        ...filterQuery(params),
         limit: params.limit,
         offset: params.offset,
         language: params.language,
         includeNational: params.includeNational,
+        unresolved: params.unresolved,
       },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -561,7 +574,12 @@ export class LexAPI {
     return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
-      query: { maxDepth: params.maxDepth, language: params.language, includeNational: params.includeNational },
+      query: {
+        ...filterQuery(params),
+        maxDepth: params.maxDepth,
+        language: params.language,
+        includeNational: params.includeNational,
+      },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -585,7 +603,12 @@ export class LexAPI {
     return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
-      query: { limit: params.limit, language: params.language, includeNational: params.includeNational },
+      query: {
+        ...filterQuery(params),
+        limit: params.limit,
+        language: params.language,
+        includeNational: params.includeNational,
+      },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -635,6 +658,74 @@ export class LexAPI {
       query: { includeNational: effectiveParams?.includeNational },
       timeoutMs: effectiveOptions?.timeoutMs,
       signal: effectiveOptions?.signal,
+    });
+  }
+
+  /**
+   * `GET /citations/transposition/{celexNumber}` — the measures the member
+   * states notified to the Commission for an EU act (CELEX sector 3),
+   * grouped by country, from the Publications Office's Cellar records of the
+   * notifications (API 2.11.0). **A notification is not a finding that the
+   * measure transposes the act, or transposes it completely** — `note` says
+   * so on every answer. 5 credits, every plan; a 5xx is refunded.
+   *
+   * On BUSINESS, SCALE and ENTERPRISE, for live jurisdictions, the answer
+   * also says which measures LexAPI holds (`id`, `resolved`, `resolution`,
+   * `resolutionBasis`, `counts.resolved`, `source.lanes`) and adds the
+   * documents whose national source records that they transpose or
+   * implement the act (`provenance: "source"`); `resolvedOnly: true` keeps
+   * only the held ones. Below BUSINESS, for a jurisdiction that is not live,
+   * and while the national-source terms are not accepted (`termsRequired:
+   * true` — never a 403) those fields are `null`.
+   *
+   * A CELEX that is not an EU act (sector 3) is `404 NotFoundError`.
+   */
+  async getTransposition(
+    celexNumber: string,
+    params: TranspositionParams = {},
+    options?: CallOptions,
+  ): Promise<TranspositionResponse> {
+    return this.call<TranspositionResponse>({
+      method: "GET",
+      path: `/citations/transposition/${encodeURIComponent(celexNumber)}`,
+      query: {
+        jurisdictions: listParam(params.jurisdictions),
+        resolvedOnly: params.resolvedOnly,
+        language: params.language,
+      },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `GET /citations/counterparts/{id}` — a national document's counterparts
+   * in the other live jurisdictions, through the EU acts it transposes or
+   * implements (API 2.11.0). Each `via[]` entry is one EU act, with the
+   * other jurisdictions' measures for it ranked `1` (the national source
+   * records the relation), `2` (a notified measure LexAPI holds) or `3` (a
+   * notified Cellar record LexAPI does not hold, `id: null`). An EU act
+   * CELEX as `id` lists its own measures the same way.
+   *
+   * **20 credits; BUSINESS, SCALE and ENTERPRISE only** (`403
+   * TierForbiddenError` below that, refunded). A lookup past its 20-second
+   * server-side budget throws `TimeoutError` (503, `err.partial === true`),
+   * refunded — retry, or narrow with `jurisdictions`.
+   */
+  async getCounterparts(
+    id: string,
+    params: CounterpartsParams = {},
+    options?: CallOptions,
+  ): Promise<CounterpartsResponse> {
+    return this.call<CounterpartsResponse>({
+      method: "GET",
+      path: `/citations/counterparts/${encodeURIComponent(id)}`,
+      query: {
+        jurisdictions: listParam(params.jurisdictions),
+        language: params.language,
+      },
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
     });
   }
 
@@ -1019,9 +1110,19 @@ function isLegacyCitationStatsCallOptions(
   return "timeoutMs" in value || "signal" in value;
 }
 
+/** The API 2.11.0 edge filters, each comma-joined when given as a list. */
+function filterQuery(params: CitationFilterParams): Record<string, string | undefined> {
+  return {
+    citationType: listParam(params.citationType),
+    provenance: listParam(params.provenance),
+    jurisdictions: listParam(params.jurisdictions),
+    resolution: listParam(params.resolution),
+  };
+}
+
 function edgeQuery(params: CitationEdgeParams): Record<string, string | number | boolean | undefined> {
   return {
-    citationType: params.citationType,
+    ...filterQuery(params),
     limit: params.limit,
     offset: params.offset,
     language: params.language,
@@ -1040,10 +1141,10 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
   return typeof value === "string" ? value : value.join(",");
 }
 
-async function* paginateEdges<T extends { limit?: number }>(
-  fetchPage: (params: CitationEdgeParams) => Promise<T>,
+async function* paginateEdges<T extends { limit?: number }, P extends CitationEdgeParams>(
+  fetchPage: (params: P) => Promise<T>,
   rawRowsIn: (page: T) => number,
-  params: CitationEdgeParams,
+  params: P,
 ): AsyncGenerator<T, void> {
   const limit = params.limit ?? 100;
   let offset = params.offset ?? 0;
