@@ -5,6 +5,65 @@ versioning: [SemVer](https://semver.org/) — while the package is `0.x`, a **mi
 breaking changes (documented below with a migration note); `npm install @lexapi/client@^0.1.0` never
 picks up `0.2.0` on its own.
 
+## [0.4.0] — 2026-11-11
+
+Cross-border citation graph. **Requires LexAPI API 2.13.0.** Additive at runtime: no existing
+signature or field changes meaning. Type-level changes to check when upgrading:
+
+- `CitationType` gains `"transposition"` — an exhaustive `switch` over it needs a new case.
+- `citationType` params are now `OneOrMany<CitationType>`: code that reads the param back as a
+  single value must handle a list.
+- `NationalDocumentContent` gains the required `textSource` and `ocr` fields — objects you build
+  yourself (test fixtures, mocks) need them (`null` is valid for both).
+
+### Added
+
+- **`getTransposition(celexNumber, params?, options?)`** (`GET /citations/transposition/{celexNumber}`,
+  5 credits, every plan): the measures the member states notified to the Commission for an EU act
+  (CELEX sector 3), grouped by country, from the Publications Office's Cellar records. Every answer
+  carries `note` — a notification is not a finding that the measure transposes the act, or
+  transposes it completely. On BUSINESS, SCALE and ENTERPRISE, for live jurisdictions, the measures
+  LexAPI holds are filled in (`id`, `resolved`, `resolution`, `resolutionBasis`, `counts.resolved`,
+  `source.lanes`) and documents whose national source records the relation are added
+  (`provenance: "source"`); otherwise those fields are `null` (`termsRequired: true` while the
+  national-source terms are not accepted). Params: `jurisdictions`, `resolvedOnly`, `language`.
+  Types: `TranspositionParams`, `TranspositionResponse`, `TranspositionCountry`,
+  `TranspositionMeasure`.
+- **`getCounterparts(id, params?, options?)`** (`GET /citations/counterparts/{id}`, 20 credits,
+  BUSINESS and above): a national document's counterparts in the other live jurisdictions, through
+  the EU acts it transposes or implements, ranked 1–3. A lookup past the server's budget throws
+  `TimeoutError` (503, `partial`), refunded; the SDK does not retry it — retry yourself, or narrow
+  with `jurisdictions`. Other 503s keep the existing retry policy. Types: `CounterpartsParams`, `CounterpartsResponse`,
+  `CounterpartVia`, `Counterpart`.
+- **Edge filters** on `getCites`, `getCitedBy`, `getCitationNetwork`, `getCitationPath` and
+  `getRelatedDocuments` (and the `paginate*` helpers): `citationType` now takes one value or a
+  list, plus `provenance`, `jurisdictions` and `resolution` (each one value or a list, sent
+  comma-separated). `CitationFilterParams`; `CitationPathParams` and `RelatedDocumentsParams` gain
+  `citationType` too.
+- **`unresolved: true`** on `getCites` (new `CitesParams`) and `getCitationNetwork` for a national
+  document id: `unresolved` (`UnresolvedReference[]`) and `unresolvedTruncated` on the response.
+- **Provenance and resolution on every edge**: `CitationEdgeDetail.provenance` /
+  `.resolution`, and `CitationNeighbour.edgeDetails` (`CitationEdgeKind[]`). Types
+  `CitationProvenance`, `CitationResolution`; runtime lists `CITATION_TYPES`,
+  `CITATION_PROVENANCES`, `CITATION_RESOLUTIONS`.
+- **Node identity** (`CitationNode`: `id`, `jurisdiction`, `documentKind`) on cites / cited-by
+  groups, network neighbours, path nodes and related documents. `celexNumber` is unchanged.
+- **`CitationType`** gains `"transposition"`.
+- **Totals**: `totalEdges` and `countsSource` (`"stats"` | `"counted"`, API 2.10.0) on
+  `getCites` / `getCitedBy`; `paging.citesEdgeTotal`, `paging.citedByEdgeTotal` and
+  `paging.countsSource` (`null` when partial) on `getCitationNetwork`.
+- **`getCitationStats({ includeNational: true })`**: `stats.byJurisdiction`, `stats.byProvenance`,
+  `stats.transposition`.
+- **Coverage**: `NationalJurisdictionCoverage.citationGraph` (`NationalCitationGraph`) — extraction
+  `methods` (incl. `unmeasured` rate → `not-collected` | `source-empty`), `edges`,
+  `decisionResolutionRate`, `actEuRate`, `textPatternRate`, `transposition`, `precision`,
+  `measuredAt`, `nimResolvedRate`, `nimMeasuredAt`, `floors`.
+- **National content**: `content.textSource` (`html` | `pdf-text` | `ocr` | `null`) and
+  `content.ocr` (`NationalOcrInfo` | `null`) — API 2.9.0.
+- **`InvalidParamsError.param` / `.value` / `.allowed`**: the refused parameter, the value sent
+  (when the server echoes it) and its allowed values, read
+  from either error shape. **`TimeoutError.partial` / `.serverTimeoutMs`** for a budget timeout.
+
 ## [0.3.0] — 2026-10-28
 
 Adds national (member-state, and non-EU) law support. **Requires LexAPI API 2.8.0.**

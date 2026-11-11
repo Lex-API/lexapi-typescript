@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 
 export async function runSmoke(lib, label) {
-  const { LexAPI, VERSION, CreditsExhaustedError, verifySignature, AS_OF_REASONS } = lib;
+  const { LexAPI, VERSION, CreditsExhaustedError, verifySignature, AS_OF_REASONS, CITATION_TYPES } = lib;
   const calls = [];
   const fetchStub = async (url, init) => {
     calls.push({ url, init });
@@ -63,6 +63,7 @@ export async function runSmoke(lib, label) {
   const sig = createHmac("sha256", "secret").update(body).digest("hex");
   assert.equal(await verifySignature(body, sig, "secret"), true);
   assert.equal(AS_OF_REASONS.length, 19);
+  assert.ok(CITATION_TYPES.includes("transposition"));
 
   console.log(`smoke:dist ${label} OK on ${runtime()} (@lexapi/client ${VERSION})`);
 }
