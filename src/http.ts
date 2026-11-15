@@ -388,6 +388,9 @@ function shouldRetryStatus(
   // A server-side budget timeout answered as a partial 503 would hit the same
   // budget again: leave the retry (or a narrower request) to the caller.
   if (status === 503 && isBudgetTimeout(error.body)) return false;
+  // An incomplete national semantic search that the server no longer gives
+  // a wait for has repeatedly come back incomplete: a retry would too.
+  if (status === 503 && isSearchIncomplete(error.body) && error.retryAfter === undefined) return false;
   if (status === 429) return !(error instanceof RateLimitedError && error.quotaExhausted);
   if (NEVER_REACHED_STATUSES.has(status)) return true;
   if (ORIGIN_DEPENDENT_STATUSES.has(status)) {
@@ -400,6 +403,12 @@ function shouldRetryStatus(
 
 function isBudgetTimeout(body: unknown): boolean {
   return typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "TIMEOUT";
+}
+
+function isSearchIncomplete(body: unknown): boolean {
+  return (
+    typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "SEARCH_INCOMPLETE"
+  );
 }
 
 /** Read a body as text, restarting the inactivity timer on every chunk. */

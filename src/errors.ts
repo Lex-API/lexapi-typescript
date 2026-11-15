@@ -49,6 +49,11 @@ export type ErrorCode =
   // 503 — a jurisdiction's semantic index is temporarily unreachable
   // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
   | "NATIONAL_SEMANTIC_UNAVAILABLE"
+  // 422 — the national semantic index cannot search this slice (jurisdiction,
+  // document kind, filters) completely and there is nothing left to return
+  // (legacy shape, `partialReason: "SEARCH_INCOMPLETE"`, no Retry-After) —
+  // `NationalSemanticFilterUnreachableError`.
+  | "NATIONAL_SEMANTIC_FILTER_UNREACHABLE"
   // 410 — a national document its source withdrew: served
   // nowhere, no title/metadata/text. Two envelope shapes carry it: the typed
   // envelope on a direct document read (`details: {id, jurisdiction,
@@ -136,7 +141,8 @@ export class LexAPIError extends Error {
   /** The `error.details` object from the typed envelope, when present. */
   readonly details: unknown;
   /**
-   * Seconds to wait before retrying, when the server said so (429).
+   * Seconds to wait before retrying, when the server said so (429; also the
+   * 503 of an incomplete national semantic search).
    * Sourced from the `Retry-After` response HEADER first; the JSON
    * `retryAfter` body field is only a fallback because it historically
    * carried buggy epoch-seconds values (epoch-looking values are
@@ -225,9 +231,9 @@ export class LexAPIError extends Error {
         if (typeof record["message"] === "string") message = record["message"];
         details = record["details"];
       }
-      // JSON retryAfter fallback — only on a 429, and only when the header
-      // didn't provide one.
-      if (retryAfter === undefined && status === 429) {
+      // JSON retryAfter fallback — only on a 429 or an incomplete national
+      // semantic search 503, and only when the header didn't provide one.
+      if (retryAfter === undefined && (status === 429 || (status === 503 && code === "NATIONAL_SEMANTIC_UNAVAILABLE"))) {
         const jsonRetryAfter = readNumber(record["retryAfter"]) ?? readNumber(detailsField(details, "retryAfter"));
         if (jsonRetryAfter !== undefined) retryAfter = normalizeRetryAfterSeconds(jsonRetryAfter);
       }
@@ -276,6 +282,8 @@ export class LexAPIError extends Error {
         return new NationalSemanticNotEnabledError(message, status, details, retryAfter, context);
       case "NATIONAL_SEMANTIC_UNAVAILABLE":
         return new NationalSemanticUnavailableError(message, status, details, retryAfter, context);
+      case "NATIONAL_SEMANTIC_FILTER_UNREACHABLE":
+        return new NationalSemanticFilterUnreachableError(message, status, details, retryAfter, context);
       case "DOCUMENT_WITHDRAWN":
         return new DocumentWithdrawnError(message, status, details, retryAfter, context);
       case "UPSTREAM_ERROR":
@@ -349,8 +357,12 @@ export class InvalidParamsError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    // Internal: lets a subclass (`NationalSemanticFilterUnreachableError`)
+    // keep its own `code` while still being `instanceof InvalidParamsError`.
+    // Not part of the public constructor contract.
+    code: ErrorCode = "INVALID_PARAMS",
   ) {
-    super("INVALID_PARAMS", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "InvalidParamsError";
   }
 
@@ -701,6 +713,52 @@ export class NationalSemanticUnavailableError extends ServiceUnavailableError {
 
   get jurisdiction(): string | undefined {
     return readString(bodyField(this.body, "jurisdiction"));
+  }
+
+  /**
+   * `"SEARCH_INCOMPLETE"` when the index could not complete this search for a
+   * temporary reason and there was nothing left to return (an empty answer
+   * would not have meant "no matches"). `retryAfter` is then the wait the
+   * server asked for — absent once the same search has repeatedly come back
+   * incomplete (try again later, or rephrase or narrow it). `undefined` on
+   * the plain "index unavailable" 503.
+   */
+  get partialReason(): string | undefined {
+    return readString(bodyField(this.body, "partialReason"));
+  }
+}
+
+/**
+ * 422 — the national semantic index cannot search this slice (jurisdiction,
+ * document kind and filters) completely and there is nothing left to return
+ * (`NATIONAL_SEMANTIC_FILTER_UNREACHABLE`, `partialReason:
+ * "SEARCH_INCOMPLETE"`). Not a "no matches" answer, and not temporary:
+ * retrying the same request gives the same answer, so it is never retried —
+ * rephrase the query or change the filters. Refunded in full. Extends
+ * `InvalidParamsError` (the request has to change) while `code`/`name` stay
+ * specific. Legacy-shape body — `jurisdiction` comes off `body`.
+ */
+export class NationalSemanticFilterUnreachableError extends InvalidParamsError {
+  static override readonly kind: string = "NationalSemanticFilterUnreachableError";
+
+  constructor(
+    message: string,
+    status = 422,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super(message, status, details, retryAfter, context, "NATIONAL_SEMANTIC_FILTER_UNREACHABLE");
+    this.name = "NationalSemanticFilterUnreachableError";
+  }
+
+  get jurisdiction(): string | undefined {
+    return readString(bodyField(this.body, "jurisdiction"));
+  }
+
+  /** `"SEARCH_INCOMPLETE"`. */
+  get partialReason(): string | undefined {
+    return readString(bodyField(this.body, "partialReason"));
   }
 }
 

@@ -81,7 +81,8 @@ console.log(batch.textUnavailable, batch.headers?.batch); // source counts — t
 const recent = await client.getRecentDocuments({ days: 7, documentType: "regulation" }); // one type; use search() for several
 const meta = await client.getDocumentMetadata({ celexNumber: "32016R0679" });
 const byUrl = await client.getDocumentByUrl({ url: "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32016R0679" });
-const resolved = await client.resolve("ECLI:EU:C:2020:559"); // → { celex: "62018CJ0311", resolvedVia: "ecli-corpus" }
+const resolved = await client.resolve("ECLI:EU:C:2020:559"); // → { celex: "62018CJ0311", resolvedVia: "ecli-corpus", verified: true }
+// ELIs resolve via "eli-corpus" or "eli-cellar"; resolvedVia "eli" + verified: false = unconfirmed pattern guess, resolve again later
 ```
 
 ### Text availability and languages
@@ -265,7 +266,16 @@ for await (const p of client.paginateNationalDocuments("AT", { q: "Datenschutz",
 const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei Bankgeschäften" }); // 5 credits
 for (const h of hits.results) console.log(h.document.documentKind, h.document.ecli, h.document.dateOfDocument);
 const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
+if (articles.partial) console.warn(articles.hint); // SEARCH_INCOMPLETE: results may be missing better matches
 ```
+
+**Incomplete national searches.** When the national index could not complete a semantic search,
+results may be incomplete: with hits left the answer carries `partial: true`,
+`partialReason: "SEARCH_INCOMPLETE"` and a `hint` (retry, or rephrase / change the filters). With
+nothing left to return it throws instead — `NationalSemanticUnavailableError` (503,
+`partialReason: "SEARCH_INCOMPLETE"`, `retryAfter` when a retry may help) or
+`NationalSemanticFilterUnreachableError` (422, not retryable as is). Both are refunded; an empty
+answer would not have meant "no matches".
 
 **One shape for every country (requires LexAPI API 2.8.0).** National documents have the same
 fields, types and formats in every jurisdiction, so code written for one country works for all of
@@ -489,7 +499,8 @@ try {
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
-| `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable; `.jurisdiction`; retry later |
+| `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable, or could not complete this search with nothing left to return (`.partialReason === "SEARCH_INCOMPLETE"`, `retryAfter` — absent once the same search has repeatedly come back incomplete, and then not retried); `.jurisdiction`; retry later |
+| `NationalSemanticFilterUnreachableError` (extends `InvalidParamsError`) | `NATIONAL_SEMANTIC_FILTER_UNREACHABLE` | 422 — the national index cannot search this slice (jurisdiction, document kind, filters) completely and there is nothing left to return; `.jurisdiction`, `.partialReason`; not retryable as is — rephrase the query or change the filters; refunded |
 | `TimeoutError` | `TIMEOUT` (504, 524; 503 from `getCounterparts`, with `.partial` / `.serverTimeoutMs`) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |

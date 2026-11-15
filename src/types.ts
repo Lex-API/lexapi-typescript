@@ -748,10 +748,20 @@ export interface DocumentMetadataResponse extends CreditedResponse, WithResponse
 export type IdentifierType = "celex" | "url" | "eli" | "ecli";
 
 /**
- * Which resolution path matched. `celex`/`url`/`eli` resolve purely from the
- * identifier; `ecli-corpus` / `eli-corpus` mean a corpus lookup answered.
+ * Which resolution path matched. `celex`/`url` resolve purely from the
+ * identifier; `ecli-corpus` / `eli-corpus` mean a corpus lookup answered;
+ * `eli-cellar` means the ELI was looked up in the Publications Office's
+ * Cellar register. `eli` means the CELEX was derived from the ELI's pattern
+ * alone (`verified: false` on servers that send `verified`).
  */
-export type ResolvedVia = "celex" | "url" | "eli" | "ecli-corpus" | "eli-corpus" | (string & {});
+export type ResolvedVia =
+  | "celex"
+  | "url"
+  | "eli"
+  | "ecli-corpus"
+  | "eli-corpus"
+  | "eli-cellar"
+  | (string & {});
 
 export interface ResolveResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
@@ -759,6 +769,15 @@ export interface ResolveResponse extends CreditedResponse, WithResponseHeaders {
   identifier: string;
   identifierType: IdentifierType;
   resolvedVia: ResolvedVia;
+  /**
+   * `true` when the corpus or Cellar confirmed the identifier → CELEX mapping.
+   * `false` when the CELEX was read off the identifier without a lookup:
+   * CELEX and URL inputs (resolve does not check that the document exists),
+   * and an ELI resolved from its pattern while Cellar was unreachable — that
+   * last kind may name a CELEX that does not exist, so resolve it again later.
+   * Absent on servers older than the field.
+   */
+  verified?: boolean;
   celex: string;
   urls: DocumentUrls;
 }
@@ -2360,6 +2379,12 @@ export interface NationalSemanticLegislationResult
 }
 
 /**
+ * Why a national semantic search answer is incomplete. `SEARCH_INCOMPLETE`:
+ * the national index could not complete the search.
+ */
+export type NationalSearchPartialReason = "SEARCH_INCOMPLETE" | (string & {});
+
+/**
  * `POST /{jurisdiction}/search/semantic` — national case-law semantic
  * search. `credits` is present on the body, like every other credit-metered
  * route, typed optional only via the shared `CreditedResponse` shape.
@@ -2375,6 +2400,17 @@ export interface NationalSemanticCaseLawResponse extends CreditedResponse, WithR
   hyde?: boolean;
   metadata?: Record<string, unknown>;
   hint?: string;
+  /**
+   * Present (`true`) only when the national index could not complete the
+   * search but some hits are left: the results may be missing better
+   * matches. `hint` says what may complete it — a retry, or a rephrased
+   * query / changed filters. When nothing is left to return the call fails
+   * instead: `NationalSemanticUnavailableError` (503) or
+   * `NationalSemanticFilterUnreachableError` (422).
+   */
+  partial?: true;
+  /** Present with `partial`. */
+  partialReason?: NationalSearchPartialReason;
   /** The jurisdiction's source attribution — always show this to users alongside results. */
   attribution?: string;
   tookMs?: number;
@@ -2392,6 +2428,17 @@ export interface NationalSemanticLegislationResponse extends CreditedResponse, W
   results: NationalSemanticLegislationResult[];
   metadata?: Record<string, unknown>;
   hint?: string;
+  /**
+   * Present (`true`) only when the national index could not complete the
+   * search but some hits are left: the results may be missing better
+   * matches. `hint` says what may complete it — a retry, or a rephrased
+   * query / changed filters. When nothing is left to return the call fails
+   * instead: `NationalSemanticUnavailableError` (503) or
+   * `NationalSemanticFilterUnreachableError` (422).
+   */
+  partial?: true;
+  /** Present with `partial`. */
+  partialReason?: NationalSearchPartialReason;
   attribution?: string;
   tookMs?: number;
   semanticUsage?: SemanticUsageInfo;
