@@ -26,7 +26,11 @@ export interface RetryOptions {
   maxRetries?: number;
   /** Exponential backoff base. Default 500 ms. */
   baseDelayMs?: number;
-  /** Cap on any single wait (computed or server-directed). Default 30 000 ms. */
+  /**
+   * Cap on any single wait (computed or server-directed). Default 30 000 ms.
+   * A cap below the server's requested wait (`Retry-After` / `retryAfter`)
+   * shortens that wait, so the retry may come too early.
+   */
   maxDelayMs?: number;
   /**
    * SDK contract §1.2 opt-in (default `false`): also retry the eight
@@ -305,6 +309,8 @@ export class HttpClient {
       serializedBody = JSON.stringify(body);
     }
 
+    // An incomplete national semantic search 503 is retried at most once per call.
+    let incompleteRetried = false;
     for (let attempt = 0; ; attempt++) {
       throwIfAborted(signal, method, path);
 
@@ -366,7 +372,13 @@ export class HttpClient {
         await sleep(fullJitterBackoff(attempt, baseDelayMs, maxDelayMs), signal, method, path);
         continue;
       }
-      if (attempt < maxRetries && shouldRetryStatus(error, { isGet, free, readOnly: options.idempotent === true && retryReadOnlyPosts })) {
+      const incomplete = error.status === 503 && isSearchIncomplete(error);
+      if (
+        attempt < maxRetries &&
+        !(incomplete && incompleteRetried) &&
+        shouldRetryStatus(error, { isGet, free, readOnly: options.idempotent === true && retryReadOnlyPosts })
+      ) {
+        if (incomplete) incompleteRetried = true;
         const waitMs =
           error.retryAfter !== undefined
             ? Math.min(error.retryAfter * 1000, maxDelayMs)
@@ -390,7 +402,7 @@ function shouldRetryStatus(
   if (status === 503 && isBudgetTimeout(error.body)) return false;
   // An incomplete national semantic search that the server no longer gives
   // a wait for has repeatedly come back incomplete: a retry would too.
-  if (status === 503 && isSearchIncomplete(error.body) && error.retryAfter === undefined) return false;
+  if (status === 503 && isSearchIncomplete(error) && error.retryAfter === undefined) return false;
   if (status === 429) return !(error instanceof RateLimitedError && error.quotaExhausted);
   if (NEVER_REACHED_STATUSES.has(status)) return true;
   if (ORIGIN_DEPENDENT_STATUSES.has(status)) {
@@ -405,10 +417,11 @@ function isBudgetTimeout(body: unknown): boolean {
   return typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "TIMEOUT";
 }
 
-function isSearchIncomplete(body: unknown): boolean {
-  return (
-    typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "SEARCH_INCOMPLETE"
-  );
+/** `partialReason: "SEARCH_INCOMPLETE"` in `error.details` (typed envelope) or the top-level body (legacy shape). */
+function isSearchIncomplete(error: LexAPIError): boolean {
+  const field = (v: unknown): unknown =>
+    typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)["partialReason"] : undefined;
+  return (field(error.details) ?? field(error.body)) === "SEARCH_INCOMPLETE";
 }
 
 /** Read a body as text, restarting the inactivity timer on every chunk. */

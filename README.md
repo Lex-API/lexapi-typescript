@@ -273,7 +273,7 @@ if (articles.partial) console.warn(articles.hint); // SEARCH_INCOMPLETE: results
 results may be incomplete: with hits left the answer carries `partial: true`,
 `partialReason: "SEARCH_INCOMPLETE"` and a `hint` (retry, or rephrase / change the filters). With
 nothing left to return it throws instead — `NationalSemanticUnavailableError` (503,
-`partialReason: "SEARCH_INCOMPLETE"`, `retryAfter` when a retry may help) or
+`partialReason: "SEARCH_INCOMPLETE"`, `retryAfter` when a retry may help — retried at most once per call, and only with `retryReadOnlyPosts`) or
 `NationalSemanticFilterUnreachableError` (422, not retryable as is). Both are refunded; an empty
 answer would not have meant "no matches".
 
@@ -454,7 +454,7 @@ The SDK retries automatically **only when a retry cannot charge you twice** (the
 
 - **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
 - **App-origin** = the response carries a non-empty `X-LexAPI-Version` header or a `RateLimit-Limit` header (the API's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone is not enough. Anything else is treated as a proxy answer: the API may have charged the call and not refunded it, so a billed call is not retried.
-- **Wait:** `Retry-After` on any status (an empty or unparseable value counts as absent); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap; numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`.
+- **Wait:** `Retry-After` on any status (an empty or unparseable value counts as absent); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap (`retry.maxDelayMs`; a cap below the server's requested wait shortens it); numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`.
 
 **Timeout:** `timeoutMs` (default 95 s) is an *inactivity* limit per attempt: the longest the SDK waits for the next bytes — until the response head, then between body chunks (the timer restarts on every chunk), for JSON bodies and export streams alike. It is not a deadline for the whole call. On expiry you get `TimeoutError` with `code: "REQUEST_TIMEOUT"` (status 0). `fetch` cannot time the connect phase separately, so it counts inside the first window. 95 s lets the API's own 90 s limit on one live EUR-Lex fetch reach you as a typed, refunded 504; a request needing several upstream fetches can still exceed it.
 
@@ -500,7 +500,7 @@ try {
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
 | `ServiceUnavailableError` | `SERVICE_UNAVAILABLE` (derived) | 503 |
 | `NationalSemanticUnavailableError` (extends `ServiceUnavailableError`) | `NATIONAL_SEMANTIC_UNAVAILABLE` | 503 — a jurisdiction's semantic index is temporarily unreachable, or could not complete this search with nothing left to return (`.partialReason === "SEARCH_INCOMPLETE"`, `retryAfter` — absent once the same search has repeatedly come back incomplete, and then not retried); `.jurisdiction`; retry later |
-| `NationalSemanticFilterUnreachableError` (extends `InvalidParamsError`) | `NATIONAL_SEMANTIC_FILTER_UNREACHABLE` | 422 — the national index cannot search this slice (jurisdiction, document kind, filters) completely and there is nothing left to return; `.jurisdiction`, `.partialReason`; not retryable as is — rephrase the query or change the filters; refunded |
+| `NationalSemanticFilterUnreachableError` (extends `InvalidParamsError`) | `NATIONAL_SEMANTIC_FILTER_UNREACHABLE` | 422 — the national index cannot search this slice (jurisdiction, document kind, filters) completely and there is nothing left to return; a coverage limit, not a malformed request (the request may be valid; `.param` is absent); `.jurisdiction`, `.partialReason`; not retryable as is — rephrase the query or change the filters; refunded |
 | `TimeoutError` | `TIMEOUT` (504, 524; 503 from `getCounterparts`, with `.partial` / `.serverTimeoutMs`) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |

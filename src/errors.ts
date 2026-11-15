@@ -46,8 +46,10 @@ export type ErrorCode =
   // 409 — this jurisdiction has no semantic index to search (legacy shape,
   // top-level `jurisdiction`) — `NationalSemanticNotEnabledError`.
   | "NATIONAL_SEMANTIC_NOT_ENABLED"
-  // 503 — a jurisdiction's semantic index is temporarily unreachable
-  // (legacy shape, top-level `jurisdiction`) — `NationalSemanticUnavailableError`.
+  // 503 — a jurisdiction's semantic index is temporarily unreachable, or it
+  // could not complete this search with nothing left to return (`partialReason:
+  // "SEARCH_INCOMPLETE"`) (legacy shape, top-level `jurisdiction`) —
+  // `NationalSemanticUnavailableError`.
   | "NATIONAL_SEMANTIC_UNAVAILABLE"
   // 422 — the national semantic index cannot search this slice (jurisdiction,
   // document kind, filters) completely and there is nothing left to return
@@ -357,9 +359,11 @@ export class InvalidParamsError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
-    // Internal: lets a subclass (`NationalSemanticFilterUnreachableError`)
-    // keep its own `code` while still being `instanceof InvalidParamsError`.
-    // Not part of the public constructor contract.
+    /**
+     * @internal Lets a subclass (`NationalSemanticFilterUnreachableError`)
+     * keep its own `code` while still being `instanceof InvalidParamsError`.
+     * Not part of the public constructor contract.
+     */
     code: ErrorCode = "INVALID_PARAMS",
   ) {
     super(code, message, status, details, retryAfter, context);
@@ -724,7 +728,7 @@ export class NationalSemanticUnavailableError extends ServiceUnavailableError {
    * the plain "index unavailable" 503.
    */
   get partialReason(): string | undefined {
-    return readString(bodyField(this.body, "partialReason"));
+    return readString(detailsOrBodyField(this.details, this.body, "partialReason"));
   }
 }
 
@@ -736,7 +740,9 @@ export class NationalSemanticUnavailableError extends ServiceUnavailableError {
  * retrying the same request gives the same answer, so it is never retried —
  * rephrase the query or change the filters. Refunded in full. Extends
  * `InvalidParamsError` (the request has to change) while `code`/`name` stay
- * specific. Legacy-shape body — `jurisdiction` comes off `body`.
+ * specific — but the request may be perfectly valid: this is a coverage
+ * limit of the index, not a malformed request, and `param` is absent.
+ * Legacy-shape body — `jurisdiction` comes off `body`.
  */
 export class NationalSemanticFilterUnreachableError extends InvalidParamsError {
   static override readonly kind: string = "NationalSemanticFilterUnreachableError";
@@ -758,7 +764,7 @@ export class NationalSemanticFilterUnreachableError extends InvalidParamsError {
 
   /** `"SEARCH_INCOMPLETE"`. */
   get partialReason(): string | undefined {
-    return readString(bodyField(this.body, "partialReason"));
+    return readString(detailsOrBodyField(this.details, this.body, "partialReason"));
   }
 }
 

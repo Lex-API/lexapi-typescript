@@ -79,9 +79,14 @@ signature or field changes meaning. Type-level changes to check when upgrading:
 
 ### Changed
 
+- A `422 NATIONAL_SEMANTIC_FILTER_UNREACHABLE` is now a `NationalSemanticFilterUnreachableError`,
+  a subclass of `InvalidParamsError` (previously the base `LexAPIError`): `catch` blocks for
+  `InvalidParamsError` now also see it. The request may be valid — it is a coverage limit of the
+  national index, not a malformed request, and `.param` is absent.
 - An incomplete national semantic search `503` without a retry wait (the same search has
   repeatedly come back incomplete) is not retried automatically, even with `retryReadOnlyPosts`.
-  With a wait it keeps the existing 503 policy. A `503` is never a `RateLimitedError`, whatever
+  With a wait it keeps the existing 503 policy, but is retried at most once per call. A
+  `retry.maxDelayMs` below the server's wait shortens that wait. A `503` is never a `RateLimitedError`, whatever
   `Retry-After` / `retryAfter` it carries — only a `429` is.
 
 ## [0.3.0] — 2026-10-28

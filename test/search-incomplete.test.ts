@@ -114,7 +114,7 @@ describe("NATIONAL_SEMANTIC_UNAVAILABLE with SEARCH_INCOMPLETE (503)", () => {
   it("is a NationalSemanticUnavailableError, never a RateLimitedError, with retryAfter and partialReason", async () => {
     const fetchMock = fetchSequence(jsonResponse(503, INCOMPLETE_503, { ...APP, "retry-after": "10" }));
 
-    const e = (await caught(client(fetchMock).nationalSemanticSearch("CZ", { query: "náhrada škody" }))) as LexAPIError;
+    const e = (await caught(client(fetchMock).nationalSemanticSearch("CZ", { query: "liability for damage" }))) as LexAPIError;
 
     expect(isLexAPIError(e, NationalSemanticUnavailableError)).toBe(true);
     expect(isLexAPIError(e, ServiceUnavailableError)).toBe(true);
@@ -130,7 +130,7 @@ describe("NATIONAL_SEMANTIC_UNAVAILABLE with SEARCH_INCOMPLETE (503)", () => {
   it("reads retryAfter from the body when the header is missing", async () => {
     const fetchMock = fetchSequence(jsonResponse(503, INCOMPLETE_503, APP));
 
-    const e = (await caught(client(fetchMock).nationalSemanticSearch("CZ", { query: "náhrada škody" }))) as LexAPIError;
+    const e = (await caught(client(fetchMock).nationalSemanticSearch("CZ", { query: "liability for damage" }))) as LexAPIError;
 
     expect(e).toBeInstanceOf(NationalSemanticUnavailableError);
     expect(e.retryAfter).toBe(10);
@@ -142,7 +142,7 @@ describe("NATIONAL_SEMANTIC_UNAVAILABLE with SEARCH_INCOMPLETE (503)", () => {
       jsonResponse(200, { success: true, jurisdiction: "CZ", resultCount: 0, results: [] }),
     );
 
-    const result = await client(fetchMock, true).nationalSemanticSearch("CZ", { query: "náhrada škody" });
+    const result = await client(fetchMock, true).nationalSemanticSearch("CZ", { query: "liability for damage" });
 
     expect(result.success).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -154,11 +154,50 @@ describe("NATIONAL_SEMANTIC_UNAVAILABLE with SEARCH_INCOMPLETE (503)", () => {
       jsonResponse(200, { success: true, jurisdiction: "CZ", resultCount: 0, results: [] }),
     );
 
-    const e = (await caught(client(fetchMock, true).nationalSemanticSearch("CZ", { query: "náhrada škody" }))) as LexAPIError;
+    const e = (await caught(client(fetchMock, true).nationalSemanticSearch("CZ", { query: "liability for damage" }))) as LexAPIError;
 
     expect(e).toBeInstanceOf(NationalSemanticUnavailableError);
     expect(e.retryAfter).toBeUndefined();
     expect((e as NationalSemanticUnavailableError).partialReason).toBe("SEARCH_INCOMPLETE");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("is retried at most once per call, even with retryReadOnlyPosts and maxRetries > 1", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(503, { ...INCOMPLETE_503, retryAfter: 0 }, { ...APP, "retry-after": "0" }),
+      jsonResponse(503, { ...INCOMPLETE_503, retryAfter: 0 }, { ...APP, "retry-after": "0" }),
+      jsonResponse(200, { success: true, jurisdiction: "CZ", resultCount: 0, results: [] }),
+    );
+
+    const e = await caught(client(fetchMock, true).nationalSemanticSearch("CZ", { query: "liability for damage" }));
+
+    expect(e).toBeInstanceOf(NationalSemanticUnavailableError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads partialReason from typed-envelope details too (no wait: not retried)", async () => {
+    const fetchMock = fetchSequence(
+      jsonResponse(
+        503,
+        {
+          success: false,
+          error: {
+            code: "NATIONAL_SEMANTIC_UNAVAILABLE",
+            message: "National semantic search incomplete",
+            details: { jurisdiction: "CZ", partialReason: "SEARCH_INCOMPLETE" },
+          },
+        },
+        APP,
+      ),
+      jsonResponse(200, { success: true, jurisdiction: "CZ", resultCount: 0, results: [] }),
+    );
+
+    const e = (await caught(
+      client(fetchMock, true).nationalSemanticSearch("CZ", { query: "liability for damage" }),
+    )) as NationalSemanticUnavailableError;
+
+    expect(e).toBeInstanceOf(NationalSemanticUnavailableError);
+    expect(e.partialReason).toBe("SEARCH_INCOMPLETE");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -236,6 +275,7 @@ describe("NATIONAL_SEMANTIC_FILTER_UNREACHABLE (422)", () => {
     expect(e.jurisdiction).toBe("DE");
     expect(e.partialReason).toBe("SEARCH_INCOMPLETE");
     expect(e.retryAfter).toBeUndefined();
+    expect(e.param).toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
