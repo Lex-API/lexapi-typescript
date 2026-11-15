@@ -220,8 +220,9 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
  *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
  * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
- *   `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is
- *   never read.
+ *   `RateLimit-Reset` and the JSON `retryAfter` field; on a 503
+ *   `NATIONAL_SEMANTIC_UNAVAILABLE`, the JSON `retryAfter` field.
+ *   `X-RateLimit-*` is never read.
  */
 export class HttpClient {
   readonly #apiKey: string;
@@ -479,7 +480,8 @@ export async function parseErrorResponse(response: Response, touch?: () => void)
     body = undefined;
   }
   // §1.2 retry-after resolution, steps 1–2 (step 3, the JSON field, is
-  // applied in fromResponse on a 429; a quota 429 drops the value).
+  // applied in fromResponse on a 429 and a NATIONAL_SEMANTIC_UNAVAILABLE 503;
+  // a quota 429 drops the value).
   const hint =
     headerRetryAfterSeconds(response) ??
     (response.status === 429 ? resetHeaderSeconds(response, "ratelimit-reset") : undefined);
