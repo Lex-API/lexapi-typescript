@@ -13,7 +13,7 @@ import type { Language } from "./types.js";
 export type ExportListFilter = string | ReadonlyArray<string>;
 
 /**
- * Filters for `GET /export` (API 2.3.0, lex-api #303). List values are sent
+ * Filters for `GET /export` (API 2.3.0). List values are sent
  * comma-separated and ORed.
  */
 export interface ExportParams {

@@ -175,9 +175,8 @@ the `credits` block, like every other credit-metered route.
 
 ## [0.2.0] — 2026-10-26
 
-Full re-sync with the LexAPI API (validated against lex-api `main` @ `633eb67`, PR #298, and
-`openapi.yaml` / `docs.md` at that commit). Every endpoint, parameter, response field and error shape
-was audited against the spec **and** the server controllers.
+Full re-sync with the LexAPI API (`openapi.yaml` / `docs.md` as of this release). Every endpoint,
+parameter, response field and error shape was checked against the spec and the API's behaviour.
 
 ### Added
 
@@ -279,33 +278,32 @@ was audited against the spec **and** the server controllers.
   the `exports` map now points `require` at `index.d.cts`.
 - Legacy error bodies dropped their `details` (e.g. which `/search` parameter failed validation).
 - Docs/README: the export tier gate is a `403` (not `402`) and covers BUSINESS, SCALE and
-  ENTERPRISE; tier limits include SCALE; "not yet published" and "requires lex-api PR #72" notes
+  ENTERPRISE; tier limits include SCALE; "not yet published" and "requires a server release" notes
   removed; webhook ceilings updated.
 - Export streams never report a failed export as complete. A `_done` trailer with
   `complete: false`, or any line whose only key is `_error`, now throws `IncompleteExportError`
   (after the rows that did arrive) and leaves `stream.complete` false; before, any `_done` line
   counted as complete and an `_error` line was yielded as an `ExportRow`. The error line's body is
   on the exception's `details` and on the new `stream.error`. Unknown `_done` fields
-  (`truncatedBy`, `credits`) are kept on `stream.done`. (PLAN.md §1.8; lex-api #303.)
-- A top-level string `code` on a legacy-shape error body (lex-api #304 adds it next to the text
-  `error`) is now the error's `code`, ahead of the status-derived one. A 429 with
+  (`truncatedBy`, `credits`) are kept on `stream.done`. (PLAN.md §1.8.)
+- A top-level string `code` on a legacy-shape error body (sent next to the text `error`) is now
+  the error's `code`, ahead of the status-derived one. A 429 with
   `code: "QUOTA_EXHAUSTED"` (a legacy plan's used-up daily or monthly-semantic quota) is a
   `RateLimitedError` with `code === "QUOTA_EXHAUSTED"`, `quotaExhausted` true, `retryAfter`
   `undefined` and `resetsAt` from the body's `resetsAt`; it is never retried. `QUOTA_EXHAUSTED`
   joins `ErrorCode`. Servers without the `code` are still recognised by the old shape check.
   (PLAN.md §1.2/§1.3.)
-- Export parameters for API 2.3.0 (lex-api #303): `documentTypeCode` (a type family) and
+- Export parameters for API 2.3.0: `documentTypeCode` (a type family) and
   `changedSince` (rows whose text changed); `fetchedSince` / `changedSince` also take a `Date`
   (sent as UTC). A `limit` that is not a positive integer throws `RangeError` before the request
   (the API answers 400). `ExportDoneInfo` types `truncatedBy` and `credits`. Docs describe the
-  per-row billing and the filter semantics of API 2.3.0. **Publish only after lex-api #303 is
-  deployed.**
+  per-row billing and the filter semantics of API 2.3.0.
 - `stream.truncated` reads `_done.truncated` first once the trailer has been read. From API
   2.3.0 that flag is authoritative: set when matching rows remain unreached (`truncatedBy`:
   `limit`, `max_rows`, `credits` or `recovered` — both join the type) and never derived from the row
   count. The `X-Export-Truncated` header and `_meta.truncated` come from an up-front count that
   may be a minute old and never caps the stream, so they are now only the fallback before the
-  trailer arrives. (PLAN.md §1.8; lex-api #303.)
+  trailer arrives. (PLAN.md §1.8.)
 
 ### Changed
 
@@ -320,7 +318,7 @@ Retries, timeouts and error codes now follow the shared SDK contract (PLAN.md §
   timeout): **free calls only** (`getInfo`, webhook reads). Never: quota 429, 4xx, 500.
   0.1 retried every 502/503/504 and every network error on a GET, including when a proxy answered after the API
   had charged the call (no refund), and never retried a POST that provably never left the machine.
-- **App-origin** = a non-empty `X-LexAPI-Version` header (lex-api #299 on) or a `RateLimit-Limit` header (the
+- **App-origin** = a non-empty `X-LexAPI-Version` header or a `RateLimit-Limit` header (the
   app's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone
   is not enough.
 - **New opt-in `retry.retryReadOnlyPosts`** (default off): the eight read-only POSTs (`search`, `getDocument`,

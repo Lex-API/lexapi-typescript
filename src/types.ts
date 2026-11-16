@@ -1,8 +1,6 @@
 /**
  * Hand-curated types mirroring LexAPI's `openapi.yaml` (LexAPI 2.0.0) and
- * `docs.md`, cross-checked against the server's controllers.
- *
- * Validated against: lex-api `main` @ 633eb67 (2026-10-26, PR #298).
+ * `docs.md`, cross-checked against the API's behaviour.
  *
  * Conventions:
  * - `type: [X, 'null']` becomes `X | null`; properties outside a `required`
@@ -660,8 +658,8 @@ export interface RecentDocumentsParams {
   domain?: Domain;
   /**
    * ONE subdomain. A subdomain filter sends the request to EUR-Lex result
-   * pages, where EUR-Lex reads only the first `DTS_SUBDOM` value
-   * (lex-api `server/utils/urlBuilder.js`), so the SDK accepts a single value.
+   * pages, where EUR-Lex reads only the first `DTS_SUBDOM` value, so the SDK
+   * accepts a single value.
    */
   subdomain?: Subdomain;
   /** Result language (default `en`). */

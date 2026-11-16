@@ -184,7 +184,7 @@ export function isNeverReachedError(error: unknown, depth = 0): boolean {
 
 /**
  * App-origin response (SDK contract §1.2): it carries a non-empty
- * `X-LexAPI-Version` header (every app response, lex-api #299 on) or a
+ * `X-LexAPI-Version` header (every app response) or a
  * `RateLimit-Limit` header (the app's per-key rate limiter sets `RateLimit-*`
  * on every billable app response; proxies never do). A JSON body with an
  * `error` member is NOT enough on its own. Anything else is treated as
