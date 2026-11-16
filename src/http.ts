@@ -26,7 +26,11 @@ export interface RetryOptions {
   maxRetries?: number;
   /** Exponential backoff base. Default 500 ms. */
   baseDelayMs?: number;
-  /** Cap on any single wait (computed or server-directed). Default 30 000 ms. */
+  /**
+   * Cap on any single wait (computed or server-directed). Default 30 000 ms.
+   * A cap below the server's requested wait (`Retry-After` / `retryAfter`)
+   * shortens that wait, so the retry may come too early.
+   */
   maxDelayMs?: number;
   /**
    * SDK contract §1.2 opt-in (default `false`): also retry the eight
@@ -216,8 +220,9 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
  *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
  * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
- *   `RateLimit-Reset` and the JSON `retryAfter` field. `X-RateLimit-*` is
- *   never read.
+ *   `RateLimit-Reset` and the JSON `retryAfter` field; on a 503
+ *   `NATIONAL_SEMANTIC_UNAVAILABLE`, the JSON `retryAfter` field.
+ *   `X-RateLimit-*` is never read.
  */
 export class HttpClient {
   readonly #apiKey: string;
@@ -305,6 +310,8 @@ export class HttpClient {
       serializedBody = JSON.stringify(body);
     }
 
+    // An incomplete national semantic search 503 is retried at most once per call.
+    let incompleteRetried = false;
     for (let attempt = 0; ; attempt++) {
       throwIfAborted(signal, method, path);
 
@@ -366,7 +373,13 @@ export class HttpClient {
         await sleep(fullJitterBackoff(attempt, baseDelayMs, maxDelayMs), signal, method, path);
         continue;
       }
-      if (attempt < maxRetries && shouldRetryStatus(error, { isGet, free, readOnly: options.idempotent === true && retryReadOnlyPosts })) {
+      const incomplete = error.status === 503 && isSearchIncomplete(error);
+      if (
+        attempt < maxRetries &&
+        !(incomplete && incompleteRetried) &&
+        shouldRetryStatus(error, { isGet, free, readOnly: options.idempotent === true && retryReadOnlyPosts })
+      ) {
+        if (incomplete) incompleteRetried = true;
         const waitMs =
           error.retryAfter !== undefined
             ? Math.min(error.retryAfter * 1000, maxDelayMs)
@@ -388,6 +401,9 @@ function shouldRetryStatus(
   // A server-side budget timeout answered as a partial 503 would hit the same
   // budget again: leave the retry (or a narrower request) to the caller.
   if (status === 503 && isBudgetTimeout(error.body)) return false;
+  // An incomplete national semantic search that the server no longer gives
+  // a wait for has repeatedly come back incomplete: a retry would too.
+  if (status === 503 && isSearchIncomplete(error) && error.retryAfter === undefined) return false;
   if (status === 429) return !(error instanceof RateLimitedError && error.quotaExhausted);
   if (NEVER_REACHED_STATUSES.has(status)) return true;
   if (ORIGIN_DEPENDENT_STATUSES.has(status)) {
@@ -400,6 +416,13 @@ function shouldRetryStatus(
 
 function isBudgetTimeout(body: unknown): boolean {
   return typeof body === "object" && body !== null && (body as Record<string, unknown>)["partialReason"] === "TIMEOUT";
+}
+
+/** `partialReason: "SEARCH_INCOMPLETE"` in `error.details` (typed envelope) or the top-level body (legacy shape). */
+function isSearchIncomplete(error: LexAPIError): boolean {
+  const field = (v: unknown): unknown =>
+    typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)["partialReason"] : undefined;
+  return (field(error.details) ?? field(error.body)) === "SEARCH_INCOMPLETE";
 }
 
 /** Read a body as text, restarting the inactivity timer on every chunk. */
@@ -457,7 +480,8 @@ export async function parseErrorResponse(response: Response, touch?: () => void)
     body = undefined;
   }
   // §1.2 retry-after resolution, steps 1–2 (step 3, the JSON field, is
-  // applied in fromResponse on a 429; a quota 429 drops the value).
+  // applied in fromResponse on a 429 and a NATIONAL_SEMANTIC_UNAVAILABLE 503;
+  // a quota 429 drops the value).
   const hint =
     headerRetryAfterSeconds(response) ??
     (response.status === 429 ? resetHeaderSeconds(response, "ratelimit-reset") : undefined);

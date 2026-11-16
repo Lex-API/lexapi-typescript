@@ -63,6 +63,31 @@ signature or field changes meaning. Type-level changes to check when upgrading:
 - **`InvalidParamsError.param` / `.value` / `.allowed`**: the refused parameter, the value sent
   (when the server echoes it) and its allowed values, read
   from either error shape. **`TimeoutError.partial` / `.serverTimeoutMs`** for a budget timeout.
+- **Incomplete national semantic searches**: `partial` (`true`) and `partialReason`
+  (`NationalSearchPartialReason`, `"SEARCH_INCOMPLETE"`) on `NationalSemanticCaseLawResponse` and
+  `NationalSemanticLegislationResponse` — the national index could not complete the search and the
+  results may be missing better matches; `hint` says whether a retry or a rephrased query / changed
+  filters may complete it. With nothing left to return the call fails instead:
+  `NationalSemanticUnavailableError` (503) now exposes `.partialReason` (`"SEARCH_INCOMPLETE"`), and
+  its `retryAfter` falls back to the body's `retryAfter` when the header is missing.
+- **`NationalSemanticFilterUnreachableError`** (extends `InvalidParamsError`, code
+  `NATIONAL_SEMANTIC_FILTER_UNREACHABLE`, 422, `.jurisdiction`, `.partialReason`): the national index
+  cannot search this slice (jurisdiction, document kind, filters) completely and there is nothing
+  left to return. Not retryable as is — rephrase the query or change the filters. Refunded.
+- **`/resolve`**: optional `ResolveResponse.verified` and the `ResolvedVia` value `"eli-cellar"`
+  (servers that send them; `verified: false` means the CELEX was not confirmed by a lookup).
+
+### Changed
+
+- A `422 NATIONAL_SEMANTIC_FILTER_UNREACHABLE` is now a `NationalSemanticFilterUnreachableError`,
+  a subclass of `InvalidParamsError` (previously the base `LexAPIError`): `catch` blocks for
+  `InvalidParamsError` now also see it. The request may be valid — it is a coverage limit of the
+  national index, not a malformed request, and `.param` is absent.
+- An incomplete national semantic search `503` without a retry wait (the same search has
+  repeatedly come back incomplete) is not retried automatically, even with `retryReadOnlyPosts`.
+  With a wait it keeps the existing 503 policy, but is retried at most once per call. A
+  `retry.maxDelayMs` below the server's wait shortens that wait. A `503` is never a `RateLimitedError`, whatever
+  `Retry-After` / `retryAfter` it carries — only a `429` is.
 
 ## [0.3.0] — 2026-10-28
 
