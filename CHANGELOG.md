@@ -293,7 +293,8 @@ was audited against the spec **and** the server controllers.
   counted as complete and an `_error` line was yielded as an `ExportRow`. The error line's body is
   on the exception's `details` and on the new `stream.error`. Unknown `_done` fields
   (`truncatedBy`, `credits`) are kept on `stream.done`. (PLAN.md §1.8.)
-- A top-level string `code` on a legacy-shape error body (sent next to the text `error`) is now the error's `code`, ahead of the status-derived one. A 429 with
+- A top-level string `code` on a legacy-shape error body (sent next to the text `error`) is now
+  the error's `code`, ahead of the status-derived one. A 429 with
   `code: "QUOTA_EXHAUSTED"` (a legacy plan's used-up daily or monthly-semantic quota) is a
   `RateLimitedError` with `code === "QUOTA_EXHAUSTED"`, `quotaExhausted` true, `retryAfter`
   `undefined` and `resetsAt` from the body's `resetsAt`; it is never retried. `QUOTA_EXHAUSTED`
