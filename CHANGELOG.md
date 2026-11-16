@@ -5,6 +5,12 @@ versioning: [SemVer](https://semver.org/) — while the package is `0.x`, a **mi
 breaking changes (documented below with a migration note); `npm install @lexapi/client@^0.1.0` never
 picks up `0.2.0` on its own.
 
+## [0.4.1] — unreleased
+
+### Changed
+
+- Shorter README. No API changes.
+
 ## [0.4.0] — 2026-11-11
 
 Cross-border citation graph. **Requires LexAPI API 2.13.0.** Additive at runtime: no existing
