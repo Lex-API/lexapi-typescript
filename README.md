@@ -374,7 +374,7 @@ app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (r
 
 **Filters:** `documentType` matches the stored label exactly, ignoring case; `documentTypeCode: "regulation"` selects the family (incl. implementing and delegated regulations); `author` matches whole values; `dateFrom` / `dateTo` are `YYYY-MM-DD`; `changedSince` returns rows whose text changed (the cheapest incremental sync) and `fetchedSince` rows written to at all — both an ISO date or a date-time with a timezone, or a `Date`; `limit` is a positive integer (anything else throws `RangeError`).
 
-Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)).
+Licensing: exported content may not be used to train or evaluate ML models without a separate licence ([Terms §6](https://lex-api.com/terms?ref=npm-sdk#acceptable-use)). For training data, [Arieta Data](https://data.arietalabs.com/?ref=npm-sdk), a sister product from Arieta Labs, licenses datasets drawn from the same corpus for training, retrieval and evaluation.
 
 ```ts
 const stream = await client.export({ documentTypeCode: "regulation", dateFrom: "2024-01-01", limit: 10_000 });
