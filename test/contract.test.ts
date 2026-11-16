@@ -375,7 +375,7 @@ describe("§1.8 export stream", () => {
   });
 });
 
-describe("§1.2 never-reached transport codes (round 2 — R5)", () => {
+describe("§1.2 never-reached transport codes", () => {
   const billed = async (cause: unknown) => {
     const fetchMock = fetchSequence(Object.assign(new TypeError("fetch failed"), { cause }) as unknown as Response, OK());
     await http(fetchMock).requestJson({ method: "POST", path: "/webhooks", body: {} }).catch(() => undefined);
