@@ -1,5 +1,5 @@
 /**
- * National-law fixtures in the API 2.8.0 shape (`NationalDocument` /
+ * National-law fixtures in the API 2.8.0 shape (plus 2.9.0's `content.textSource` / `content.ocr`) (`NationalDocument` /
  * `NationalDocumentSummary` / `NationalDecision` / `NationalDocumentContent` /
  * `NationalArticle`): every documented field always present, `null` / `[]`
  * when the source has nothing; source extras only under
@@ -65,6 +65,8 @@ export const AT_ACT: NationalDocument = {
     textLanguages: ["de"],
     textLanguage: null,
     embeddedForeignText: false,
+    textSource: null,
+    ocr: null,
     repeal: null,
     source: { system: "RIS", gesetzesnummer: "10001597" },
     details: { kundmachungsorgan: "BGBl. I Nr. 165/1999" },
@@ -99,6 +101,8 @@ export const DE_DECISION: NationalDocument = {
     textLanguages: ["de"],
     textLanguage: null,
     embeddedForeignText: false,
+    textSource: null,
+    ocr: null,
     repeal: null,
     source: { system: "rechtsprechung-im-internet.de", docId: "KBRE202550123" },
     // The source's own field names stay here, unchanged — read `decision` instead.

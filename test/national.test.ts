@@ -131,7 +131,7 @@ describe("national document shape (API 2.8.0 — one shape for every jurisdictio
     "id", "jurisdiction", "language", "documentKind", "title", "documentType", "ecli", "eli",
     "dateOfDocument", "version", "fetchedAt", "validTo", "inForce",
   ].sort();
-  const CONTENT_KEYS = ["fullText", "articles", "textLanguages", "textLanguage", "embeddedForeignText", "repeal", "source", "details"].sort();
+  const CONTENT_KEYS = ["fullText", "articles", "textLanguages", "textLanguage", "embeddedForeignText", "textSource", "ocr", "repeal", "source", "details"].sort();
   const ARTICLE_KEYS = ["number", "title", "section", "text", "inForceFrom", "inForceTo", "details"].sort();
 
   it("an act: decision null, closed content/article key sets, null-filled summary fields", async () => {
