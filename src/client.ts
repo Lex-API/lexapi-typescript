@@ -77,7 +77,11 @@ export interface LexAPIOptions {
    * request that needs several upstream fetches can still exceed it.
    */
   timeoutMs?: number;
-  /** Injectable fetch (used for testing / polyfills). Defaults to global fetch. */
+  /**
+   * Injectable fetch (used for testing / polyfills). Defaults to global fetch.
+   * It is called with `redirect: "manual"` and must honour it: the SDK follows
+   * redirects itself, and only within the API origin.
+   */
   fetch?: typeof fetch;
   /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap; read-only POST 5xx retries are opt-in. */
   retry?: RetryOptions;
