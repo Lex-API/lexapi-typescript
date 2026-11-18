@@ -82,10 +82,10 @@ export interface ResponseHeaders {
   /**
    * API contract version the server implements (`X-LexAPI-Version`, e.g.
    * `2.1.0`). Sent on every response the LexAPI application itself produces
-   * (lex-api ≥ API 2.1.0) — its absence on an error means a proxy answered.
+   * (API 2.1.0 and later) — its absence on an error means a proxy answered.
    */
   apiVersion?: string;
-  /** Deployed build (`X-LexAPI-Release`, e.g. `2.1.0+633eb67`) — quote it in bug reports. */
+  /** Deployed build (`X-LexAPI-Release`, e.g. `2.1.0+abc1234`) — quote it in bug reports. */
   release?: string;
   /** Rows kept by the `/documents/recent` lenient language filter (`X-Language-Partial-Kept`). */
   languagePartialKept?: number;

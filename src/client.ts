@@ -71,10 +71,9 @@ export interface LexAPIOptions {
   baseUrl?: string;
   /**
    * Per-attempt timeout in milliseconds, covering the response body (for
-   * `export`: an idle timeout per read). Default 95_000 — enough for a
-   * single live EUR-Lex fetch (the API caps each at 90 s, then answers with
-   * a typed, refunded 504), and below Cloudflare's 100 s proxy timeout. A
-   * request that needs several upstream fetches can still exceed it.
+   * `export`: an idle timeout per read). The 95 s default sits above the
+   * API's 90 s deadline on document reads, so that timeout comes back as a
+   * typed, refunded 504; the CDN ends any wait at 100 s.
    */
   timeoutMs?: number;
   /**

@@ -18,7 +18,7 @@ export type ErrorCode =
   | "INVALID_URL"
   | "INVALID_PARAMS"
   | "RATE_LIMITED"
-  // 429 on a legacy daily-call plan: the quota is used up (lex-api #304).
+  // 429 on a legacy daily-call plan: the quota is used up (API 2.4.0).
   | "QUOTA_EXHAUSTED"
   | "TIER_FORBIDDEN"
   | "CREDITS_EXHAUSTED"
@@ -27,7 +27,7 @@ export type ErrorCode =
   | "INTERNAL"
   // Derived (not in the envelope enum): 401 has no typed code in the spec.
   | "UNAUTHORIZED"
-  // Derived: 503 (deploy drain / temporary unavailability) has no typed code.
+  // Derived: 503 (temporary unavailability) has no typed code.
   | "SERVICE_UNAVAILABLE"
   // SDK-side (SDK contract §1.3): transport failure — `NetworkError`.
   | "CONNECTION_ERROR"
@@ -146,8 +146,8 @@ export class LexAPIError extends Error {
    * Seconds to wait before retrying, when the server said so (429; also the
    * 503 of an incomplete national semantic search).
    * Sourced from the `Retry-After` response HEADER first; the JSON
-   * `retryAfter` body field is only a fallback because it historically
-   * carried buggy epoch-seconds values (epoch-looking values are
+   * `retryAfter` body field is only a fallback because it can carry
+   * epoch-seconds values (epoch-looking values are
    * normalized to a delta).
    */
   readonly retryAfter: number | undefined;
@@ -213,7 +213,7 @@ export class LexAPIError extends Error {
       } else if (typeof err === "string") {
         // Legacy bare {error: "<text>", message?, details?}: the string is
         // HUMAN TEXT, never a code (even when it looks like a slug). The code
-        // is the top-level string `code` when present (lex-api #304), else
+        // is the top-level string `code` when present (API 2.4.0), else
         // the status. `details` (validation lists) is kept.
         if (typeof record["code"] === "string" && record["code"] !== "") {
           code = record["code"];
@@ -410,7 +410,7 @@ export class AuthenticationError extends LexAPIError {
  * 429 — per-minute rate limit (`RATE_LIMITED`), or, on legacy daily plans,
  * the used-up daily / monthly-semantic quota (`QUOTA_EXHAUSTED`; `code`
  * tells them apart). 429s use the legacy `{error, message, retryAfter}` body
- * (with a top-level `code` from lex-api #304 on); the `Retry-After` header is
+ * (with a top-level `code` from API 2.4.0 on); the `Retry-After` header is
  * authoritative and is what `retryAfter` reads first.
  */
 export class RateLimitedError extends LexAPIError {
@@ -435,7 +435,7 @@ export class RateLimitedError extends LexAPIError {
   /**
    * `true` for a legacy-plan quota 429 (daily call quota, or the monthly
    * semantic quota) rather than the per-minute limiter (SDK contract §1.2):
-   * `code` is `QUOTA_EXHAUSTED`, or — servers before lex-api #304, which
+   * `code` is `QUOTA_EXHAUSTED`, or — servers before API 2.4.0, which
    * send no code — the body carries `usage.resetsAt` with neither a
    * `Retry-After` header nor a `retryAfter` body field. It cannot succeed
    * before `resetsAt`, so the SDK does not retry it and `retryAfter` is
@@ -644,7 +644,7 @@ export class TimeoutError extends LexAPIError {
 }
 
 /**
- * 503 — service temporarily unavailable (e.g. a deploy's drain window).
+ * 503 — service temporarily unavailable (e.g. while the service restarts).
  * Derived from the status (no typed code). Retried like 502/504.
  */
 export class ServiceUnavailableError extends LexAPIError {
@@ -793,7 +793,7 @@ export interface DocumentWithdrawnDetails {
  * charges anything (the credits/allowance refund rule already returns
  * every non-404 4xx-or-5xx). If you hold a cached copy of this document,
  * drop it — the source withdrew it for a reason that may include a legal
- * takedown or a pseudonymisation fix (see docs §7, no re-identification).
+ * takedown or a pseudonymisation fix (see Terms §7, no re-identification).
  */
 export class DocumentWithdrawnError extends LexAPIError {
   static override readonly kind: string = "DocumentWithdrawnError";
@@ -920,8 +920,8 @@ export function isLexAPIError<T extends LexAPIError = LexAPIError>(
 }
 
 /**
- * Normalize a JSON `retryAfter` body value. The field historically carried
- * buggy absolute epoch values instead of delta-seconds (pending server fix);
+ * Normalize a JSON `retryAfter` body value. The field can carry
+ * absolute epoch values instead of delta-seconds;
  * epoch-looking values are converted to a non-negative delta in seconds.
  */
 export function normalizeRetryAfterSeconds(value: number): number {
@@ -949,7 +949,7 @@ function detailsField(details: unknown, key: string): unknown {
 /** SDK contract §1.2 quota-429 test. */
 function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolean {
   if (detailsField(body, "code") === "QUOTA_EXHAUSTED") return true;
-  // Fallback for servers before lex-api #304 (no top-level code).
+  // Fallback for servers before API 2.4.0 (no top-level code).
   const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
   if (typeof resetsAt !== "string") return false;
   if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;

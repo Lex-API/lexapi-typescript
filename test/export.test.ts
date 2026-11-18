@@ -200,7 +200,7 @@ describe("export", () => {
   });
 });
 
-describe("export — server envelope shape (exportController @ 633eb67)", () => {
+describe("export — server envelope shape", () => {
   // The real server nests the envelope fields: {"_meta": {...}} / {"_done": {...}}.
   const REAL_META = JSON.stringify({
     _meta: {

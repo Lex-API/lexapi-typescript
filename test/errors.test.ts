@@ -149,7 +149,7 @@ describe("legacy bare envelope parsing", () => {
     expect(error.retryAfter).toBeLessThanOrEqual(13);
   });
 
-  it("normalizes a buggy epoch-seconds JSON retryAfter when no header is present", async () => {
+  it("normalizes an epoch-seconds JSON retryAfter when no header is present", async () => {
     const epochSeconds = Math.round(Date.now() / 1000) + 42;
     const error = await errorFrom(
       jsonResponse(429, { error: "Rate limit hit", retryAfter: epochSeconds }),

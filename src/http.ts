@@ -12,11 +12,9 @@ import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
 /**
- * 95 s per attempt: above the 90 s hard timeout the API puts on a single live
- * EUR-Lex fetch (so such a fetch ends in the server's typed, refunded 504
- * rather than a client abort that may still be billed), and below
- * Cloudflare's 100 s proxy timeout. A request that runs several upstream
- * fetches (Cellar, then the browser; a batch) can still exceed it.
+ * Per-attempt timeout. The 95 s default sits above the API's 90 s deadline on
+ * document reads, so that timeout comes back as a typed, refunded 504; the
+ * CDN ends any wait at 100 s.
  */
 export const DEFAULT_TIMEOUT_MS = 95_000;
 
@@ -33,10 +31,11 @@ export interface RetryOptions {
    */
   maxDelayMs?: number;
   /**
-   * SDK contract §1.2 opt-in (default `false`): also retry the eight
+   * SDK contract §1.2 opt-in (default `false`): also retry the ten
    * read-only POSTs (`search`, `getDocument`, `getDocumentsBatch`,
    * `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`,
-   * `semanticLegislationSearch`) on an **app-origin** 502/503/504 — those
+   * `semanticLegislationSearch`, `nationalSemanticSearch`,
+   * `nationalLegislationSemanticSearch`) on an **app-origin** 502/503/504 — those
    * are refunded in full, so the retry is billing-safe. App-origin = a
    * non-empty `X-LexAPI-Version` or a `RateLimit-Limit` header; anything
    * else is treated as a proxy answer and never retried on a billed call. Never applies to mutating calls (webhook
@@ -72,7 +71,7 @@ export interface RequestOptions {
   /** `Accept` header override (default `application/json`). */
   accept?: string;
   /**
-   * One of the eight read-only POSTs of SDK contract §1.2 — retried on
+   * One of the ten read-only POSTs of SDK contract §1.2 — retried on
    * app-origin 502/503/504 when `retryReadOnlyPosts` is on.
    */
   idempotent?: boolean;
@@ -228,7 +227,7 @@ export function isNeverReachedError(error: unknown, depth = 0): boolean {
 
 /**
  * App-origin response (SDK contract §1.2): it carries a non-empty
- * `X-LexAPI-Version` header (every app response, lex-api #299 on) or a
+ * `X-LexAPI-Version` header (every app response, API 2.1.0 on) or a
  * `RateLimit-Limit` header (the app's per-key rate limiter sets `RateLimit-*`
  * on every billable app response; proxies never do). A JSON body with an
  * `error` member is NOT enough on its own. Anything else is treated as
@@ -262,7 +261,7 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Caller `AbortSignal`: aborts the attempt and any retry wait; throws
  *   `RequestAbortedError`, never retried.
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
- *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
+ *   a retry cannot charge twice (see `shouldRetryStatus`).
  * - Redirects are followed only within the API origin (or to the same host
  *   over HTTPS on the default ports), at most five per attempt; any other
  *   redirect is refused with a `NetworkError`, so the API key is never sent
