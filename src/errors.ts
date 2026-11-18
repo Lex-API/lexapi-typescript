@@ -40,7 +40,7 @@ export type ErrorCode =
   | "REQUEST_TIMEOUT"
   // SDK-side: the caller's AbortSignal fired — `RequestAbortedError`.
   | "ABORTED"
-  // SDK-side: a 2xx whose non-empty body is not JSON — `InvalidResponseError`.
+  // SDK-side: a 2xx that is not the documented shape — `InvalidResponseError`.
   | "INVALID_RESPONSE"
   // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
   | "INCOMPLETE_EXPORT"
@@ -95,6 +95,12 @@ export interface LexAPIErrorContext {
   body?: unknown;
   /** Parsed response headers (rate limits, source, …). */
   headers?: ResponseHeaders;
+  /**
+   * For a body that is not JSON, its first 200 characters (code points). Raw
+   * response text; may contain document text; do not show to a model or log
+   * by default.
+   */
+  bodyExcerpt?: string;
 }
 
 /**
@@ -103,6 +109,18 @@ export interface LexAPIErrorContext {
  * Holds the error's class kinds, most specific first.
  */
 const ERROR_KINDS = Symbol.for("@lexapi/client.errorKinds");
+
+/**
+ * Response text kept off the error objects themselves: an error's
+ * `bodyExcerpt`, and the parsed `body` of an `InvalidResponseError`. Read and
+ * written through prototype accessors, so neither is an own property of the
+ * error: `console.log` (also with `%o`), `util.inspect` with `showHidden` or
+ * with `getters`, `JSON.stringify`, spread and `structuredClone` leave them
+ * out. `util.inspect` with `showHidden` and `getters` together does call the
+ * getters and shows them.
+ */
+const EXCERPTS = new WeakMap<object, string>();
+const INVALID_BODIES = new WeakMap<object, unknown>();
 
 function collectKinds(ctor: unknown): string[] {
   const kinds: string[] = [];
@@ -180,18 +198,40 @@ export class LexAPIError extends Error {
     this.retryAfter = retryAfter;
     this.body = context?.body;
     this.headers = context?.headers;
+    if (context?.bodyExcerpt !== undefined) EXCERPTS.set(this, context.bodyExcerpt);
     Object.defineProperty(this, ERROR_KINDS, { value: collectKinds(new.target), enumerable: false });
+  }
+
+  /**
+   * For a response body that is not JSON, its first 200 characters (code
+   * points); `undefined` otherwise. Raw response text; may contain document
+   * text; do not show to a model or log by default. Not an own property of
+   * the error, so `console.log` (also with `%o`), `util.inspect` with
+   * `showHidden` or with `getters`, `JSON.stringify`, spread and
+   * `structuredClone` leave it out (`util.inspect` with `showHidden` and
+   * `getters` together shows it); never part of `message`. Assigning to it
+   * replaces it (`undefined` clears it).
+   */
+  get bodyExcerpt(): string | undefined {
+    return EXCERPTS.get(this);
+  }
+
+  set bodyExcerpt(value: string | undefined) {
+    if (value === undefined) EXCERPTS.delete(this);
+    else EXCERPTS.set(this, value);
   }
 
   /**
    * Build the most specific error subclass for a non-2xx response.
    * Accepts both the typed envelope and the legacy bare `{error, message}` shape.
+   * `code` and `message` are read only when they are non-empty strings.
    */
   static fromResponse(
     status: number,
     body: unknown,
     headerRetryAfter?: number,
     headers?: ResponseHeaders,
+    bodyExcerpt?: string,
   ): LexAPIError {
     // SDK contract §1.3: unmapped statuses are INTERNAL.
     const statusCode = STATUS_TO_CODE[status];
@@ -205,36 +245,36 @@ export class LexAPIError extends Error {
     if (typeof body === "object" && body !== null) {
       const record = body as Record<string, unknown>;
       const err = record["error"];
-      if (typeof err === "object" && err !== null) {
+      const topCode = nonEmptyString(record["code"]);
+      const topMessage = nonEmptyString(record["message"]);
+      if (typeof err === "object" && err !== null && !Array.isArray(err)) {
         // Typed envelope: {success: false, error: {code, message, details}}
         const e = err as Record<string, unknown>;
-        if (typeof e["code"] === "string") {
-          code = e["code"];
+        const typed = nonEmptyString(e["code"]);
+        if (typed !== undefined) {
+          code = typed;
           typedCode = true;
         }
-        if (typeof e["message"] === "string") message = e["message"];
+        message = nonEmptyString(e["message"]) ?? message;
         details = e["details"];
-      } else if (typeof err === "string") {
+      } else if (typeof err === "string" && err !== "") {
         // Legacy bare {error: "<text>", message?, details?}: the string is
         // HUMAN TEXT, never a code (even when it looks like a slug). The code
         // is the top-level string `code` when present (API 2.4.0), else
         // the status. `details` (validation lists) is kept.
-        if (typeof record["code"] === "string" && record["code"] !== "") {
-          code = record["code"];
+        if (topCode !== undefined) {
+          code = topCode;
           typedCode = true;
         }
-        message =
-          typeof record["message"] === "string" && record["message"] !== err
-            ? `${err}: ${record["message"]}`
-            : err;
+        message = topMessage !== undefined && topMessage !== err ? `${err}: ${topMessage}` : err;
         details = record["details"];
       } else {
         // No `error` member ({message, details}): keep both when present.
-        if (typeof record["code"] === "string" && record["code"] !== "") {
-          code = record["code"];
+        if (topCode !== undefined) {
+          code = topCode;
           typedCode = true;
         }
-        if (typeof record["message"] === "string") message = record["message"];
+        message = topMessage ?? message;
         details = record["details"];
       }
       // JSON retryAfter fallback — only on a 429 or an incomplete national
@@ -250,7 +290,11 @@ export class LexAPIError extends Error {
         readString(usageField(record, "resetsAt"));
     }
 
-    const context: LexAPIErrorContext = { body, ...(headers ? { headers } : {}) };
+    const context: LexAPIErrorContext = {
+      body,
+      ...(headers ? { headers } : {}),
+      ...(bodyExcerpt !== undefined ? { bodyExcerpt } : {}),
+    };
     // An unmapped client status (409, 413, …) keeps code INTERNAL per the
     // contract but is not presented as a server failure: base class.
     if (!typedCode && statusCode === undefined && status < 500) {
@@ -928,20 +972,43 @@ export class RequestAbortedError extends LexAPIError {
 }
 
 /**
- * A 2xx response whose body was not the JSON LexAPI sends (e.g. an HTML page
- * from a proxy). `body` holds the first 500 characters of the raw text.
+ * A 2xx response that is not the documented shape: no body, a body that is
+ * not JSON (e.g. an HTML page from a proxy), JSON that is not an object,
+ * `success: false` without an error, or a list field that is missing, not a
+ * list, or holds items that are not objects. Thrown instead of returning an
+ * empty, "successful" result.
+ *
+ * The message names what was expected and what arrived and never quotes the
+ * body. For JSON of the wrong shape, `body` holds the parsed value; for a
+ * body that is not JSON, `bodyExcerpt` holds its first 200 characters (code
+ * points). Both are raw response content that may contain document text: do
+ * not show them to a model or log them by default. Neither is an own
+ * property of the error, so default logging does not print them.
  */
 export class InvalidResponseError extends LexAPIError {
   static override readonly kind: string = "InvalidResponseError";
 
-  constructor(message: string, status: number, rawText?: string, context?: LexAPIErrorContext) {
-    super("INVALID_RESPONSE", message, status, undefined, undefined, {
-      ...context,
-      body: rawText === undefined ? undefined : rawText.slice(0, 500),
-    });
+  constructor(message: string, status: number, body?: unknown, context?: LexAPIErrorContext) {
+    super("INVALID_RESPONSE", message, status, undefined, undefined, context);
+    // `body` is read through the prototype getter below, not stored on the error.
+    delete (this as { body?: unknown }).body;
+    if (body !== undefined) INVALID_BODIES.set(this, body);
     this.name = "InvalidResponseError";
   }
 }
+
+Object.defineProperty(InvalidResponseError.prototype, "body", {
+  get(this: object): unknown {
+    return INVALID_BODIES.get(this);
+  },
+  // Assigning replaces the stored value (`undefined` clears it), as on 0.4.0.
+  set(this: object, value: unknown): void {
+    if (value === undefined) INVALID_BODIES.delete(this);
+    else INVALID_BODIES.set(this, value);
+  },
+  enumerable: false,
+  configurable: true,
+});
 
 /**
  * An export stream ended (cleanly, at EOF) without its trailing `_done` line —
@@ -990,6 +1057,11 @@ export function normalizeRetryAfterSeconds(value: number): number {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** `value` when it is a non-empty string; anything else counts as absent. */
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 function readString(value: unknown): string | undefined {

@@ -1,0 +1,69 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`well-formed API errors are unchanged > 400 1`] = `
+{
+  "code": "INVALID_PARAMS",
+  "keys": [
+    "code",
+    "status",
+    "details",
+    "retryAfter",
+    "body",
+    "headers",
+    "name",
+  ],
+  "message": "[INVALID_PARAMS] Invalid criteria (HTTP 400)",
+  "name": "InvalidParamsError",
+}
+`;
+
+exports[`well-formed API errors are unchanged > 404 1`] = `
+{
+  "code": "NOT_FOUND",
+  "keys": [
+    "code",
+    "status",
+    "details",
+    "retryAfter",
+    "body",
+    "headers",
+    "name",
+  ],
+  "message": "[NOT_FOUND] Document not found (HTTP 404)",
+  "name": "NotFoundError",
+}
+`;
+
+exports[`well-formed API errors are unchanged > 418 1`] = `
+{
+  "code": "TEAPOT",
+  "keys": [
+    "code",
+    "status",
+    "details",
+    "retryAfter",
+    "body",
+    "headers",
+    "name",
+  ],
+  "message": "[TEAPOT] Short (HTTP 418)",
+  "name": "LexAPIError",
+}
+`;
+
+exports[`well-formed API errors are unchanged > 429 1`] = `
+{
+  "code": "RATE_LIMITED",
+  "keys": [
+    "code",
+    "status",
+    "details",
+    "retryAfter",
+    "body",
+    "headers",
+    "name",
+  ],
+  "message": "[RATE_LIMITED] Too many requests: Retry later (HTTP 429)",
+  "name": "RateLimitedError",
+}
+`;

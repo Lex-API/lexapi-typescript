@@ -45,6 +45,7 @@ export class WebhooksAPI {
     return this.call<WebhookListResponse>({
       method: "GET",
       path: "/webhooks",
+      shape: { lists: ["webhooks"] },
       free: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -113,6 +114,7 @@ export class WebhooksAPI {
     return this.call<WebhookDeleteResponse>({
       method: "DELETE",
       path: `/webhooks/${encodeURIComponent(id)}`,
+      shape: { allowEmpty: true },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -128,6 +130,7 @@ export class WebhooksAPI {
     return this.call<WebhookTestResponse>({
       method: "POST",
       path: `/webhooks/${encodeURIComponent(id)}/test`,
+      shape: { successFalseOk: true },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
     });
@@ -142,6 +145,7 @@ export class WebhooksAPI {
     return this.call<WebhookDeliveriesResponse>({
       method: "GET",
       path: `/webhooks/${encodeURIComponent(id)}/deliveries`,
+      shape: { lists: ["deliveries"] },
       free: true,
       query: { limit: params.limit, offset: params.offset },
       timeoutMs: options?.timeoutMs,

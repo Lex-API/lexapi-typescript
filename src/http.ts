@@ -81,6 +81,38 @@ export interface RequestOptions {
    * retried too (SDK contract §1.2).
    */
   free?: boolean;
+  /**
+   * @internal What a 2xx answer must look like (SDK contract §1.3); every
+   * JSON method checks that the body is a JSON object without `success: false`.
+   */
+  shape?: ResponseShape;
+}
+
+/** @internal A field a 2xx answer always carries, and its kind. */
+export interface RequiredField {
+  path: string;
+  kind: "object" | "string" | "boolean";
+}
+
+const KIND_NAMES = { object: "an object", string: "a string", boolean: "a boolean" } as const;
+
+/** @internal The documented shape of a 2xx JSON answer (SDK contract §1.3). */
+export interface ResponseShape {
+  /** List fields (dotted paths for nested ones): when present and not `null`, a list of objects. */
+  lists?: readonly string[];
+  /** List fields the endpoint always sends: missing or `null` is an error. Checked first. */
+  required?: readonly string[];
+  /**
+   * Fields the endpoint always sends, with their kind: missing or `null` (an
+   * empty string for `string`) is an error, and so is a value of another kind.
+   */
+  fields?: readonly RequiredField[];
+  /** Object fields that, when present and not `null`, must be a JSON object. */
+  optionalObjects?: readonly string[];
+  /** `success: false` is a normal answer here (`POST /webhooks/{id}/test`). */
+  successFalseOk?: boolean;
+  /** A 204 or an empty body is an empty result (`DELETE /webhooks/{id}`). */
+  allowEmpty?: boolean;
 }
 
 /** Context handed to a success handler; the attempt's inactivity timer is still running. */
@@ -306,7 +338,10 @@ export class HttpClient {
     return `HttpClient { baseUrl: '${this.opts.baseUrl}', apiKey: '[redacted]' }`;
   }
 
-  /** Perform a request and parse the JSON body (204 / empty body yields `{}`). */
+  /**
+   * Perform a request and parse the JSON body. A 2xx that is not the
+   * documented shape (`options.shape`) throws `InvalidResponseError`.
+   */
   async requestJson<T>(options: RequestOptions): Promise<T> {
     const { data } = await this.requestJsonWithResponse<T>(options);
     return data;
@@ -318,7 +353,7 @@ export class HttpClient {
    */
   async requestJsonWithResponse<T>(options: RequestOptions): Promise<{ data: T; response: Response }> {
     return this.execute(options, async (response, ctx) => ({
-      data: (await readJsonBody(response, ctx.touch)) as T,
+      data: (await readJsonBody(response, options.shape ?? {}, ctx.touch)) as T,
       response,
     }));
   }
@@ -528,40 +563,171 @@ function isSearchIncomplete(error: LexAPIError): boolean {
   return (field(error.details) ?? field(error.body)) === "SEARCH_INCOMPLETE";
 }
 
-/** Read a body as text, restarting the inactivity timer on every chunk. */
-async function readBodyText(response: Response, touch?: () => void): Promise<string> {
-  if (response.body === null || touch === undefined) return response.text();
+/** Read a body as bytes, restarting the inactivity timer on every chunk. */
+async function readBodyBytes(response: Response, touch?: () => void): Promise<Uint8Array> {
+  if (response.body === null || touch === undefined) return new Uint8Array(await response.arrayBuffer());
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parts: string[] = [];
+  const chunks: Uint8Array[] = [];
+  let length = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     touch();
-    parts.push(decoder.decode(value, { stream: true }));
+    chunks.push(value);
+    length += value.byteLength;
   }
-  parts.push(decoder.decode());
-  return parts.join("");
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/** Characters (code points) of a body that is not JSON kept on `bodyExcerpt` (never in a message). */
+const EXCERPT_CHARS = 200;
+/** Bytes decoded for the excerpt: 200 code points take at most 4 bytes each. */
+const EXCERPT_BYTES = EXCERPT_CHARS * 4;
+const NOT_JSON = Symbol("not JSON");
+
+/** Strict UTF-8 + JSON parse; `NOT_JSON` when either fails. */
+function parseJsonBytes(bytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return NOT_JSON;
+  }
 }
 
 /**
- * Read a JSON body (SDK contract §1.3): a 204 or an empty body is a
- * successful empty object; a non-empty non-JSON body is `InvalidResponseError`.
+ * The first 200 code points of a body, decoded as UTF-8 with replacement.
+ * Every decoded code point (a U+FFFD included) uses at least one byte and at
+ * most four, so the first 800 bytes decode to the same first 200.
  */
-async function readJsonBody(response: Response, touch?: () => void): Promise<unknown> {
-  if (response.status === 204) return {};
-  const text = await readBodyText(response, touch);
-  if (text.trim() === "") return {};
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new InvalidResponseError(
-      `Expected a JSON body (HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "none"})`,
-      response.status,
-      text,
-      { headers: parseResponseHeaders(response) },
+function excerptOf(bytes: Uint8Array): string | undefined {
+  if (bytes.byteLength === 0) return undefined;
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(0, EXCERPT_BYTES));
+  let out = "";
+  let count = 0;
+  for (const char of text) {
+    if (count++ === EXCERPT_CHARS) break;
+    out += char;
+  }
+  return out;
+}
+
+/** The `Content-Type` value before `;`, trimmed, at most 100 characters. */
+function mediaTypeOf(response: Response): string {
+  const value = response.headers.get("content-type") ?? "";
+  const media = Array.from(value.split(";", 1)[0]!.replace(/^[ \t]+|[ \t]+$/g, ""))
+    .slice(0, 100)
+    .join("");
+  return media === "" ? "no content type" : media;
+}
+
+function jsonKind(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value; // object | string | number | boolean (all JSON.parse yields)
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const MISSING = Symbol("missing");
+
+function lookup(body: Record<string, unknown>, path: string): unknown {
+  let value: unknown = body;
+  for (const key of path.split(".")) {
+    if (!isJsonObject(value) || !Object.prototype.hasOwnProperty.call(value, key)) return MISSING;
+    value = value[key];
+  }
+  return value;
+}
+
+/**
+ * What is wrong with a 2xx JSON object's documented fields, or `undefined`:
+ * required lists, then required fields, then optional objects, then lists.
+ */
+function shapeProblem(body: Record<string, unknown>, shape: ResponseShape): string | undefined {
+  const missing = (path: string): string => `Expected "${path}" in the response; it is missing`;
+  const wrongKind = (path: string, expected: RequiredField["kind"], value: unknown): string =>
+    `Expected "${path}" to be ${KIND_NAMES[expected]}, got ${jsonKind(value)}`;
+  for (const path of shape.required ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null) return missing(path);
+  }
+  for (const { path, kind } of shape.fields ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null || (kind === "string" && value === "")) return missing(path);
+    const ok = kind === "object" ? isJsonObject(value) : typeof value === kind;
+    if (!ok) return wrongKind(path, kind, value);
+  }
+  for (const path of shape.optionalObjects ?? []) {
+    const value = lookup(body, path);
+    if (value !== MISSING && value !== null && !isJsonObject(value)) return wrongKind(path, "object", value);
+  }
+  for (const path of shape.lists ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null) continue;
+    if (!Array.isArray(value)) return `Expected "${path}" to be a list, got ${jsonKind(value)}`;
+    for (let index = 0; index < value.length; index++) {
+      const item: unknown = value[index];
+      if (!isJsonObject(item)) {
+        return `Expected every item of "${path}" to be an object, got ${jsonKind(item)} at index ${index}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The API's error envelope: `error` is a JSON object or a non-empty string. */
+function hasErrorEnvelope(body: Record<string, unknown>): boolean {
+  const err = body["error"];
+  return isJsonObject(err) || (typeof err === "string" && err !== "");
+}
+
+/**
+ * Read a 2xx JSON body (SDK contract §1.3), or throw when it is not the
+ * documented shape: no body (unless `shape.allowEmpty`), a body that is not
+ * strict UTF-8 JSON, JSON that is not an object, `success: false` (the mapped
+ * API error when the body carries the error envelope; skipped with
+ * `shape.successFalseOk`), or a list field that is not a list of objects.
+ * No message quotes the body.
+ */
+async function readJsonBody(response: Response, shape: ResponseShape, touch?: () => void): Promise<unknown> {
+  const status = response.status;
+  const headers = parseResponseHeaders(response);
+  const invalid = (message: string, body?: unknown, bodyExcerpt?: string): InvalidResponseError =>
+    new InvalidResponseError(message, status, body, { headers, ...(bodyExcerpt !== undefined ? { bodyExcerpt } : {}) });
+  if (status === 204) {
+    discardBody(response);
+    if (shape.allowEmpty === true) return {};
+    throw invalid("Expected JSON, got no body");
+  }
+  const bytes = await readBodyBytes(response, touch);
+  if (bytes.byteLength === 0) {
+    if (shape.allowEmpty === true) return {};
+    throw invalid("Expected JSON, got no body");
+  }
+  const body = parseJsonBytes(bytes);
+  if (body === NOT_JSON) {
+    throw invalid(
+      `Expected JSON, got ${mediaTypeOf(response)} that does not parse as JSON (${bytes.byteLength} bytes)`,
+      undefined,
+      excerptOf(bytes),
     );
   }
+  if (!isJsonObject(body)) throw invalid(`Expected a JSON object, got ${jsonKind(body)}`, body);
+  if (body["success"] === false && shape.successFalseOk !== true) {
+    if (hasErrorEnvelope(body)) throw LexAPIError.fromResponse(status, body, undefined, headers);
+    throw invalid("Response reported success: false without an error", body);
+  }
+  const problem = shapeProblem(body, shape);
+  if (problem !== undefined) throw invalid(problem, body);
+  return body;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, method: string, path: string): void {
@@ -572,23 +738,20 @@ function throwIfAborted(signal: AbortSignal | undefined, method: string, path: s
 
 /** Parse a non-2xx response into the typed error hierarchy. */
 export async function parseErrorResponse(response: Response, touch?: () => void): Promise<LexAPIError> {
-  let body: unknown;
-  try {
-    const text = await readBodyText(response, touch);
-    body = text.trim() === "" ? undefined : (JSON.parse(text) as unknown);
-  } catch (cause) {
-    // A body that is not JSON (proxy HTML/text) leaves `body` undefined; an
-    // aborted or broken read (timeout / caller abort / reset) propagates.
-    if (!(cause instanceof SyntaxError)) throw cause;
-    body = undefined;
-  }
+  // An aborted or broken read (timeout / caller abort / reset) propagates.
+  const bytes = await readBodyBytes(response, touch);
+  // A body that is not JSON (proxy HTML/text) leaves `body` undefined and is
+  // kept, cut short, on `bodyExcerpt` only: the message stays `HTTP <status>`.
+  const parsed = bytes.byteLength === 0 ? NOT_JSON : parseJsonBytes(bytes);
+  const body = parsed === NOT_JSON ? undefined : parsed;
+  const bodyExcerpt = parsed === NOT_JSON ? excerptOf(bytes) : undefined;
   // §1.2 retry-after resolution, steps 1–2 (step 3, the JSON field, is
   // applied in fromResponse on a 429 and a NATIONAL_SEMANTIC_UNAVAILABLE 503;
   // a quota 429 drops the value).
   const hint =
     headerRetryAfterSeconds(response) ??
     (response.status === 429 ? resetHeaderSeconds(response, "ratelimit-reset") : undefined);
-  return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response));
+  return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response), bodyExcerpt);
 }
 
 /**

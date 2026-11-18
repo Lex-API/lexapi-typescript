@@ -4,6 +4,7 @@
 // including ones the dev toolchain (vitest) can't run on.
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { format, inspect } from "node:util";
 
 export async function runSmoke(lib, label) {
   const { LexAPI, VERSION, CreditsExhaustedError, verifySignature, AS_OF_REASONS, CITATION_TYPES } = lib;
@@ -21,6 +22,12 @@ export async function runSmoke(lib, label) {
         JSON.stringify({ success: true, results: [{ law_id: "32016R0679", asOfResolved: true }], asOf: "2020-01-01" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
+    }
+    if (url.endsWith("/resolve")) {
+      return new Response(new TextEncoder().encode("<html>proxy page</html>"), {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
     }
     return new Response(
       JSON.stringify({ success: false, error: { code: "CREDITS_EXHAUSTED", message: "x", details: { weight: 5 } } }),
@@ -44,6 +51,18 @@ export async function runSmoke(lib, label) {
   await assert.rejects(() => client.getDocument({ celexNumber: "32016R0679" }), (err) => {
     assert.ok(err instanceof CreditsExhaustedError);
     assert.equal(err.weight, 5);
+    return true;
+  });
+
+  await assert.rejects(() => client.resolve("32016R0679"), (err) => {
+    assert.ok(err instanceof lib.InvalidResponseError);
+    assert.equal(err.message, "[INVALID_RESPONSE] Expected JSON, got text/html that does not parse as JSON (23 bytes) (HTTP 200)");
+    assert.equal(err.bodyExcerpt, "<html>proxy page</html>");
+    assert.ok(!JSON.stringify(err).includes("proxy page"), "response text leaked via JSON.stringify");
+    assert.ok(!Object.getOwnPropertyNames(err).includes("bodyExcerpt"));
+    for (const shown of [format("%o", err), inspect(err, { showHidden: true }), inspect(err, { getters: true })]) {
+      assert.ok(!shown.includes("proxy page"), "response text leaked via util.inspect / %o");
+    }
     return true;
   });
 

@@ -10,7 +10,7 @@ import {
 } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
-const OK = () => jsonResponse(200, { success: true, service: "LexAPI" });
+const OK = () => jsonResponse(200, { success: true, service: "LexAPI", results: [], document: {} });
 /** An app-generated error: the API's rate limiter stamps `RateLimit-*` on every app response (§1.2). */
 const ERR = (status: number, code = "UPSTREAM_ERROR", headers?: Record<string, string>) =>
   jsonResponse(status, { success: false, error: { code, message: "transient" } }, { "ratelimit-limit": "60", ...headers });
@@ -318,8 +318,10 @@ describe("read-only POST retries (opt-in)", () => {
       (c) => c.semanticLegislationSearch({ query: "x", asOf: "2020-01-01" }),
       (c) => c.legislationAsOf({ document: "32016R0679", asOf: "2020-01-01" }),
     ];
+    const asOfOk = () =>
+      jsonResponse(200, { success: true, document: "32016R0679", asOfResolved: false, act: {}, provenance: {} });
     for (const call of reads) {
-      const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), OK());
+      const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), call === reads[reads.length - 1] ? asOfOk() : OK());
       await call(client(fetchMock));
       expect(fetchMock).toHaveBeenCalledTimes(2);
     }
