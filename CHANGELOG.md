@@ -12,7 +12,8 @@ picks up `0.2.0` on its own.
 - Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the
   default ports), at most five per attempt. Any other redirect is refused with a `NetworkError`
   instead of being followed with the `x-api-key` header. The LexAPI API does not redirect to other
-  hosts; this matters with a custom `baseUrl` or a proxy in front of the API.
+  hosts; this matters with a custom `baseUrl` or a proxy in front of the API. A custom `fetch` must
+  honour `redirect: "manual"`.
 
 ## [0.4.0] — 2026-11-11
 

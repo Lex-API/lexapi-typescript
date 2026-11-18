@@ -438,7 +438,7 @@ const client = new LexAPI({
 });
 ```
 
-Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the default ports), at most five per attempt; any other redirect is refused with a `NetworkError`, so the API key is never sent to another origin.
+Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the default ports), at most five per attempt; any other redirect is refused with a `NetworkError`, so the API key is never sent to another origin. A custom `fetch` must honour `redirect: "manual"` for this to hold.
 
 ## Retries, timeouts and cancellation
 

@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { LexAPI, NetworkError } from "../src/index.js";
+import { LexAPI, NetworkError, TimeoutError } from "../src/index.js";
 import { jsonResponse } from "./helpers.js";
 
 const API_KEY = "lex_test_secret_key";
@@ -263,6 +263,82 @@ describe("redirects that leave the API origin", () => {
 
     expect(api.seen).toHaveLength(1);
     expect(other.seen).toEqual([]);
+  });
+});
+
+describe("redirect chains and the timeout", () => {
+  it("applies one timeout to the whole chain", async () => {
+    const hopDelayMs = 120;
+    const slowFetch = vi.fn(
+      (url: string | URL | Request, init?: RequestInit): Promise<Response> =>
+        new Promise((resolve, reject) => {
+          const hop = Number(new URL(String(url)).searchParams.get("hop") ?? "0");
+          const timer = setTimeout(
+            () => resolve(new Response(null, { status: 307, headers: { location: `/v1/info?hop=${hop + 1}` } })),
+            hopDelayMs,
+          );
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    );
+    const sdk = new LexAPI({
+      apiKey: API_KEY,
+      baseUrl: "https://api.example/v1",
+      fetch: slowFetch,
+      timeoutMs: 200,
+      retry: { maxRetries: 0 },
+    });
+
+    const started = Date.now();
+    const error = await sdk.getInfo().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const elapsed = Date.now() - started;
+
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(slowFetch).toHaveBeenCalledTimes(2);
+    // Well short of the full chain (five hops), which would take 5 × hopDelayMs.
+    expect(elapsed).toBeLessThan(4 * hopDelayMs);
+  });
+});
+
+describe("redirect response bodies", () => {
+  /** A fetch stub whose first answer is a redirect with a body that records `cancel()`. */
+  function trackedRedirect(location: string) {
+    const cancelled = vi.fn();
+    let call = 0;
+    const fetchMock = vi.fn(async (): Promise<Response> => {
+      if (call++ > 0) return jsonResponse(200, { service: "LexAPI" });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("moved"));
+        },
+        cancel: cancelled,
+      });
+      return new Response(body, { status: 307, headers: { location } });
+    });
+    return { fetchMock, cancelled };
+  }
+
+  it("cancels the body of a followed redirect", async () => {
+    const { fetchMock, cancelled } = trackedRedirect("/v1/moved");
+    await new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock }).getInfo();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cancelled).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the body of a refused redirect", async () => {
+    const { fetchMock, cancelled } = trackedRedirect("https://other.example/v1/info");
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock });
+
+    await refusal(() => sdk.getInfo());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cancelled).toHaveBeenCalledOnce();
   });
 });
 

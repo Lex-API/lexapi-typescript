@@ -257,7 +257,8 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Redirects are followed only within the API origin (or to the same host
  *   over HTTPS on the default ports), at most five per attempt; any other
  *   redirect is refused with a `NetworkError`, so the API key is never sent
- *   to another origin.
+ *   to another origin. A custom `fetch` must honour `redirect: "manual"` for
+ *   this to hold. The attempt's timeout covers the whole redirect chain.
  * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
  *   `RateLimit-Reset` and the JSON `retryAfter` field; on a 503
  *   `NATIONAL_SEMANTIC_UNAVAILABLE`, the JSON `retryAfter` field.
@@ -374,7 +375,7 @@ export class HttpClient {
       let response: Response | undefined;
       let retryTransport = false;
       try {
-        response = await this.fetchWithinOrigin(url, method, headers, serializedBody, controller.signal, touch);
+        response = await this.fetchWithinOrigin(url, method, headers, serializedBody, controller.signal);
         touch();
         if (response.ok) {
           return await onSuccess(response, { signal: controller.signal, timeoutMs, touch });
@@ -430,6 +431,7 @@ export class HttpClient {
    * would repeat every request header to whichever host a redirect names.
    * Method and body change as `fetch` changes them: a 303, or a 301/302
    * answer to a POST, continues as a body-less GET; 307/308 repeat the request.
+   * The body of a redirect response is cancelled, so its connection is released.
    */
   private async fetchWithinOrigin(
     url: string,
@@ -437,7 +439,6 @@ export class HttpClient {
     headers: Record<string, string>,
     body: string | undefined,
     signal: AbortSignal,
-    touch: () => void,
   ): Promise<Response> {
     let target = url;
     for (let hop = 0; ; hop++) {
@@ -453,7 +454,6 @@ export class HttpClient {
       }
       const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
       if (location === null) return response;
-      touch();
       await response.body?.cancel().catch(() => undefined);
       const next = redirectTarget(location, new URL(target));
       if (hop >= MAX_REDIRECTS) {
