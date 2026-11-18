@@ -7,6 +7,19 @@ picks up `0.2.0` on its own.
 
 ## [Unreleased]
 
+### Added
+
+- **`legislationAsOf({ document, asOf, provision?, language? }, options?)`** (`POST /legislation/as-of`,
+  1 credit; 4 or 5 when the text has to be fetched). **Requires LexAPI API 2.26.0.** The version of
+  an EU regulation, directive or decision listed for a date — the newest consolidated version dated
+  on or before it, or the act as published in the Official Journal — and optionally one article,
+  annex or recital range of it. An answer that cannot be established is returned, not thrown:
+  `asOfResolved: false` with an `asOfReason`; use a text only when `asOfResolved` is `true`.
+  Consolidated versions have no legal force (`baseCelex` names the authentic act). Types:
+  `LegislationAsOfRequest`, `LegislationAsOfResponse`, `LegislationAsOfVersion`,
+  `LegislationAsOfAct`, `LegislationAsOfProvision`, `AsOfLookupReason`, `Provenance`; runtime list
+  `AS_OF_LOOKUP_REASONS`.
+
 ### Fixed
 
 - `fetch` is now called correctly on runtimes that require it to be invoked on the global object

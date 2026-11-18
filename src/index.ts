@@ -70,6 +70,7 @@ export type {
 } from "./export.js";
 export {
   AS_OF_REASONS,
+  AS_OF_LOOKUP_REASONS,
   CITATION_PROVENANCES,
   CITATION_RESOLUTIONS,
   CITATION_TYPES,
@@ -177,6 +178,13 @@ export type {
   AsOfVersion,
   SemanticLegislationResult,
   SemanticLegislationSearchResponse,
+  LegislationAsOfRequest,
+  AsOfLookupReason,
+  LegislationAsOfVersion,
+  LegislationAsOfAct,
+  LegislationAsOfProvision,
+  Provenance,
+  LegislationAsOfResponse,
   NationalCoverageAvailability,
   NationalCaseLawCoverageAvailability,
   NationalSemanticSearchAvailability,
