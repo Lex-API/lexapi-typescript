@@ -63,7 +63,7 @@ export interface ExportParams {
   /**
    * Max rows to stream: a positive integer (anything else throws a
    * `RangeError` before the request — the API answers 400). Clamped to the
-   * server's `EXPORT_MAX_ROWS` ceiling (default 50 000).
+   * server's row ceiling (50,000).
    */
   limit?: number;
 }

@@ -146,8 +146,8 @@ export class LexAPIError extends Error {
    * Seconds to wait before retrying, when the server said so (429; also the
    * 503 of an incomplete national semantic search).
    * Sourced from the `Retry-After` response HEADER first; the JSON
-   * `retryAfter` body field is only a fallback because it historically
-   * carried buggy epoch-seconds values (epoch-looking values are
+   * `retryAfter` body field is only a fallback because it can carry
+   * epoch-seconds values (epoch-looking values are
    * normalized to a delta).
    */
   readonly retryAfter: number | undefined;
@@ -793,7 +793,7 @@ export interface DocumentWithdrawnDetails {
  * charges anything (the credits/allowance refund rule already returns
  * every non-404 4xx-or-5xx). If you hold a cached copy of this document,
  * drop it — the source withdrew it for a reason that may include a legal
- * takedown or a pseudonymisation fix (see docs §7, no re-identification).
+ * takedown or a pseudonymisation fix (see Terms §7, no re-identification).
  */
 export class DocumentWithdrawnError extends LexAPIError {
   static override readonly kind: string = "DocumentWithdrawnError";
@@ -920,8 +920,8 @@ export function isLexAPIError<T extends LexAPIError = LexAPIError>(
 }
 
 /**
- * Normalize a JSON `retryAfter` body value. The field historically carried
- * buggy absolute epoch values instead of delta-seconds (pending server fix);
+ * Normalize a JSON `retryAfter` body value. The field can carry
+ * absolute epoch values instead of delta-seconds;
  * epoch-looking values are converted to a non-negative delta in seconds.
  */
 export function normalizeRetryAfterSeconds(value: number): number {

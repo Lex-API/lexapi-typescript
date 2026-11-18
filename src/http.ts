@@ -12,11 +12,9 @@ import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
 /**
- * 95 s per attempt: above the 90 s hard timeout the API puts on a single live
- * EUR-Lex fetch (so such a fetch ends in the server's typed, refunded 504
- * rather than a client abort that may still be billed), and below
- * Cloudflare's 100 s proxy timeout. A request that runs several upstream
- * fetches (Cellar, then the browser; a batch) can still exceed it.
+ * Per-attempt timeout. The 95 s default sits above the API's 90 s deadline on
+ * document reads, so that timeout comes back as a typed, refunded 504; the
+ * CDN ends any wait at 100 s.
  */
 export const DEFAULT_TIMEOUT_MS = 95_000;
 
@@ -33,10 +31,11 @@ export interface RetryOptions {
    */
   maxDelayMs?: number;
   /**
-   * SDK contract §1.2 opt-in (default `false`): also retry the eight
+   * SDK contract §1.2 opt-in (default `false`): also retry the ten
    * read-only POSTs (`search`, `getDocument`, `getDocumentsBatch`,
    * `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`,
-   * `semanticLegislationSearch`) on an **app-origin** 502/503/504 — those
+   * `semanticLegislationSearch`, `nationalSemanticSearch`,
+   * `nationalLegislationSemanticSearch`) on an **app-origin** 502/503/504 — those
    * are refunded in full, so the retry is billing-safe. App-origin = a
    * non-empty `X-LexAPI-Version` or a `RateLimit-Limit` header; anything
    * else is treated as a proxy answer and never retried on a billed call. Never applies to mutating calls (webhook
@@ -72,7 +71,7 @@ export interface RequestOptions {
   /** `Accept` header override (default `application/json`). */
   accept?: string;
   /**
-   * One of the eight read-only POSTs of SDK contract §1.2 — retried on
+   * One of the ten read-only POSTs of SDK contract §1.2 — retried on
    * app-origin 502/503/504 when `retryReadOnlyPosts` is on.
    */
   idempotent?: boolean;

@@ -193,9 +193,9 @@ describe("retry policy", () => {
     await expect(pending).resolves.toMatchObject({ service: "LexAPI" });
   });
 
-  it("prefers the Retry-After header over a buggy JSON retryAfter body field", async () => {
+  it("prefers the Retry-After header over an epoch-valued JSON retryAfter body field", async () => {
     vi.useFakeTimers();
-    const epochRetryAfter = Math.round(Date.now() / 1000) + 3600; // buggy epoch-seconds body value
+    const epochRetryAfter = Math.round(Date.now() / 1000) + 3600; // epoch-seconds body value
     const fetchMock = fetchSequence(
       jsonResponse(
         429,
