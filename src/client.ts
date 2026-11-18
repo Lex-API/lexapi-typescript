@@ -128,11 +128,16 @@ export class LexAPI {
     if (!apiKey) {
       throw new Error("apiKey is required (or set LEXAPI_API_KEY)");
     }
+    if (options.fetch === undefined && typeof globalThis.fetch !== "function") {
+      throw new Error("This runtime has no global fetch; pass one with the `fetch` option");
+    }
     this.http = new HttpClient({
       apiKey,
       baseUrl: (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, ""),
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      fetchFn: options.fetch ?? fetch,
+      // Looked up per call and invoked on the global object, which Cloudflare
+      // Workers and browsers require.
+      fetchFn: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
       retry: {
         maxRetries: options.retry?.maxRetries ?? 3,
         baseDelayMs: options.retry?.baseDelayMs ?? 500,

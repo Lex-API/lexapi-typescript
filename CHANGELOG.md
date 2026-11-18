@@ -7,6 +7,15 @@ picks up `0.2.0` on its own.
 
 ## [Unreleased]
 
+### Fixed
+
+- `fetch` is now called correctly on runtimes that require it to be invoked on the global object
+  (Cloudflare Workers, browsers) — both the default and the runtime's own `fetch` passed as the
+  `fetch` option. The default is also looked up on each request, so a `globalThis.fetch` replaced
+  after the client is created is the one used.
+- A runtime with no global `fetch` and no `fetch` option now fails at construction with a clear
+  error. Previously a `globalThis.fetch` set to `undefined` constructed and failed at the first call.
+
 ### Security
 
 - Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the
