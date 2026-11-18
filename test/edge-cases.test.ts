@@ -350,7 +350,8 @@ describe("status, body and Retry-After edge cases", () => {
     const error = await new LexAPI({ apiKey: "k", fetch: fetchMock }).getInfo().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(InvalidResponseError);
     expect((error as InvalidResponseError).code).toBe("INVALID_RESPONSE");
-    expect((error as InvalidResponseError).body).toBe("<html>cf</html>");
+    expect((error as InvalidResponseError).body).toBeUndefined();
+    expect((error as InvalidResponseError).bodyExcerpt).toBe("<html>cf</html>");
   });
 
   it("an empty Retry-After falls back to backoff instead of a 0 ms hammer", async () => {

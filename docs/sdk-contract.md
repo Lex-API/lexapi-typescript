@@ -63,10 +63,14 @@ Decision table (first matching row wins; "GET" means GET/HEAD/OPTIONS):
 ### 1.3 Typed errors
 
 - Every non-2xx response raises/returns a typed error carrying `code`, `message`, `status`, optional `details`, the raw decoded `body`, and `retryAfter` (§1.2).
-- **Typed envelope** `{"success": false, "error": {"code", "message", "details"}}`: `error.code` is authoritative. Codes from the API reference: `NOT_FOUND`, `INVALID_CELEX`, `INVALID_URL`, `INVALID_PARAMS`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, `TIER_FORBIDDEN`, `PAYMENT_PAST_DUE`, `CREDITS_EXHAUSTED`, `UPSTREAM_ERROR`, `TIMEOUT`, `INTERNAL`. An unknown code never crashes the parser: any code not listed here is preserved as the raw string on the error.
-- **Legacy shape** `{"error": "<text>", "message"?: "...", "details"?: ...}` (API-key 401s, every 429, some validation 400s, some tier gates, some 502/504 and webhook 404/500 answers): the string `error` is **human text, never a code** — even when it happens to equal a slug. `message` = the `error` text, followed by `": " + message` when `message` is present and different. The code is the body's top-level `code` when it is a string (API 2.4.0 adds it to legacy-shape bodies, e.g. `RATE_LIMITED`, `QUOTA_EXHAUSTED`); it takes precedence over the status-derived code. Without one, the code comes from the HTTP status (table below).
+- **Typed envelope** `{"success": false, "error": {"code", "message", "details"}}`, where `error` is a JSON object (an array is not): `error.code` is authoritative. Codes from the API reference: `NOT_FOUND`, `INVALID_CELEX`, `INVALID_URL`, `INVALID_PARAMS`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, `TIER_FORBIDDEN`, `PAYMENT_PAST_DUE`, `CREDITS_EXHAUSTED`, `UPSTREAM_ERROR`, `TIMEOUT`, `INTERNAL`. An unknown code never crashes the parser: any code not listed here is preserved as the raw string on the error.
+- **Legacy shape** `{"error": "<text>", "message"?: "...", "details"?: ...}` (API-key 401s, every 429, some validation 400s, some tier gates, some 502/504 and webhook 404/500 answers), where `error` is a non-empty string: the string `error` is **human text, never a code** — even when it happens to equal a slug. `message` = the `error` text, followed by `": " + message` when `message` is a non-empty string and different. The code is the body's top-level `code` when it is a non-empty string (API 2.4.0 adds it to legacy-shape bodies, e.g. `RATE_LIMITED`, `QUOTA_EXHAUSTED`); it takes precedence over the status-derived code. Without one, the code comes from the HTTP status (table below).
 - **`details`**: `error.details` on the typed envelope; otherwise the top-level `details` member (validation errors put a list of reasons there), including on bodies that have no `error` member at all (`{"message", "details"}`).
 - **No usable body** (non-JSON, empty): `message` = `"HTTP <status>"`, code from the status.
+- **No error message quotes the response body.** An `INVALID_RESPONSE` message names only what was expected and what arrived (kind of JSON value, field name, media type, byte length); a non-2xx body that is not JSON gives `"HTTP <status>"`. A decode or parse error is never chained to the raised error.
+- **Which field carries what.** `body` is the parsed JSON: the error body of a non-2xx, and for `INVALID_RESPONSE` the parsed value of checks 3–5 below; it is absent (`None` / `undefined`) for checks 1–2 and for a non-2xx body that is not JSON. The **excerpt** (`body_excerpt` in Python, `bodyExcerpt` in TypeScript, on every error type) is set only for check 2 and for a non-2xx body that is neither JSON nor empty: the first **200 Unicode code points** of the body decoded as UTF-8, invalid bytes replaced by U+FFFD, whatever charset the `Content-Type` names (a leading byte order mark is kept). It is absent when the body is JSON or empty. It is raw response text that may contain document text: do not show it to a model or log it by default.
+- **Default string and inspection forms never include the excerpt**: `str` / `repr` in Python; `String(err)`, `err.stack`, `console.log` / `util.inspect`, `JSON.stringify` and object spread in TypeScript, where `bodyExcerpt` is a non-enumerable property. In TypeScript `body` of an `INVALID_RESPONSE` is non-enumerable too, so default logging does not print a whole answer (on other errors `body` is enumerable). Python keeps `body` and `body_excerpt` as plain attributes, so `vars(err)` and a pickle include them.
+- **`code` and `message` are read only when they are non-empty strings** (`error.code` / `error.message` on the typed envelope; top-level `code` / `message` and the `error` text on the legacy shape); any other value counts as absent. "Object" always means a JSON object, never an array.
 - **Status → code** when the body has no typed code:
 
   | Status | Code |
@@ -83,8 +87,39 @@ Decision table (first matching row wins; "GET" means GET/HEAD/OPTIONS):
   | 504, 524 | `TIMEOUT` |
   | anything else | `INTERNAL` |
 
-- **SDK-side codes** (never in `error.code`): `UNAUTHORIZED`, `SERVICE_UNAVAILABLE`, `INVALID_RESPONSE` (a 2xx whose non-empty body is not JSON — e.g. a proxy's HTML interstitial; never turned into an empty success), `INCOMPLETE_EXPORT` (§1.8), `CONNECTION_ERROR` (transport failure), `REQUEST_TIMEOUT` (the SDK's own timeout, distinct from the server's `TIMEOUT`), `ABORTED` (TypeScript only: the caller's `AbortSignal` fired).
-- A 204 or an empty 2xx body is a successful empty object.
+- **SDK-side codes** (never in `error.code`): `UNAUTHORIZED`, `SERVICE_UNAVAILABLE`, `INVALID_RESPONSE` (a 2xx that is not the documented shape, see below — never turned into an empty success), `INCOMPLETE_EXPORT` (§1.8), `CONNECTION_ERROR` (transport failure), `REQUEST_TIMEOUT` (the SDK's own timeout, distinct from the server's `TIMEOUT`), `ABORTED` (TypeScript only: the caller's `AbortSignal` fired).
+- **A 2xx that is not the documented shape raises `INVALID_RESPONSE`** (status = the response status). The body is its bytes after any content encoding (e.g. gzip) is removed. The checks run in this order; the first violation is raised:
+  1. **No body**: a 204, whatever it carries, or a body of zero bytes. Allowed only on `DELETE /webhooks/{id}` (an empty result); anywhere else `Expected JSON, got no body`.
+  2. **Not JSON**: the body must decode as strict UTF-8 (a leading UTF-8 byte order mark is ignored; any invalid sequence, an encoded surrogate included, fails) and parse as one RFC 8259 JSON text (no `NaN` or `Infinity`, nothing after the value). Otherwise `Expected JSON, got <media type> that does not parse as JSON (<n> bytes)`, where `<n>` is the body's length in bytes and `<media type>` the `Content-Type` value before the first `;`, without surrounding spaces and tabs, case kept, cut to 100 characters (`no content type` when the header is absent or that part is empty). A body of only whitespace fails here, not at check 1.
+  3. **Not an object**: `Expected a JSON object, got <kind>`, `<kind>` being `array`, `string`, `number`, `boolean` or `null`.
+  4. **`success` is the boolean `false`**: if the body carries the **error envelope** (`error` is a JSON object, or a non-empty string), the typed error mapped from it as in this section is raised, with the response's status (code `INTERNAL` when the body has no usable code); it is never retried, and no `Retry-After` header or `retryAfter` field is read. Otherwise `Response reported success: false without an error`. On `POST /webhooks/{id}/test` a `success: false` is a normal answer (a failed delivery) whatever else the body carries, and this check is skipped. `success` with any other value (absent, `true`, a string) is not checked.
+  5. **List fields** (table below; `<field>` is the dotted path as listed): first the required fields, in the order listed, then every list field in the order listed, and each list's items in index order. A required field that is missing or `null` → `Expected "<field>" in the response; it is missing`. A field that is present and not `null` must be an array (`Expected "<field>" to be a list, got <kind>`, `<kind>` being `object`, `string`, `number` or `boolean`) whose items are all objects (`Expected every item of "<field>" to be an object, got <kind> at index <i>`, `<kind>` as in check 3, `<i>` counted from 0). An optional field that is missing or `null` is tolerated. For a nested field (`a.b`), a missing or non-object parent `a` (`null` and arrays included) counts as the field being missing.
+- On `DELETE /webhooks/{id}` a body that is present still goes through checks 2–4. `GET /export` is governed by §1.8 only.
+- Unknown extra fields are always accepted, and nothing else in the body is shape-checked.
+
+  | Endpoint | List fields | Required |
+  |---|---|---|
+  | `POST /search` | `results` | `results` |
+  | `POST /search/semantic`, `POST /legislation/semantic` | `results` | `results` |
+  | `POST /{jurisdiction}/search/semantic`, `POST /{jurisdiction}/legislation/semantic` | `results` | `results` |
+  | `POST /documentContent/batch` | `documents`, `errors` | — |
+  | `GET /documents/recent` | `results` | — |
+  | `GET /documents/{celex}/versions` | `versions` | — |
+  | `POST /citations/extract` | `citations` | — |
+  | `GET /citations/cited-by/{celex}` | `citedBy` | — |
+  | `GET /citations/cites/{celex}` | `cites`, `unresolved` | — |
+  | `GET /citations/network/{celex}` | `network.cites`, `network.citedBy`, `unresolved` | — |
+  | `GET /citations/stats` | `stats.mostCited`, `stats.mostCiting` | — |
+  | `GET /citations/path/{from}/{to}` | `path` | — |
+  | `GET /citations/related/{celex}` | `related` | — |
+  | `GET /citations/transposition/{celex}` | `jurisdictions` | — |
+  | `GET /citations/counterparts/{id}` | `via` | — |
+  | `GET /webhooks` | `webhooks` | — |
+  | `GET /webhooks/{id}/deliveries` | `deliveries` | — |
+  | `GET /national/coverage` | `jurisdictions` | — |
+  | `GET /{jurisdiction}/documents` | `results` | — |
+
+  Every other JSON endpoint has no list field checked (steps 1–4 still apply).
 - **Typed extras:** `CREDITS_EXHAUSTED` exposes `details.operation`, `weight`, `available`, `included`, `topup`, `used`, `resetsAt`. `RATE_LIMITED` and `QUOTA_EXHAUSTED` share the rate-limit error type (the quota flag tells them apart; from API 2.4.0 the `code` does too), which exposes the quota flag and `resetsAt` (§1.2). Legacy tier gates carry `upgradeUrl`: the `upgrade_url` accessor in Python, the raw `body` in TypeScript.
 - **`PAYMENT_PAST_DUE`** (403, API 2.27.0): a subscription payment failed and was not completed in time; API requests are refused until the payment succeeds, so it is never retried. Legacy shape: `{code, error, message, accessEndedAt?, billingUrl}`. It has its own error type, which is not the tier-gate type, and exposes `accessEndedAt` (ISO 8601; absent when the API does not send it) and `billingUrl` as the strings the API sent, unparsed: each is read from `details`, else from the top level of the body, and only when a string. A value present in `details` is used even when it is not a string (the field is then absent). Before API 2.27.0 a failed payment was refused at once with a 403 without a code, which maps to `TIER_FORBIDDEN`.
 - **Unknown endpoint** (API 2.27.0): the 404 for a path or method the API does not have keeps the code `NOT_FOUND` and carries `details.reason: "unknown_endpoint"`; no other 404 does. The not-found error exposes a boolean unknown-endpoint flag, true exactly when `details.reason` is that string. It is never derived from the message, so it is false on earlier API versions; there the message begins `Unknown API endpoint`, which SDKs document and do not use for the flag. A national route for a country that is not available answers the same way.
@@ -147,6 +182,6 @@ One model, per attempt:
 | Timeouts (§1.6) | `timeout=` (R) and `connect_timeout=` (C); per call `client.with_options(...)` | `timeoutMs` (R, connect included); per call `{ timeoutMs }` |
 | 503 error type (§1.3) | `ServiceUnavailableError` (subclass of `UpstreamError` for 0.1.x compatibility) | `ServiceUnavailableError` |
 | Transport error types | `LexAPIConnectionError`, `RequestTimeoutError` | `NetworkError`, `TimeoutError` with status 0 |
-| 2xx non-JSON (§1.3) | `InvalidResponseError` | `InvalidResponseError` |
+| 2xx not the documented shape (§1.3) | `InvalidResponseError` | `InvalidResponseError` |
 | Export completeness (§1.8) | `IncompleteExportError`; `stream.complete`, `stream.rows_read`, `stream.invalid_lines` | `IncompleteExportError`; `stream.complete`, `stream.rowsRead`, `stream.invalidLines` |
 | Webhook helpers (§1.9) | `verify_webhook`, `verify_signature`, `compute_signature`, `WebhookSignatureError` | `verifyWebhook`, `verifySignature`, `computeSignature`, `WebhookSignatureError` |

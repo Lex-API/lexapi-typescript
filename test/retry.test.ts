@@ -10,7 +10,7 @@ import {
 } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
-const OK = () => jsonResponse(200, { success: true, service: "LexAPI" });
+const OK = () => jsonResponse(200, { success: true, service: "LexAPI", results: [] });
 /** An app-generated error: the API's rate limiter stamps `RateLimit-*` on every app response (§1.2). */
 const ERR = (status: number, code = "UPSTREAM_ERROR", headers?: Record<string, string>) =>
   jsonResponse(status, { success: false, error: { code, message: "transient" } }, { "ratelimit-limit": "60", ...headers });

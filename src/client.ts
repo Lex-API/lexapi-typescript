@@ -204,6 +204,7 @@ export class LexAPI {
     return this.call<SearchResponse>({
       method: "POST",
       path: "/search",
+      shape: { lists: ["results"], required: ["results"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -257,6 +258,7 @@ export class LexAPI {
     return this.call<DocumentContentBatchResponse>({
       method: "POST",
       path: "/documentContent/batch",
+      shape: { lists: ["documents", "errors"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -283,6 +285,7 @@ export class LexAPI {
     return this.call<RecentDocumentsResponse>({
       method: "GET",
       path: "/documents/recent",
+      shape: { lists: ["results"] },
       query: {
         days: params.days,
         documentType: params.documentType,
@@ -370,6 +373,7 @@ export class LexAPI {
     return this.call<DocumentVersionsResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions`,
+      shape: { lists: ["versions"] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -432,6 +436,7 @@ export class LexAPI {
     return this.call<CitationExtractResponse>({
       method: "POST",
       path: "/citations/extract",
+      shape: { lists: ["citations"] },
       body: { celexNumber },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -463,6 +468,7 @@ export class LexAPI {
     return this.call<CitesResponse>({
       method: "GET",
       path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["cites", "unresolved"] },
       query: { ...edgeQuery(params), unresolved: params.unresolved },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -487,6 +493,7 @@ export class LexAPI {
     return this.call<CitedByResponse>({
       method: "GET",
       path: `/citations/cited-by/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["citedBy"] },
       query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -552,6 +559,7 @@ export class LexAPI {
     return this.call<CitationNetworkResponse>({
       method: "GET",
       path: `/citations/network/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["network.cites", "network.citedBy", "unresolved"] },
       query: {
         ...filterQuery(params),
         limit: params.limit,
@@ -584,6 +592,7 @@ export class LexAPI {
     return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+      shape: { lists: ["path"] },
       query: {
         ...filterQuery(params),
         maxDepth: params.maxDepth,
@@ -613,6 +622,7 @@ export class LexAPI {
     return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["related"] },
       query: {
         ...filterQuery(params),
         limit: params.limit,
@@ -665,6 +675,7 @@ export class LexAPI {
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
+      shape: { lists: ["stats.mostCited", "stats.mostCiting"] },
       query: { includeNational: effectiveParams?.includeNational },
       timeoutMs: effectiveOptions?.timeoutMs,
       signal: effectiveOptions?.signal,
@@ -698,6 +709,7 @@ export class LexAPI {
     return this.call<TranspositionResponse>({
       method: "GET",
       path: `/citations/transposition/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["jurisdictions"] },
       query: {
         jurisdictions: listParam(params.jurisdictions),
         resolvedOnly: params.resolvedOnly,
@@ -731,6 +743,7 @@ export class LexAPI {
     return this.call<CounterpartsResponse>({
       method: "GET",
       path: `/citations/counterparts/${encodeURIComponent(id)}`,
+      shape: { lists: ["via"] },
       query: {
         jurisdictions: listParam(params.jurisdictions),
         language: params.language,
@@ -759,6 +772,7 @@ export class LexAPI {
     return this.call<NationalCoverageResponse>({
       method: "GET",
       path: "/national/coverage",
+      shape: { lists: ["jurisdictions"] },
       free: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -819,6 +833,7 @@ export class LexAPI {
     return this.call<NationalDocumentListResponse>({
       method: "GET",
       path: `/${jurisdictionSegment(jurisdiction)}/documents`,
+      shape: { lists: ["results"] },
       query: {
         page: params.page,
         cursor: params.cursor,
@@ -881,6 +896,7 @@ export class LexAPI {
     return this.call<NationalSemanticCaseLawResponse>({
       method: "POST",
       path: `/${jurisdictionSegment(jurisdiction)}/search/semantic`,
+      shape: { lists: ["results"], required: ["results"] },
       body: nationalSemanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -911,6 +927,7 @@ export class LexAPI {
     return this.call<NationalSemanticLegislationResponse>({
       method: "POST",
       path: `/${jurisdictionSegment(jurisdiction)}/legislation/semantic`,
+      shape: { lists: ["results"], required: ["results"] },
       body: nationalSemanticWireBody(request, { allowHyde: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -946,6 +963,7 @@ export class LexAPI {
     return this.call<SemanticCaseLawSearchResponse>({
       method: "POST",
       path: "/search/semantic",
+      shape: { lists: ["results"], required: ["results"] },
       body: semanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -982,6 +1000,7 @@ export class LexAPI {
     return this.call<SemanticLegislationSearchResponse>({
       method: "POST",
       path: "/legislation/semantic",
+      shape: { lists: ["results"], required: ["results"] },
       body: semanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,

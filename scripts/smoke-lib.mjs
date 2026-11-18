@@ -22,6 +22,12 @@ export async function runSmoke(lib, label) {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (url.endsWith("/resolve")) {
+      return new Response(new TextEncoder().encode("<html>proxy page</html>"), {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     return new Response(
       JSON.stringify({ success: false, error: { code: "CREDITS_EXHAUSTED", message: "x", details: { weight: 5 } } }),
       { status: 402, headers: { "content-type": "application/json" } },
@@ -44,6 +50,15 @@ export async function runSmoke(lib, label) {
   await assert.rejects(() => client.getDocument({ celexNumber: "32016R0679" }), (err) => {
     assert.ok(err instanceof CreditsExhaustedError);
     assert.equal(err.weight, 5);
+    return true;
+  });
+
+  await assert.rejects(() => client.resolve("32016R0679"), (err) => {
+    assert.ok(err instanceof lib.InvalidResponseError);
+    assert.equal(err.message, "[INVALID_RESPONSE] Expected JSON, got text/html that does not parse as JSON (23 bytes) (HTTP 200)");
+    assert.equal(err.bodyExcerpt, "<html>proxy page</html>");
+    assert.ok(!JSON.stringify(err).includes("proxy page"), "response text leaked via JSON.stringify");
+    assert.ok(!Object.keys(err).includes("bodyExcerpt"));
     return true;
   });
 
