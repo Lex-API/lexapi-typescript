@@ -359,7 +359,7 @@ describe("citations — 2026-10 additions", () => {
     expect(offsets).toEqual(["0", "2", "4"]);
   });
 
-  it("keeps paginating past totalCitations when raw rows outnumber distinct pairs (review S8)", async () => {
+  it("keeps paginating past totalCitations when raw rows outnumber distinct pairs", async () => {
     // 150 raw rows forming 90 distinct pairs: totalCitations (90) < limit (100),
     // but the first page is full (100 raw rows), so a second page exists.
     const fetchMock = fetchSequence(

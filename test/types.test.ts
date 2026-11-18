@@ -51,7 +51,7 @@ describe("public types", () => {
   });
 });
 
-describe("review S7", () => {
+describe("getRecentDocuments documentType", () => {
   it("getRecentDocuments takes a single documentType (the endpoint has no multi-type fan-out)", () => {
     expectTypeOf<import("../src/index.js").RecentDocumentsParams["documentType"]>().toEqualTypeOf<
       import("../src/index.js").DocumentType | undefined
@@ -59,7 +59,7 @@ describe("review S7", () => {
   });
 });
 
-describe("round 2 — R1", () => {
+describe("getRecentDocuments subdomain", () => {
   it("getRecentDocuments takes a single subdomain (EUR-Lex reads only the first DTS_SUBDOM)", () => {
     expectTypeOf<import("../src/index.js").RecentDocumentsParams["subdomain"]>().toEqualTypeOf<
       import("../src/index.js").Subdomain | undefined

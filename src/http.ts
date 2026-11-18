@@ -228,7 +228,7 @@ export function isNeverReachedError(error: unknown, depth = 0): boolean {
 
 /**
  * App-origin response (SDK contract §1.2): it carries a non-empty
- * `X-LexAPI-Version` header (every app response, lex-api #299 on) or a
+ * `X-LexAPI-Version` header (every app response, API 2.1.0 on) or a
  * `RateLimit-Limit` header (the app's per-key rate limiter sets `RateLimit-*`
  * on every billable app response; proxies never do). A JSON body with an
  * `error` member is NOT enough on its own. Anything else is treated as
@@ -262,7 +262,7 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Caller `AbortSignal`: aborts the attempt and any retry wait; throws
  *   `RequestAbortedError`, never retried.
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
- *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
+ *   a retry cannot charge twice (see `shouldRetryStatus`).
  * - Redirects are followed only within the API origin (or to the same host
  *   over HTTPS on the default ports), at most five per attempt; any other
  *   redirect is refused with a `NetworkError`, so the API key is never sent

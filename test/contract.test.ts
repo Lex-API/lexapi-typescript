@@ -1,5 +1,5 @@
 /**
- * SDK contract (PLAN.md §1, shared verbatim with lexapi-python) — one test
+ * SDK contract (docs/sdk-contract.md §1, shared with lexapi-python) — one test
  * per rule, so a drift between the two SDKs shows up as a named failure.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -375,7 +375,7 @@ describe("§1.8 export stream", () => {
   });
 });
 
-describe("§1.2 never-reached transport codes (round 2 — R5)", () => {
+describe("§1.2 never-reached transport codes", () => {
   const billed = async (cause: unknown) => {
     const fetchMock = fetchSequence(Object.assign(new TypeError("fetch failed"), { cause }) as unknown as Response, OK());
     await http(fetchMock).requestJson({ method: "POST", path: "/webhooks", body: {} }).catch(() => undefined);
