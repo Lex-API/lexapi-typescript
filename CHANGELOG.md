@@ -194,8 +194,8 @@ the `credits` block, like every other credit-metered route.
 
 ## [0.2.0] — 2026-10-26
 
-Full re-sync with the LexAPI API (validated against API 2.0.0). Every endpoint, parameter, response
-field and error shape was checked against the API reference.
+Full re-sync with the LexAPI API (validated against API 2.0.0; later items name their API version).
+Every endpoint, parameter, response field and error shape was checked against the API reference.
 
 ### Added
 

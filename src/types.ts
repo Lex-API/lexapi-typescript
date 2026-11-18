@@ -321,7 +321,7 @@ export interface TextAvailability {
   availableLanguages?: string[] | null;
   /** Where EUR-Lex itself points for the text (e.g. the European Parliament site). */
   externalSource?: string;
-  /** e.g. `"cellar-manifestations"`, `"parse-worker"` (our own `too_large` verdict). */
+  /** e.g. `"cellar-manifestations"`, `"parse-worker"` (`too_large` verdict). */
   source?: string;
   checkedAt?: string;
   /** Base acts only: newest consolidated version dated on or before today, in the requested language. */
@@ -545,7 +545,7 @@ export interface SearchResponse extends CreditedResponse, WithResponseHeaders {
   partial?: boolean;
   partialReason?: string;
   /**
-   * Comma-joined dimensions on which a controller-side post-filter dropped
+   * Comma-joined dimensions on which a server-side post-filter dropped
    * rows (`author`, `date`). `"date"` signals the recall-vs-pagination
    * trade-off: raise `maxPages` to widen recall on tight date filters.
    */

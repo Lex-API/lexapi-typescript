@@ -442,7 +442,7 @@ Redirects are followed only within the origin of `baseUrl` (or to the same host 
 
 ## Retries, timeouts and cancellation
 
-The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [§1.2](docs/sdk-contract.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):
+The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [§1.2](https://github.com/Lex-API/lexapi-typescript/blob/main/docs/sdk-contract.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):
 
 | Failure | GET, billed | GET, free (`getInfo`, webhook reads) | Read-only POST | Mutating call |
 |---|---|---|---|---|
@@ -536,4 +536,4 @@ npm run build       # tsup -> dist/ (ESM + CJS + d.ts / d.cts)
 npm run smoke:dist  # framework-free check of the built bundles (runs on Node 18+)
 ```
 
-See [docs/sdk-contract.md](docs/sdk-contract.md) for the SDK contract. Docs: <https://lex-api.com/docs?ref=npm-sdk>
+See [docs/sdk-contract.md](https://github.com/Lex-API/lexapi-typescript/blob/main/docs/sdk-contract.md) for the SDK contract. Docs: <https://lex-api.com/docs?ref=npm-sdk>
