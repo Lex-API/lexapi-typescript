@@ -342,6 +342,87 @@ describe("redirect response bodies", () => {
   });
 });
 
+describe("redirects with a custom fetch", () => {
+  const RETRYING = { maxRetries: 3, baseDelayMs: 1, maxDelayMs: 5 };
+
+  /** A minimal non-standard response, as a custom fetch may return it. */
+  function bareRedirect(location: string, body: unknown): Response {
+    return {
+      ok: false,
+      status: 307,
+      type: "default",
+      redirected: false,
+      headers: new Headers({ location }),
+      body,
+    } as unknown as Response;
+  }
+
+  it("keeps the refusal when the redirect body has no cancel()", async () => {
+    const fetchMock = vi.fn(async () => bareRedirect("https://other.example/v1/info", { pipe: () => undefined }));
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock, retry: RETRYING });
+
+    const error = await refusal(() => sdk.getInfo());
+
+    expect(error.message).toContain("another origin (https://other.example)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the refusal when cancel() throws", async () => {
+    const body = {
+      cancel: () => {
+        throw new TypeError("not a web stream");
+      },
+    };
+    const fetchMock = vi.fn(async () => bareRedirect("https://other.example/v1/info", body));
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock, retry: RETRYING });
+
+    const error = await refusal(() => sdk.getInfo());
+
+    expect(error.message).toContain("another origin (https://other.example)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not wait for a cancel() that never settles", async () => {
+    let call = 0;
+    const fetchMock = vi.fn(async () =>
+      call++ === 0
+        ? bareRedirect("/v1/moved", { cancel: () => new Promise<void>(() => undefined) })
+        : jsonResponse(200, { service: "LexAPI" }),
+    );
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock });
+
+    const info = await sdk.getInfo();
+
+    expect(info.service).toBe("LexAPI");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a redirect when the base URL is not absolute", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 307, headers: { location: "/v1/moved" } }));
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "/api/v1", fetch: fetchMock, retry: RETRYING });
+
+    const error = await refusal(() => sdk.getInfo());
+
+    expect(error.message).toMatch(/not absolute/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a response the custom fetch has already redirected", async () => {
+    const fetchMock = vi.fn(async () => {
+      const response = jsonResponse(200, { service: "LexAPI" });
+      Object.defineProperty(response, "redirected", { value: true });
+      return response;
+    });
+    const sdk = new LexAPI({ apiKey: API_KEY, baseUrl: "https://api.example/v1", fetch: fetchMock, retry: RETRYING });
+
+    const error = await refusal(() => sdk.getInfo());
+
+    expect(error.message).toContain('redirect: "manual"');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expectNoSecret(error);
+  });
+});
+
 describe("redirects between http and https", () => {
   /** A fetch stub: the first call is redirected to `location`, later calls answer 200. */
   function redirectingFetch(location: string) {

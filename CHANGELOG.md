@@ -13,7 +13,7 @@ picks up `0.2.0` on its own.
   default ports), at most five per attempt. Any other redirect is refused with a `NetworkError`
   instead of being followed with the `x-api-key` header. The LexAPI API does not redirect to other
   hosts; this matters with a custom `baseUrl` or a proxy in front of the API. A custom `fetch` must
-  honour `redirect: "manual"`.
+  honour `redirect: "manual"`; a response it has already redirected is refused.
 
 ## [0.4.0] — 2026-11-11
 

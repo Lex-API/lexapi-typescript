@@ -197,6 +197,15 @@ function redirectTarget(location: string, from: URL): URL {
   return to;
 }
 
+/** Cancel a response body that will not be read, without waiting; a body that is not a web stream is left alone. */
+function discardBody(response: Response): void {
+  try {
+    response.body?.cancel().catch(() => undefined);
+  } catch {
+    // A custom fetch may return a body without `cancel()`.
+  }
+}
+
 /** `true` when a transport error (or one of its causes) carries a never-reached-the-app code. */
 export function isNeverReachedError(error: unknown, depth = 0): boolean {
   if (depth > 6 || typeof error !== "object" || error === null) return false;
@@ -432,6 +441,8 @@ export class HttpClient {
    * Method and body change as `fetch` changes them: a 303, or a 301/302
    * answer to a POST, continues as a body-less GET; 307/308 repeat the request.
    * The body of a redirect response is cancelled, so its connection is released.
+   * A response that says it was already redirected (a custom `fetch` that did
+   * not honour `redirect: "manual"`) is refused.
    */
   private async fetchWithinOrigin(
     url: string,
@@ -449,13 +460,23 @@ export class HttpClient {
         redirect: "manual",
         signal,
       });
+      if (response.redirected === true) {
+        discardBody(response);
+        throw new NetworkError('The custom fetch followed a redirect itself; it must honour redirect: "manual"');
+      }
       if (response.type === "opaqueredirect") {
         throw new NetworkError("The API answered with a redirect, which this runtime does not expose");
       }
       const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
       if (location === null) return response;
-      await response.body?.cancel().catch(() => undefined);
-      const next = redirectTarget(location, new URL(target));
+      discardBody(response);
+      let from: URL;
+      try {
+        from = new URL(target);
+      } catch {
+        throw new NetworkError("Refused to follow a redirect from a request URL that is not absolute");
+      }
+      const next = redirectTarget(location, from);
       if (hop >= MAX_REDIRECTS) {
         throw new NetworkError(`Too many redirects (more than ${MAX_REDIRECTS})`);
       }
