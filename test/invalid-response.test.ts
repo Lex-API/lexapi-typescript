@@ -2,7 +2,7 @@
 // and no error exposes the response text by default (SDK contract §1.3).
 // Every body below is synthetic; every call goes to a stubbed fetch on a
 // loopback base URL, never to a real server.
-import { inspect } from "node:util";
+import { format, inspect } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -79,17 +79,25 @@ function bare(error: LexAPIError): string {
   return error.message.replace(/^\[[^\]]+\] /, "").replace(/ \(HTTP \d+\)$/, "");
 }
 
-/** The sentinel is in none of the default string or inspection forms. */
+/** The sentinel is in none of the string, inspection or serialised forms of the error. */
 function expectNoSentinel(error: LexAPIError): void {
   expect(error.message).not.toContain(SENTINEL);
   expect(String(error)).not.toContain(SENTINEL);
   expect(error.stack ?? "").not.toContain(SENTINEL);
   expect(inspect(error)).not.toContain(SENTINEL);
   expect(inspect(error, { depth: null })).not.toContain(SENTINEL);
+  expect(inspect(error, { showHidden: true, depth: null })).not.toContain(SENTINEL);
+  expect(inspect(error, { getters: true, depth: null })).not.toContain(SENTINEL);
+  expect(format("%o", error)).not.toContain(SENTINEL);
+  expect(format("%O", error)).not.toContain(SENTINEL);
+  expect(format("%j", error)).not.toContain(SENTINEL);
   expect(JSON.stringify(error)).not.toContain(SENTINEL);
   expect(JSON.stringify({ ...error })).not.toContain(SENTINEL);
+  expect(inspect(structuredClone(error), { showHidden: true })).not.toContain(SENTINEL);
   expect(Object.keys(error)).not.toContain("bodyExcerpt");
-  expect(Object.values(error).map((v) => JSON.stringify(v) ?? "").join("")).not.toContain(SENTINEL);
+  expect(Object.getOwnPropertyNames(error)).not.toContain("bodyExcerpt");
+  const own = Reflect.ownKeys(error).map((k) => (error as unknown as Record<PropertyKey, unknown>)[k]);
+  expect(inspect(own, { depth: null })).not.toContain(SENTINEL);
 }
 
 // ── endpoint families ────────────────────────────────────────────────────
@@ -133,9 +141,9 @@ const FAMILIES: Record<string, Family> = {
   // Checks 1–4 only.
   info: { call: (c) => c.getInfo(), body: { service: "LexAPI" } },
   document: { call: (c) => c.getDocument({ celexNumber: "32099R0001" }), body: { success: true, document: { celex: "32099R0001" } } },
-  documentVersion: { call: (c) => c.getDocumentVersion("32099R0001", 1), body: { success: true, version: 1 } },
+  documentVersion: { call: (c) => c.getDocumentVersion("32099R0001", 1), body: { success: true, document: { version: 1 } } },
   resolve: { call: (c) => c.resolve("32099R0001"), body: { success: true, celex: "32099R0001" } },
-  asOf: { call: (c) => c.legislationAsOf({ document: "32099R0001", asOf: "2099-01-01" }), body: { success: true, asOfResolved: false, asOfReason: "no_version_listed" } },
+  asOf: { call: (c) => c.legislationAsOf({ document: "32099R0001", asOf: "2099-01-01" }), body: { success: true, document: "32099R0001", asOfResolved: false, asOfReason: "no_version_listed", act: {}, provenance: {} } },
   nationalDocument: { call: (c) => c.getNationalDocument("at", "AT-NOR-1"), body: { success: true, document: { id: "AT-NOR-1" } } },
   webhookGet: { call: (c) => c.webhooks.get("w1"), body: { success: true, webhook: { id: "w1" } } },
   webhookCreate: { call: (c) => c.webhooks.create({ name: "n", url: "https://example.com", watchCelex: ["32099R0001"] }), body: { success: true, webhook: { id: "w1" } } },
@@ -327,6 +335,87 @@ describe("a malformed 2xx answer throws InvalidResponseError", () => {
   });
 });
 
+describe("required fields", () => {
+  const AS_OF_OK = { success: true, document: "32099R0001", asOfResolved: true, act: {}, provenance: {} };
+  const asOfCall = (body: unknown) => client(asJson(body)).legislationAsOf({ document: "X", asOf: "2099-01-01" });
+
+  it("legislationAsOf: document is a non-empty string and asOfResolved a boolean", async () => {
+    await expect(asOfCall(AS_OF_OK)).resolves.toBeTypeOf("object");
+    await expect(asOfCall({ ...AS_OF_OK, asOfResolved: false })).resolves.toBeTypeOf("object");
+    for (const [field, value] of [["document", undefined], ["document", null], ["document", ""], ["asOfResolved", undefined], ["asOfResolved", null]] as const) {
+      expect(bare(await invalid(asOfCall(withField(AS_OF_OK, field, value))))).toBe(`Expected "${field}" in the response; it is missing`);
+    }
+    const wrong: Array<[string, unknown, string]> = [
+      ["document", {}, 'Expected "document" to be a string, got object'],
+      ["document", 3, 'Expected "document" to be a string, got number'],
+      ["document", ["X"], 'Expected "document" to be a string, got array'],
+      ["asOfResolved", "true", 'Expected "asOfResolved" to be a boolean, got string'],
+      ["asOfResolved", 1, 'Expected "asOfResolved" to be a boolean, got number'],
+      ["asOfResolved", {}, 'Expected "asOfResolved" to be a boolean, got object'],
+    ];
+    for (const [field, value, message] of wrong) {
+      expect(bare(await invalid(asOfCall(withField(AS_OF_OK, field, value))))).toBe(message);
+    }
+  });
+
+  const OBJECT_FAMILIES: Array<[string, (c: LexAPI) => Promise<unknown>, Record<string, unknown>, string]> = [
+    ["getDocument", (c) => c.getDocument({ celexNumber: "32099R0001" }), { success: true, document: {} }, "document"],
+    ["getDocumentByUrl", (c) => c.getDocumentByUrl({ url: "https://eur-lex.europa.eu/eli/reg/2099/1/oj" }), { success: true, document: {} }, "document"],
+    ["getDocumentVersion", (c) => c.getDocumentVersion("32099R0001", 1), { success: true, document: {} }, "document"],
+    ["getDocumentAtDate", (c) => c.getDocumentAtDate("32099R0001", "2099-01-01"), { success: true, document: {} }, "document"],
+    ["getNationalDocument", (c) => c.getNationalDocument("at", "AT-NOR-1"), { document: {} }, "document"],
+    ["legislationAsOf act", (c) => c.legislationAsOf({ document: "32099R0001", asOf: "2099-01-01" }), AS_OF_OK, "act"],
+    ["legislationAsOf provenance", (c) => c.legislationAsOf({ document: "32099R0001", asOf: "2099-01-01" }), AS_OF_OK, "provenance"],
+  ];
+
+  it.each(OBJECT_FAMILIES)("%s: missing, null, or not an object", async (_name, call, body, field) => {
+    await expect(call(client(asJson(body)))).resolves.toBeTypeOf("object");
+    for (const sent of [withField(body, field, undefined), withField(body, field, null)]) {
+      expect(bare(await invalid(call(client(asJson(sent)))))).toBe(`Expected "${field}" in the response; it is missing`);
+    }
+    const kinds: Array<[unknown, string]> = [["x", "string"], [[], "array"], [[{}], "array"], [0, "number"], [false, "boolean"]];
+    for (const [value, kind] of kinds) {
+      const error = await invalid(call(client(asJson(withField(body, field, value)))));
+      expect(bare(error)).toBe(`Expected "${field}" to be an object, got ${kind}`);
+    }
+  });
+
+  const CONTENT_READS: Array<[string, (c: LexAPI) => Promise<unknown>, Record<string, unknown>]> = [
+    ["getDocument", (c) => c.getDocument({ celexNumber: "32099R0001" }), { success: true }],
+    ["getDocumentByUrl", (c) => c.getDocumentByUrl({ url: "https://eur-lex.europa.eu/eli/reg/2099/1/oj" }), { success: true }],
+    ["getNationalDocument", (c) => c.getNationalDocument("at", "AT-NOR-1"), {}],
+  ];
+
+  it.each(CONTENT_READS)("%s: document.content is an object and its articles a list of objects, when present", async (_name, call, base) => {
+    const ok = [{}, { content: null }, { content: {} }, { content: { articles: null } }, { content: { articles: [] } }, { content: { articles: [{ id: "art_1" }] } }];
+    for (const document of ok) {
+      await expect(call(client(asJson({ ...base, document })))).resolves.toBeTypeOf("object");
+    }
+    const bad: Array<[unknown, string]> = [
+      [{ content: "text" }, 'Expected "document.content" to be an object, got string'],
+      [{ content: [{}] }, 'Expected "document.content" to be an object, got array'],
+      [{ content: { articles: {} } }, 'Expected "document.content.articles" to be a list, got object'],
+      [{ content: { articles: [{}, "x"] } }, 'Expected every item of "document.content.articles" to be an object, got string at index 1'],
+    ];
+    for (const [document, message] of bad) {
+      expect(bare(await invalid(call(client(asJson({ ...base, document })))))).toBe(message);
+    }
+  });
+
+  it("checks required lists, then required fields in the order listed, then optional objects, then lists", async () => {
+    expect(bare(await invalid(asOfCall({ act: "x" })))).toBe('Expected "document" in the response; it is missing');
+    expect(bare(await invalid(asOfCall({ document: 1, asOfResolved: 1 })))).toBe('Expected "document" to be a string, got number');
+    expect(bare(await invalid(asOfCall({ document: "X", asOfResolved: 1, act: 1 })))).toBe('Expected "asOfResolved" to be a boolean, got number');
+    expect(bare(await invalid(asOfCall({ ...AS_OF_OK, act: "x", provenance: 1 })))).toBe('Expected "act" to be an object, got string');
+    expect(bare(await invalid(asOfCall({ ...AS_OF_OK, provenance: [] })))).toBe('Expected "provenance" to be an object, got array');
+    const search = await invalid(client(asJson({ document: "x" })).search({ query: "x" }));
+    expect(bare(search)).toBe('Expected "results" in the response; it is missing');
+    const doc = (document: unknown) => client(asJson({ document })).getDocument({ celexNumber: "X" });
+    expect(bare(await invalid(doc("x")))).toBe('Expected "document" to be an object, got string');
+    expect(bare(await invalid(doc({ content: 1 })))).toBe('Expected "document.content" to be an object, got number');
+  });
+});
+
 describe("parsing: strict UTF-8, RFC 8259 JSON", () => {
   const bytes = (...parts: Array<string | number[]>): Uint8Array =>
     new Uint8Array(parts.flatMap((p) => (typeof p === "string" ? [...new TextEncoder().encode(p)] : p)));
@@ -363,6 +452,8 @@ describe("parsing: strict UTF-8, RFC 8259 JSON", () => {
       ["; charset=utf-8", "no content type"],
       [undefined, "no content type"],
       [`x/${"a".repeat(150)}`, `x/${"a".repeat(98)}`],
+      ["text/plain \t ;charset=utf-8", "text/plain"],
+      ["\u00a0text/plain\u00a0;x", "\u00a0text/plain\u00a0"],
     ];
     for (const [header, media] of cases) {
       const error = await invalid(client(raw(200, "<p>", header)).search({ query: "x" }));
@@ -401,7 +492,7 @@ describe("no error exposes the response text by default", () => {
     for (const body of bodies) {
       const error = await invalid(client(asJson(body)).semanticLegislationSearch({ query: "x" }));
       expectNoSentinel(error);
-      expect(Object.keys(error)).not.toContain("body");
+      expect(Object.getOwnPropertyNames(error)).not.toContain("body");
       expect(error.body).toEqual(body);
       expect(error.bodyExcerpt).toBeUndefined();
     }
@@ -466,14 +557,39 @@ describe("no error exposes the response text by default", () => {
     expect(error.body).toEqual(body);
   });
 
-  it("bodyExcerpt is a non-enumerable own property on every error", () => {
+  it("bodyExcerpt is read through a getter, not an own property, on every error", () => {
     const error = LexAPIError.fromResponse(502, undefined, undefined, undefined, `<p>${SENTINEL}</p>`);
     expect(error).toBeInstanceOf(UpstreamError);
     expect(error.bodyExcerpt).toBe(`<p>${SENTINEL}</p>`);
-    expect(Object.getOwnPropertyDescriptor(error, "bodyExcerpt")?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(error, "bodyExcerpt")).toBeUndefined();
     expectNoSentinel(error);
-    expect(Object.prototype.hasOwnProperty.call(new NotFoundError("x"), "bodyExcerpt")).toBe(true);
     expect(new NotFoundError("x").bodyExcerpt).toBeUndefined();
+    const invalidError = new InvalidResponseError("x", 200, { text: SENTINEL }, { bodyExcerpt: SENTINEL });
+    expect(invalidError.body).toEqual({ text: SENTINEL });
+    expect(invalidError.bodyExcerpt).toBe(SENTINEL);
+    expect(Object.getOwnPropertyDescriptor(invalidError, "body")).toBeUndefined();
+    expectNoSentinel(invalidError);
+    // Other errors keep `body` (the API's error envelope) as an own property.
+    const notFound = LexAPIError.fromResponse(404, { error: { code: "NOT_FOUND", message: "x" } });
+    expect(Object.keys(notFound)).toContain("body");
+  });
+
+  it("the excerpt decodes only the first 800 bytes, with the same result as a full decode", async () => {
+    let seed = 0x5eed;
+    const random = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x80000000;
+    };
+    const pieces = [[0x41], [0xc3, 0xa9], [0xe2, 0x82, 0xac], [0xf0, 0x9f, 0x98, 0x80], [0xff], [0xc3], [0xe2, 0x82], [0xf0, 0x9f], [0xef, 0xbb, 0xbf], [0x80], [0xed, 0xa0, 0x80], [0x3c]];
+    for (let run = 0; run < 300; run++) {
+      const bytes: number[] = [];
+      const target = 700 + Math.floor(random() * 300);
+      while (bytes.length < target) bytes.push(...pieces[Math.floor(random() * pieces.length)]!);
+      const content = new Uint8Array(bytes);
+      const full = [...new TextDecoder("utf-8", { ignoreBOM: true }).decode(content)].slice(0, 200).join("");
+      const error = await invalid(client(raw(200, content, "text/plain")).search({ query: "x" }));
+      expect(error.bodyExcerpt).toBe(full);
+    }
   });
 });
 

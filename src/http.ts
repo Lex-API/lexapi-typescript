@@ -88,12 +88,27 @@ export interface RequestOptions {
   shape?: ResponseShape;
 }
 
+/** @internal A field a 2xx answer always carries, and its kind. */
+export interface RequiredField {
+  path: string;
+  kind: "object" | "string" | "boolean";
+}
+
+const KIND_NAMES = { object: "an object", string: "a string", boolean: "a boolean" } as const;
+
 /** @internal The documented shape of a 2xx JSON answer (SDK contract §1.3). */
 export interface ResponseShape {
   /** List fields (dotted paths for nested ones): when present and not `null`, a list of objects. */
   lists?: readonly string[];
   /** List fields the endpoint always sends: missing or `null` is an error. Checked first. */
   required?: readonly string[];
+  /**
+   * Fields the endpoint always sends, with their kind: missing or `null` (an
+   * empty string for `string`) is an error, and so is a value of another kind.
+   */
+  fields?: readonly RequiredField[];
+  /** Object fields that, when present and not `null`, must be a JSON object. */
+  optionalObjects?: readonly string[];
   /** `success: false` is a normal answer here (`POST /webhooks/{id}/test`). */
   successFalseOk?: boolean;
   /** A 204 or an empty body is an empty result (`DELETE /webhooks/{id}`). */
@@ -570,8 +585,10 @@ async function readBodyBytes(response: Response, touch?: () => void): Promise<Ui
   return bytes;
 }
 
-/** Characters of a body that is not JSON kept on `bodyExcerpt` (never in a message). */
+/** Characters (code points) of a body that is not JSON kept on `bodyExcerpt` (never in a message). */
 const EXCERPT_CHARS = 200;
+/** Bytes decoded for the excerpt: 200 code points take at most 4 bytes each. */
+const EXCERPT_BYTES = EXCERPT_CHARS * 4;
 const NOT_JSON = Symbol("not JSON");
 
 /** Strict UTF-8 + JSON parse; `NOT_JSON` when either fails. */
@@ -583,10 +600,14 @@ function parseJsonBytes(bytes: Uint8Array): unknown {
   }
 }
 
-/** The first 200 code points of a body, decoded as UTF-8 with replacement. */
+/**
+ * The first 200 code points of a body, decoded as UTF-8 with replacement.
+ * Every decoded code point (a U+FFFD included) uses at least one byte and at
+ * most four, so the first 800 bytes decode to the same first 200.
+ */
 function excerptOf(bytes: Uint8Array): string | undefined {
   if (bytes.byteLength === 0) return undefined;
-  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes);
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(0, EXCERPT_BYTES));
   let out = "";
   let count = 0;
   for (const char of text) {
@@ -626,11 +647,27 @@ function lookup(body: Record<string, unknown>, path: string): unknown {
   return value;
 }
 
-/** What is wrong with a 2xx JSON object's list fields, or `undefined`. */
+/**
+ * What is wrong with a 2xx JSON object's documented fields, or `undefined`:
+ * required lists, then required fields, then optional objects, then lists.
+ */
 function shapeProblem(body: Record<string, unknown>, shape: ResponseShape): string | undefined {
+  const missing = (path: string): string => `Expected "${path}" in the response; it is missing`;
+  const wrongKind = (path: string, expected: RequiredField["kind"], value: unknown): string =>
+    `Expected "${path}" to be ${KIND_NAMES[expected]}, got ${jsonKind(value)}`;
   for (const path of shape.required ?? []) {
     const value = lookup(body, path);
-    if (value === MISSING || value === null) return `Expected "${path}" in the response; it is missing`;
+    if (value === MISSING || value === null) return missing(path);
+  }
+  for (const { path, kind } of shape.fields ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null || (kind === "string" && value === "")) return missing(path);
+    const ok = kind === "object" ? isJsonObject(value) : typeof value === kind;
+    if (!ok) return wrongKind(path, kind, value);
+  }
+  for (const path of shape.optionalObjects ?? []) {
+    const value = lookup(body, path);
+    if (value !== MISSING && value !== null && !isJsonObject(value)) return wrongKind(path, "object", value);
   }
   for (const path of shape.lists ?? []) {
     const value = lookup(body, path);

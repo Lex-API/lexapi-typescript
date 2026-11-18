@@ -31,9 +31,11 @@ picks up `0.2.0` on its own.
   mistyped path, a method newer than the API, or a national route for a country that is not
   available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API
   endpoint".
-- **`LexAPIError.bodyExcerpt`**: the first 200 characters of a response body that is not JSON
-  (`undefined` otherwise), as a non-enumerable property. It may contain document text: do not show
-  it to a model or log it by default. `LexAPIErrorContext` takes it too.
+- **`LexAPIError.bodyExcerpt`**: the first 200 characters (code points) of a response body that is
+  not JSON (`undefined` otherwise), read through a getter; it is not an own property of the error.
+  It may contain document text: do not show it to a model or log it by default.
+  `LexAPIErrorContext` takes it too, and `LexAPIError.fromResponse` takes it as an optional fifth
+  parameter.
 
 ### Changed
 
@@ -43,20 +45,27 @@ picks up `0.2.0` on its own.
   error envelope, that error is thrown instead; `webhooks.test` still resolves with
   `success: false`), and a list field that is not a list or holds items that are not objects.
   `results` is required on `search`, `semanticSearch`, `semanticLegislationSearch` and the national
-  semantic searches. Unknown extra fields are still accepted. To tell a malformed answer from an
+  semantic searches; `document` must be an object on `getDocument`, `getDocumentByUrl`,
+  `getDocumentVersion`, `getDocumentAtDate` and `getNationalDocument` (and `document.content`, when
+  present, an object whose `articles` is a list of objects); on `legislationAsOf`, `document` must
+  be a non-empty string, `asOfResolved` a boolean, and `act` and `provenance` objects. Unknown extra fields are still accepted. To tell a malformed answer from an
   empty result, catch `InvalidResponseError`; an API error carried by a `2xx` answer keeps that
   status.
+- A `2xx` body of only whitespace now throws `InvalidResponseError`; it returned an empty object.
+- A `2xx` JSON body that is not valid UTF-8 now throws `InvalidResponseError`; before, the invalid
+  bytes were replaced and the body was parsed.
+- An error body that is not valid UTF-8 is treated as not JSON: the error carries the code derived
+  from the status and the message `HTTP <status>`.
 
 ### Fixed
 
 - `InvalidResponseError` no longer carries the response text on `body`, where `console.log(err)`
   and `JSON.stringify(err)` printed it. The excerpt is on `bodyExcerpt`; for JSON of the wrong shape
-  the parsed value is on `body`, now non-enumerable. The constructor's third argument is that
-  parsed value.
+  the parsed value is on `body`, read through a getter and not an own property of the error. The
+  constructor's third argument is that parsed value.
 - An error body whose `code`, `message` or `error` is an empty string, or whose `error` is an array,
   is read as if that field were absent. Before, an empty `message` replaced `HTTP <status>`, and an
   array `error` was taken for the typed envelope.
-
 - `AsOfReason` and `AS_OF_REASONS` (`semanticLegislationSearch` with `asOf`) now include
   `amendment_not_consolidated`, which the API returns since 2.25.0.
 - `fetch` is now called correctly on runtimes that require it to be invoked on the global object

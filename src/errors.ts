@@ -96,8 +96,9 @@ export interface LexAPIErrorContext {
   /** Parsed response headers (rate limits, source, …). */
   headers?: ResponseHeaders;
   /**
-   * For a body that is not JSON, its first 200 characters. Raw response
-   * text; may contain document text; do not show to a model or log by default.
+   * For a body that is not JSON, its first 200 characters (code points). Raw
+   * response text; may contain document text; do not show to a model or log
+   * by default.
    */
   bodyExcerpt?: string;
 }
@@ -108,6 +109,16 @@ export interface LexAPIErrorContext {
  * Holds the error's class kinds, most specific first.
  */
 const ERROR_KINDS = Symbol.for("@lexapi/client.errorKinds");
+
+/**
+ * Response text kept off the error objects themselves: an error's
+ * `bodyExcerpt`, and the parsed `body` of an `InvalidResponseError`. Read
+ * through prototype getters, so neither is an own property of the error and
+ * no inspection or serialisation of the error (`%o`, `showHidden`,
+ * `JSON.stringify`, spread, `structuredClone`) shows it.
+ */
+const EXCERPTS = new WeakMap<object, string>();
+const INVALID_BODIES = new WeakMap<object, unknown>();
 
 function collectKinds(ctor: unknown): string[] {
   const kinds: string[] = [];
@@ -168,14 +179,6 @@ export class LexAPIError extends Error {
   readonly body: unknown;
   /** Parsed response headers, when the error came from an HTTP response. */
   readonly headers: ResponseHeaders | undefined;
-  /**
-   * For a response body that is not JSON, its first 200 characters
-   * (`undefined` otherwise). Raw response text; may contain document text;
-   * do not show to a model or log by default. Non-enumerable, so
-   * `console.log`, `util.inspect` and `JSON.stringify` leave it out; never
-   * part of `message`.
-   */
-  declare readonly bodyExcerpt: string | undefined;
 
   constructor(
     code: ErrorCode,
@@ -193,8 +196,19 @@ export class LexAPIError extends Error {
     this.retryAfter = retryAfter;
     this.body = context?.body;
     this.headers = context?.headers;
-    Object.defineProperty(this, "bodyExcerpt", { value: context?.bodyExcerpt, enumerable: false });
+    if (context?.bodyExcerpt !== undefined) EXCERPTS.set(this, context.bodyExcerpt);
     Object.defineProperty(this, ERROR_KINDS, { value: collectKinds(new.target), enumerable: false });
+  }
+
+  /**
+   * For a response body that is not JSON, its first 200 characters (code
+   * points); `undefined` otherwise. Raw response text; may contain document
+   * text; do not show to a model or log by default. Not an own property of
+   * the error, so `console.log`, `util.inspect` (any options) and
+   * `JSON.stringify` leave it out; never part of `message`.
+   */
+  get bodyExcerpt(): string | undefined {
+    return EXCERPTS.get(this);
   }
 
   /**
@@ -956,19 +970,30 @@ export class RequestAbortedError extends LexAPIError {
  *
  * The message names what was expected and what arrived and never quotes the
  * body. For JSON of the wrong shape, `body` holds the parsed value; for a
- * body that is not JSON, `bodyExcerpt` holds its first 200 characters. Both
- * are raw response content that may contain document text: do not show them
- * to a model or log them by default. Both are non-enumerable here.
+ * body that is not JSON, `bodyExcerpt` holds its first 200 characters (code
+ * points). Both are raw response content that may contain document text: do
+ * not show them to a model or log them by default. Neither is an own
+ * property of the error, so default logging does not print them.
  */
 export class InvalidResponseError extends LexAPIError {
   static override readonly kind: string = "InvalidResponseError";
 
   constructor(message: string, status: number, body?: unknown, context?: LexAPIErrorContext) {
     super("INVALID_RESPONSE", message, status, undefined, undefined, context);
-    Object.defineProperty(this, "body", { value: body, enumerable: false, writable: false, configurable: true });
+    // `body` is read through the prototype getter below, not stored on the error.
+    delete (this as { body?: unknown }).body;
+    if (body !== undefined) INVALID_BODIES.set(this, body);
     this.name = "InvalidResponseError";
   }
 }
+
+Object.defineProperty(InvalidResponseError.prototype, "body", {
+  get(this: object): unknown {
+    return INVALID_BODIES.get(this);
+  },
+  enumerable: false,
+  configurable: true,
+});
 
 /**
  * An export stream ended (cleanly, at EOF) without its trailing `_done` line —

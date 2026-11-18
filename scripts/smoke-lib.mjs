@@ -4,6 +4,7 @@
 // including ones the dev toolchain (vitest) can't run on.
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { format, inspect } from "node:util";
 
 export async function runSmoke(lib, label) {
   const { LexAPI, VERSION, CreditsExhaustedError, verifySignature, AS_OF_REASONS, CITATION_TYPES } = lib;
@@ -58,7 +59,10 @@ export async function runSmoke(lib, label) {
     assert.equal(err.message, "[INVALID_RESPONSE] Expected JSON, got text/html that does not parse as JSON (23 bytes) (HTTP 200)");
     assert.equal(err.bodyExcerpt, "<html>proxy page</html>");
     assert.ok(!JSON.stringify(err).includes("proxy page"), "response text leaked via JSON.stringify");
-    assert.ok(!Object.keys(err).includes("bodyExcerpt"));
+    assert.ok(!Object.getOwnPropertyNames(err).includes("bodyExcerpt"));
+    for (const shown of [format("%o", err), inspect(err, { showHidden: true }), inspect(err, { getters: true })]) {
+      assert.ok(!shown.includes("proxy page"), "response text leaked via util.inspect / %o");
+    }
     return true;
   });
 

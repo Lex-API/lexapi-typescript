@@ -233,6 +233,7 @@ export class LexAPI {
     return this.call<DocumentContentResponse>({
       method: "POST",
       path: "/documentContent",
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -312,6 +313,7 @@ export class LexAPI {
     return this.call<DocumentByUrlResponse>({
       method: "POST",
       path: "/documents/url",
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -394,6 +396,7 @@ export class LexAPI {
     return this.call<DocumentVersionResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions/${version}`,
+      shape: { fields: [{ path: "document", kind: "object" }] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -415,6 +418,7 @@ export class LexAPI {
     return this.call<DocumentVersionResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
+      shape: { fields: [{ path: "document", kind: "object" }] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -806,6 +810,7 @@ export class LexAPI {
     return this.call<NationalDocumentResponse>({
       method: "GET",
       path: `/${jurisdictionSegment(jurisdiction)}/documents/${encodeURIComponent(id)}`,
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -1048,6 +1053,14 @@ export class LexAPI {
     return this.call<LegislationAsOfResponse>({
       method: "POST",
       path: "/legislation/as-of",
+      shape: {
+        fields: [
+          { path: "document", kind: "string" },
+          { path: "asOfResolved", kind: "boolean" },
+          { path: "act", kind: "object" },
+          { path: "provenance", kind: "object" },
+        ],
+      },
       body,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
