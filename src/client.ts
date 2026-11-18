@@ -53,6 +53,8 @@ import type {
   SemanticCaseLawSearchResponse,
   SemanticLegislationSearchOptions,
   SemanticLegislationSearchResponse,
+  LegislationAsOfRequest,
+  LegislationAsOfResponse,
   TranspositionParams,
   TranspositionResponse,
   VersionParams,
@@ -981,6 +983,52 @@ export class LexAPI {
       method: "POST",
       path: "/legislation/semantic",
       body: semanticWireBody(request),
+      idempotent: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `POST /legislation/as-of` — the version of an EU regulation, directive
+   * or decision listed for a date: the newest consolidated version dated on
+   * or before it, or the act as published in the Official Journal when none
+   * is. With `provision`, also that article, annex or recital range of the
+   * version. Requires LexAPI API 2.26.0.
+   *
+   * **Unresolved is a normal return, not an error:** when the version or
+   * the text cannot be established the call resolves with
+   * `asOfResolved: false`, an `asOfReason` and no `provision`. Use
+   * `provision.text` only when `asOfResolved` is `true`; `asOfVersion` can
+   * also be present on an unresolved `provision` answer.
+   * An unknown act throws `NotFoundError`; invalid input throws
+   * `InvalidCelexError` / `InvalidParamsError`. An API older than 2.26.0
+   * has no such endpoint and also answers 404 (`NotFoundError`, "Unknown
+   * API endpoint").
+   *
+   * Consolidated versions have no legal force; only the act as published in
+   * the Official Journal (`baseCelex`) is authentic. The answer does not say
+   * whether an individual provision applied on that date, and
+   * `act.inForceToday` is about today, not `asOf`. A retroactive amendment
+   * counts from the date of the amending act.
+   *
+   * **Cost:** 1 credit when no text is fetched; when the provision's text
+   * has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever
+   * the answer, and 1 if the fetch fails or finds no text. A fetch reserves
+   * up to 5 credits: a pool holding fewer gets
+   * `asOfReason: "insufficient_credits"`.
+   */
+  async legislationAsOf(
+    request: LegislationAsOfRequest,
+    options?: CallOptions,
+  ): Promise<LegislationAsOfResponse> {
+    const body: Record<string, unknown> = { document: request.document, asOf: request.asOf };
+    if (request.provision !== undefined) body["provision"] = request.provision;
+    if (request.language !== undefined) body["language"] = request.language;
+    return this.call<LegislationAsOfResponse>({
+      method: "POST",
+      path: "/legislation/as-of",
+      body,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,

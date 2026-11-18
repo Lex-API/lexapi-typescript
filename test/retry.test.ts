@@ -316,6 +316,7 @@ describe("read-only POST retries (opt-in)", () => {
       (c) => c.resolve("32016R0679"),
       (c) => c.semanticSearch({ query: "x" }),
       (c) => c.semanticLegislationSearch({ query: "x", asOf: "2020-01-01" }),
+      (c) => c.legislationAsOf({ document: "32016R0679", asOf: "2020-01-01" }),
     ];
     for (const call of reads) {
       const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), OK());

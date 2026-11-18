@@ -1650,6 +1650,8 @@ export interface SemanticCaseLawSearchResponse extends CreditedResponse, WithRes
  * - `no_longer_in_force` — `asOf` is after the act's end of validity.
  * - `in_force_dates_unknown` — the act's in-force dates could not be established.
  * - `not_in_language` — the version in force has no text in that language.
+ * - `amendment_not_consolidated` — an act amending the act may have applied on that date, and no
+ *   consolidated version listed for the date is known to include it.
  * - `text_unavailable` — the version in force has no text.
  * - `article_not_in_version` — that article/annex/recital does not exist in the version in force.
  * - `part_not_resolvable` — the match is a part that cannot be looked up by date (e.g. a table).
@@ -1670,6 +1672,7 @@ export type AsOfReason =
   | "no_longer_in_force"
   | "in_force_dates_unknown"
   | "not_in_language"
+  | "amendment_not_consolidated"
   | "text_unavailable"
   | "article_not_in_version"
   | "part_not_resolvable"
@@ -1686,13 +1689,17 @@ export type AsOfReason =
   | "credit_check_failed"
   | (string & {});
 
-/** Every documented {@link AsOfReason} value, in spec order (runtime list). */
+/**
+ * Every documented {@link AsOfReason} value, in spec order (runtime list).
+ * For `semanticLegislationSearch` with `asOf`; `legislationAsOf` has {@link AS_OF_LOOKUP_REASONS}.
+ */
 export const AS_OF_REASONS = [
   "not_yet_adopted",
   "not_yet_in_force",
   "no_longer_in_force",
   "in_force_dates_unknown",
   "not_in_language",
+  "amendment_not_consolidated",
   "text_unavailable",
   "article_not_in_version",
   "part_not_resolvable",
@@ -1797,6 +1804,205 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
   tookMs?: number;
   /** Legacy daily-call plans only. */
   semanticUsage?: SemanticUsageInfo;
+}
+
+// ── POST /legislation/as-of ─────────────────────────────────────────
+
+/** Request for `legislationAsOf` (API 2.26.0). */
+export interface LegislationAsOfRequest {
+  /**
+   * A CELEX number, without a `CELEX:` prefix: an EU act (`32016R0679`). A consolidated id
+   * (`02016R0679-20160504`) is read as its act; the version is always chosen
+   * by `asOf`. For an ELI or a URL, call `resolve` first.
+   */
+  document: string;
+  /** The date, `YYYY-MM-DD`, from `1952-01-01` to today (UTC). */
+  asOf: string;
+  /**
+   * A whole article (`art_17`, `17`, `Article 17`, `6a`), an annex by its
+   * numeral or letter as printed (`anx_III`, `anx_A`), or recitals
+   * (`rct_26`, `rct_26-28`, at most 50). Numbers match exactly: `6` is not
+   * `6a`. Paragraphs and points are not addressable. Omit it to get the
+   * version only.
+   */
+  provision?: string;
+  /** Default `en`. */
+  language?: Language;
+}
+
+/**
+ * Why `asOfResolved` is false on `legislationAsOf`.
+ *
+ * - `not_yet_adopted` / `not_yet_in_force` / `no_longer_in_force` — the date is outside the act's dates.
+ * - `in_force_dates_unknown` — the act's dates do not establish it, or could not be read.
+ * - `act_type_not_supported` — the act is not a regulation, directive, decision or other act of
+ *   the institutions (CELEX sector 3) — for example a treaty or an international agreement.
+ * - `version_list_unavailable` / `version_lookup_cap` — the list of versions, or of the acts
+ *   amending the act, could not be read, or a lookup limit was reached. Retry.
+ * - `not_in_language` — the version for the date has no text in `language`.
+ * - `amendment_not_consolidated` — an act amending this act may have applied by the date, and no
+ *   listed version is known to include it.
+ *
+ * With `provision` only:
+ *
+ * - `article_not_in_version` — the version has no such article, annex or recital (`asOfVersion` is present).
+ * - `provision_ambiguous` — more than one part of the text answers to that id.
+ * - `version_not_parsed` — the text is not split into identifiable parts of that kind.
+ * - `text_unavailable` — the version has no text at the source.
+ * - `fetch_failed` / `fetch_timeout` / `fetch_pending` / `fetch_capacity` /
+ *   `fetch_budget_exhausted` / `request_deadline` — the text could not be fetched now. Retry.
+ * - `insufficient_credits` / `credit_check_failed` — the fetch was not paid for, so it was not made.
+ */
+export type AsOfLookupReason =
+  | "not_yet_adopted"
+  | "not_yet_in_force"
+  | "no_longer_in_force"
+  | "in_force_dates_unknown"
+  | "act_type_not_supported"
+  | "version_list_unavailable"
+  | "version_lookup_cap"
+  | "not_in_language"
+  | "amendment_not_consolidated"
+  | "text_unavailable"
+  | "article_not_in_version"
+  | "provision_ambiguous"
+  | "version_not_parsed"
+  | "fetch_budget_exhausted"
+  | "fetch_pending"
+  | "fetch_capacity"
+  | "fetch_failed"
+  | "fetch_timeout"
+  | "request_deadline"
+  | "insufficient_credits"
+  | "credit_check_failed"
+  | (string & {});
+
+/**
+ * Every documented {@link AsOfLookupReason} value, in spec order (runtime list).
+ * For `legislationAsOf`; `semanticLegislationSearch` with `asOf` has {@link AS_OF_REASONS}.
+ */
+export const AS_OF_LOOKUP_REASONS = [
+  "not_yet_adopted",
+  "not_yet_in_force",
+  "no_longer_in_force",
+  "in_force_dates_unknown",
+  "act_type_not_supported",
+  "version_list_unavailable",
+  "version_lookup_cap",
+  "not_in_language",
+  "amendment_not_consolidated",
+  "text_unavailable",
+  "article_not_in_version",
+  "provision_ambiguous",
+  "version_not_parsed",
+  "fetch_budget_exhausted",
+  "fetch_pending",
+  "fetch_capacity",
+  "fetch_failed",
+  "fetch_timeout",
+  "request_deadline",
+  "insufficient_credits",
+  "credit_check_failed",
+] as const;
+
+/** The version listed for the date. */
+export interface LegislationAsOfVersion {
+  /** CELEX of the version — a consolidated id, or the act itself for `as_published`. */
+  celex: string;
+  /**
+   * `consolidated`: a consolidated version. `as_published`: the act as
+   * published in the Official Journal — no consolidated version is dated on
+   * or before the date.
+   */
+  kind: "consolidated" | "as_published" | (string & {});
+  /**
+   * Consolidated versions only — the date the consolidated version carries.
+   * It can be earlier than the act's entry into force.
+   */
+  date?: string;
+  /**
+   * The day before the next version listed, in any language, and never
+   * later than the act's end of validity. Absent when not known.
+   */
+  validUntil?: string;
+  /** When the version list was read (ISO date-time), when known. */
+  checkedAt?: string;
+}
+
+/** What the Publications Office records about the act; a field is absent when not known. */
+export interface LegislationAsOfAct {
+  celex: string;
+  /** Date of the act. */
+  dateOfDocument?: string;
+  /** First entry into force. */
+  entryIntoForce?: string;
+  /** End of validity, when the act has exactly one. */
+  endOfValidity?: string;
+  /** Whether the act is in force **today** (UTC). It says nothing about `asOf`. */
+  inForceToday?: boolean;
+}
+
+/** One article, annex or recital range of the version returned. */
+export interface LegislationAsOfProvision {
+  /** The provision as normalised: `art_17`, `anx_III`, `rct_26`, `rct_26-28`. */
+  id: string;
+  /** Its heading in the text, e.g. `Article 17`. */
+  number?: string;
+  /** Its title, when it has one. */
+  title?: string;
+  /** The text of the provision in the version returned. */
+  text: string;
+}
+
+/** Where a document comes from. A value LexAPI does not know is `null`. */
+export interface Provenance {
+  /** Who publishes the document, e.g. `Publications Office of the European Union`. */
+  publisher: string | null;
+  /** The document's page at its publisher. */
+  sourceUrl: string | null;
+  /** The publisher's identifier — for EU documents, the CELEX number. */
+  sourceIdentifier: string | null;
+  /** When LexAPI fetched what the response returns (ISO date-time). */
+  retrievedAt: string | null;
+  /** SHA-256 fingerprint of the text LexAPI holds. */
+  contentHash: string | null;
+  /** Which version of the text this is — for EU documents, the CELEX number of the text served. */
+  versionIdentifier: string | null;
+  /** Language of the text (ISO 639-1). */
+  language: string | null;
+  licence: string | null;
+}
+
+/**
+ * Answer of `legislationAsOf`. Use `asOfVersion` and `provision` only when
+ * `asOfResolved` is `true`; otherwise `asOfReason` says why, and there is no
+ * `provision`.
+ */
+export interface LegislationAsOfResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  /** CELEX of the act (the base act when a consolidated id was sent). */
+  document: string;
+  language: Language;
+  /** Echo of the request's `asOf`. */
+  asOf: string;
+  /** Whether the version for the date — and, with `provision`, its text — was established. */
+  asOfResolved: boolean;
+  /** Why `asOfResolved` is false. */
+  asOfReason?: AsOfLookupReason;
+  /** The version listed for the date. Can be present on an unresolved `provision` answer. */
+  asOfVersion?: LegislationAsOfVersion;
+  act: LegislationAsOfAct;
+  /** Present only when `provision` was asked and `asOfResolved` is `true`. */
+  provision?: LegislationAsOfProvision;
+  /** Present (`true`) when the resolved version is a consolidated version. */
+  consolidated?: boolean;
+  /** Consolidated versions only — the consolidation date (`YYYY-MM-DD`). */
+  consolidatedAsOf?: string;
+  /** Consolidated versions only — the act; cite it as the authentic source. */
+  baseCelex?: string;
+  /** Consolidated versions only — says the text is not the authentic one. */
+  consolidatedNote?: string;
+  provenance: Provenance;
 }
 
 // ── National law ────────────────────────────────────────────────────

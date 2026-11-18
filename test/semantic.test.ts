@@ -370,13 +370,13 @@ describe("semanticLegislationSearch — consolidated merge + asOf", () => {
     // Copied verbatim from SemanticLegislationResult.asOfReason in openapi.yaml.
     const spec = [
       "not_yet_adopted", "not_yet_in_force", "no_longer_in_force", "in_force_dates_unknown",
-      "not_in_language", "text_unavailable", "article_not_in_version", "part_not_resolvable",
+      "not_in_language", "amendment_not_consolidated", "text_unavailable", "article_not_in_version", "part_not_resolvable",
       "article_unknown", "version_list_unavailable", "version_lookup_cap", "fetch_budget_exhausted",
       "fetch_pending", "fetch_capacity", "fetch_failed", "fetch_timeout", "request_deadline",
       "insufficient_credits", "credit_check_failed",
     ];
     expect([...AS_OF_REASONS]).toEqual(spec);
     const typed: AsOfReason[] = [...AS_OF_REASONS];
-    expect(typed).toHaveLength(19);
+    expect(typed).toHaveLength(20);
   });
 });

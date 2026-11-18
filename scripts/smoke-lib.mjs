@@ -62,7 +62,7 @@ export async function runSmoke(lib, label) {
   const body = JSON.stringify({ event: "webhook.test", timestamp: new Date().toISOString() });
   const sig = createHmac("sha256", "secret").update(body).digest("hex");
   assert.equal(await verifySignature(body, sig, "secret"), true);
-  assert.equal(AS_OF_REASONS.length, 19);
+  assert.equal(AS_OF_REASONS.length, 20);
   assert.ok(CITATION_TYPES.includes("transposition"));
 
   console.log(`smoke:dist ${label} OK on ${runtime()} (@lexapi/client ${VERSION})`);

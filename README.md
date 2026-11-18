@@ -36,6 +36,7 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 5 → 4 → 1 | `getDocument`, `getDocumentsBatch` (per item), `getDocumentByUrl`, `getDocumentMetadata` — 5 for a live browser fetch, settled to **4** when the Publications Office Cellar API answered, to **1** from the LexAPI corpus (`result.headers.source`); a text-unavailable answer settles at 1 |
 | 5 → 1 | `extractCitations` — refunded to 1 when the document was `alreadyExtracted` |
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
+| 1 → 4 / 5 | `legislationAsOf` — 1 for the version alone or a provision read from the LexAPI corpus; 4 when the text is fetched (5 live from EUR-Lex), whatever the answer; 1 if the fetch fails |
 | 5 | `getTransposition` — every plan |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
@@ -151,6 +152,27 @@ for (const hit of asOf.results) {
 ```
 
 The act must be in force on that date; the version is the act as published before its first consolidation, otherwise the consolidated version in force (later versions never count). `asOf` accepts `1952-01-01` … today (UTC); an invalid date is a 400 `InvalidParamsError`, refunded in full. **Cost:** 5 for the search; each live fetch of a version the corpus doesn't hold reserves 5 and settles by outcome (Cellar 4, browser 5, no text 1, failed 0), at most 3 per request by default. A fetch your pool can't cover is skipped (`asOfReason: "insufficient_credits"`) — never a 402. `AS_OF_REASONS` lists every documented reason.
+
+### An act on a date (`legislationAsOf`)
+
+```ts
+// POST /legislation/as-of — needs LexAPI API 2.26.0
+const answer = await client.legislationAsOf({
+  document: "32016R0679",
+  asOf: "2019-06-01",
+  provision: "art_17", // optional: an article, an annex ("anx_III") or recitals ("rct_26-28")
+});
+
+if (answer.asOfResolved) {
+  console.log(answer.asOfVersion);    // { celex: "02016R0679-20160504", kind: "consolidated", date: "2016-05-04" }
+  console.log(answer.provision?.text);
+  if (answer.consolidated) console.log(answer.baseCelex, answer.consolidatedNote); // cite the authentic act
+} else {
+  console.log(answer.asOfReason);     // e.g. "not_yet_in_force" — a normal answer, not an error
+}
+```
+
+For an act you already know; `semanticLegislationSearch` with `asOf` (above) is the search by meaning. The answer is the newest consolidated version dated on or before `asOf`, or the act as published in the Official Journal when none is. An answer that cannot be established is returned, not thrown: `asOfResolved: false` with an `asOfReason` and no `provision` — use a text only when `asOfResolved` is `true`. Unresolved answers are not thrown, so a `try`/`catch` never sees them: `fetch_*`, `request_deadline`, `version_list_unavailable` and `version_lookup_cap` are worth asking again; the other reasons are final for that date. Consolidated versions have no legal force; only the act as published in the Official Journal (`baseCelex`) is authentic. `document` is always the act itself; `asOfVersion.celex` (and `date`) name the version the text comes from. `asOfVersion.validUntil`, when present, is the last day that version is the answer. The answer does not say whether an individual provision applied on that date, and `act.inForceToday` is about today, not `asOf`. An unknown act is a 404 `NotFoundError`; invalid input is a 400 (`InvalidCelexError` / `InvalidParamsError`). An API older than 2.26.0 has no such endpoint and also answers 404 (`NotFoundError`, "Unknown API endpoint"). **Cost:** 1 credit when no text is fetched; when the provision's text has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever the answer, and 1 if the fetch fails or finds no text. A fetch reserves up to 5 credits: a pool holding fewer gets `asOfReason: "insufficient_credits"`. `AS_OF_LOOKUP_REASONS` lists every documented reason.
 
 ## Citations
 
@@ -454,7 +476,7 @@ The SDK retries automatically **only when a retry cannot charge you twice** (the
 | Any other transport error (reset, connection closed — `fetch` cannot tell before-response from mid-response — read error, `REQUEST_TIMEOUT`) | no | retry | no | no |
 | 400 / 401 / 402 / 403 / 404 / 500 and anything else | no | no | no | no |
 
-- **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`, `nationalSemanticSearch`, `nationalLegislationSemanticSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
+- **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`, `legislationAsOf`, `nationalSemanticSearch`, `nationalLegislationSemanticSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
 - **App-origin** = the response carries a non-empty `X-LexAPI-Version` header or a `RateLimit-Limit` header (the API's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone is not enough. Anything else is treated as a proxy answer: the API may have charged the call and not refunded it, so a billed call is not retried.
 - **Wait:** `Retry-After` on any status (an empty or unparseable value counts as absent); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` field; on a 503 `NATIONAL_SEMANTIC_UNAVAILABLE` (an incomplete national search), the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap (`retry.maxDelayMs`; a cap below the server's requested wait shortens it); numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`.
 

@@ -7,8 +7,24 @@ picks up `0.2.0` on its own.
 
 ## [Unreleased]
 
+### Added
+
+- **`legislationAsOf({ document, asOf, provision?, language? }, options?)`** (`POST /legislation/as-of`,
+  1 credit when no text is fetched; 4, or 5 live from EUR-Lex, when the provision's text is fetched,
+  whatever the answer; 1 if the fetch fails). **Requires LexAPI API 2.26.0.** The version of
+  an EU regulation, directive or decision listed for a date — the newest consolidated version dated
+  on or before it, or the act as published in the Official Journal — and optionally one article,
+  annex or recital range of it. An answer that cannot be established is returned, not thrown:
+  `asOfResolved: false` with an `asOfReason`; use a text only when `asOfResolved` is `true`.
+  Consolidated versions have no legal force (`baseCelex` names the authentic act). Types:
+  `LegislationAsOfRequest`, `LegislationAsOfResponse`, `LegislationAsOfVersion`,
+  `LegislationAsOfAct`, `LegislationAsOfProvision`, `AsOfLookupReason`, `Provenance`; runtime list
+  `AS_OF_LOOKUP_REASONS`.
+
 ### Fixed
 
+- `AsOfReason` and `AS_OF_REASONS` (`semanticLegislationSearch` with `asOf`) now include
+  `amendment_not_consolidated`, which the API returns since 2.25.0.
 - `fetch` is now called correctly on runtimes that require it to be invoked on the global object
   (Cloudflare Workers, browsers) — both the default and the runtime's own `fetch` passed as the
   `fetch` option. The default is also looked up on each request, so a `globalThis.fetch` replaced
