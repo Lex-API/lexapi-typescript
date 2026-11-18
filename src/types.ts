@@ -1650,6 +1650,8 @@ export interface SemanticCaseLawSearchResponse extends CreditedResponse, WithRes
  * - `no_longer_in_force` — `asOf` is after the act's end of validity.
  * - `in_force_dates_unknown` — the act's in-force dates could not be established.
  * - `not_in_language` — the version in force has no text in that language.
+ * - `amendment_not_consolidated` — an act amending the act may have applied on that date, and no
+ *   consolidated version listed for the date is known to include it.
  * - `text_unavailable` — the version in force has no text.
  * - `article_not_in_version` — that article/annex/recital does not exist in the version in force.
  * - `part_not_resolvable` — the match is a part that cannot be looked up by date (e.g. a table).
@@ -1670,6 +1672,7 @@ export type AsOfReason =
   | "no_longer_in_force"
   | "in_force_dates_unknown"
   | "not_in_language"
+  | "amendment_not_consolidated"
   | "text_unavailable"
   | "article_not_in_version"
   | "part_not_resolvable"
@@ -1686,13 +1689,17 @@ export type AsOfReason =
   | "credit_check_failed"
   | (string & {});
 
-/** Every documented {@link AsOfReason} value, in spec order (runtime list). */
+/**
+ * Every documented {@link AsOfReason} value, in spec order (runtime list).
+ * For `semanticLegislationSearch` with `asOf`; `legislationAsOf` has {@link AS_OF_LOOKUP_REASONS}.
+ */
 export const AS_OF_REASONS = [
   "not_yet_adopted",
   "not_yet_in_force",
   "no_longer_in_force",
   "in_force_dates_unknown",
   "not_in_language",
+  "amendment_not_consolidated",
   "text_unavailable",
   "article_not_in_version",
   "part_not_resolvable",
@@ -1804,7 +1811,7 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
 /** Request for `legislationAsOf` (API 2.26.0). */
 export interface LegislationAsOfRequest {
   /**
-   * CELEX number of an EU act (`32016R0679`). A consolidated id
+   * A CELEX number, without a `CELEX:` prefix: an EU act (`32016R0679`). A consolidated id
    * (`02016R0679-20160504`) is read as its act; the version is always chosen
    * by `asOf`. For an ELI or a URL, call `resolve` first.
    */
@@ -1870,7 +1877,10 @@ export type AsOfLookupReason =
   | "credit_check_failed"
   | (string & {});
 
-/** Every documented {@link AsOfLookupReason} value, in spec order (runtime list). */
+/**
+ * Every documented {@link AsOfLookupReason} value, in spec order (runtime list).
+ * For `legislationAsOf`; `semanticLegislationSearch` with `asOf` has {@link AS_OF_REASONS}.
+ */
 export const AS_OF_LOOKUP_REASONS = [
   "not_yet_adopted",
   "not_yet_in_force",

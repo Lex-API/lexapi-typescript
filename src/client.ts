@@ -999,7 +999,8 @@ export class LexAPI {
    * **Unresolved is a normal return, not an error:** when the version or
    * the text cannot be established the call resolves with
    * `asOfResolved: false`, an `asOfReason` and no `provision`. Use
-   * `asOfVersion` and `provision.text` only when `asOfResolved` is `true`.
+   * `provision.text` only when `asOfResolved` is `true`; `asOfVersion` can
+   * also be present on an unresolved `provision` answer.
    * An unknown act throws `NotFoundError`; invalid input throws
    * `InvalidCelexError` / `InvalidParamsError`. An API older than 2.26.0
    * has no such endpoint and also answers 404 (`NotFoundError`, "Unknown
@@ -1008,10 +1009,14 @@ export class LexAPI {
    * Consolidated versions have no legal force; only the act as published in
    * the Official Journal (`baseCelex`) is authentic. The answer does not say
    * whether an individual provision applied on that date, and
-   * `act.inForceToday` is about today, not `asOf`.
+   * `act.inForceToday` is about today, not `asOf`. A retroactive amendment
+   * counts from the date of the amending act.
    *
-   * **Cost: 1 credit**; 4 when the text has to be fetched (5 when it is
-   * fetched live from EUR-Lex).
+   * **Cost:** 1 credit when no text is fetched; when the provision's text
+   * has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever
+   * the answer, and 1 if the fetch fails or finds no text. A fetch reserves
+   * up to 5 credits: a pool holding fewer gets
+   * `asOfReason: "insufficient_credits"`.
    */
   async legislationAsOf(
     request: LegislationAsOfRequest,

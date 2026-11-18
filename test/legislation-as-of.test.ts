@@ -8,8 +8,10 @@ import {
   NotFoundError,
   VERSION,
   type AsOfLookupReason,
+  type LegislationAsOfProvision,
   type LegislationAsOfRequest,
   type LegislationAsOfResponse,
+  type LegislationAsOfVersion,
 } from "../src/index.js";
 import { FAST_RETRY, jsonResponse } from "./helpers.js";
 
@@ -133,6 +135,15 @@ describe("legislationAsOf — request", () => {
     const fetchMock = stub(jsonResponse(200, RESOLVED_VERSION));
 
     await client(fetchMock).legislationAsOf({ document: "32016R0679", asOf: "2019-06-01" });
+
+    expect(lastCall(fetchMock)[1].body).toBe('{"document":"32016R0679","asOf":"2019-06-01"}');
+  });
+
+  it("sends only the documented fields", async () => {
+    const fetchMock = stub(jsonResponse(200, RESOLVED_VERSION));
+    const request = { document: "32016R0679", asOf: "2019-06-01", extra: 1 } as unknown as LegislationAsOfRequest;
+
+    await client(fetchMock).legislationAsOf(request);
 
     expect(lastCall(fetchMock)[1].body).toBe('{"document":"32016R0679","asOf":"2019-06-01"}');
   });
@@ -338,6 +349,8 @@ describe("legislationAsOf — types", () => {
     expectTypeOf<string>().toMatchTypeOf<AsOfLookupReason>();
     expectTypeOf<LegislationAsOfResponse["asOfResolved"]>().toEqualTypeOf<boolean>();
     expectTypeOf<LegislationAsOfResponse["asOfReason"]>().toEqualTypeOf<AsOfLookupReason | undefined>();
+    expectTypeOf<LegislationAsOfResponse["provision"]>().toEqualTypeOf<LegislationAsOfProvision | undefined>();
+    expectTypeOf<LegislationAsOfResponse["asOfVersion"]>().toEqualTypeOf<LegislationAsOfVersion | undefined>();
     expectTypeOf<NonNullable<LegislationAsOfResponse["provision"]>["text"]>().toEqualTypeOf<string>();
     expectTypeOf<NonNullable<LegislationAsOfResponse["asOfVersion"]>["date"]>().toEqualTypeOf<string | undefined>();
     expectTypeOf<LegislationAsOfResponse["provenance"]["contentHash"]>().toEqualTypeOf<string | null>();
