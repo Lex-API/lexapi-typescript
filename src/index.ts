@@ -15,6 +15,7 @@ export {
   AuthenticationError,
   RateLimitedError,
   TierForbiddenError,
+  PaymentPastDueError,
   CreditsExhaustedError,
   NationalAllowanceExhaustedError,
   NationalSemanticNotEnabledError,

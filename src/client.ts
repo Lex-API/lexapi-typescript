@@ -1003,8 +1003,9 @@ export class LexAPI {
    * also be present on an unresolved `provision` answer.
    * An unknown act throws `NotFoundError`; invalid input throws
    * `InvalidCelexError` / `InvalidParamsError`. An API older than 2.26.0
-   * has no such endpoint and also answers 404 (`NotFoundError`, "Unknown
-   * API endpoint").
+   * has no such endpoint and also answers 404 (`NotFoundError`).
+   * `err.unknownEndpoint` is `false` there (the API sends it from 2.27.0):
+   * check `err.message.includes("Unknown API endpoint")`.
    *
    * Consolidated versions have no legal force; only the act as published in
    * the Official Journal (`baseCelex`) is authentic. The answer does not say

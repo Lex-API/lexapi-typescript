@@ -47,6 +47,23 @@ export async function runSmoke(lib, label) {
     return true;
   });
 
+  const pastDue = lib.LexAPIError.fromResponse(403, {
+    success: false,
+    code: "PAYMENT_PAST_DUE",
+    error: "Payment past due",
+    billingUrl: "https://example.test/billing",
+  });
+  assert.ok(pastDue instanceof lib.PaymentPastDueError);
+  assert.equal(pastDue.billingUrl, "https://example.test/billing");
+  assert.equal(pastDue.accessEndedAt, undefined);
+  const unknown = lib.LexAPIError.fromResponse(404, {
+    success: false,
+    error: { code: "NOT_FOUND", message: "Unknown API endpoint", details: { reason: "unknown_endpoint" } },
+  });
+  assert.ok(unknown instanceof lib.NotFoundError);
+  assert.equal(unknown.unknownEndpoint, true);
+  assert.equal(new lib.NotFoundError("x").unknownEndpoint, false);
+
   // Timeout and cancellation work on this runtime.
   const stalled = (_url, init) =>
     new Promise((_resolve, reject) => {

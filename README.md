@@ -172,7 +172,7 @@ if (answer.asOfResolved) {
 }
 ```
 
-For an act you already know; `semanticLegislationSearch` with `asOf` (above) is the search by meaning. The answer is the newest consolidated version dated on or before `asOf`, or the act as published in the Official Journal when none is. An answer that cannot be established is returned, not thrown: `asOfResolved: false` with an `asOfReason` and no `provision` — use a text only when `asOfResolved` is `true`. Unresolved answers are not thrown, so a `try`/`catch` never sees them: `fetch_*`, `request_deadline`, `version_list_unavailable` and `version_lookup_cap` are worth asking again; the other reasons are final for that date. Consolidated versions have no legal force; only the act as published in the Official Journal (`baseCelex`) is authentic. `document` is always the act itself; `asOfVersion.celex` (and `date`) name the version the text comes from. `asOfVersion.validUntil`, when present, is the last day that version is the answer. The answer does not say whether an individual provision applied on that date, and `act.inForceToday` is about today, not `asOf`. An unknown act is a 404 `NotFoundError`; invalid input is a 400 (`InvalidCelexError` / `InvalidParamsError`). An API older than 2.26.0 has no such endpoint and also answers 404 (`NotFoundError`, "Unknown API endpoint"). **Cost:** 1 credit when no text is fetched; when the provision's text has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever the answer, and 1 if the fetch fails or finds no text. A fetch reserves up to 5 credits: a pool holding fewer gets `asOfReason: "insufficient_credits"`. `AS_OF_LOOKUP_REASONS` lists every documented reason.
+For an act you already know; `semanticLegislationSearch` with `asOf` (above) is the search by meaning. The answer is the newest consolidated version dated on or before `asOf`, or the act as published in the Official Journal when none is. An answer that cannot be established is returned, not thrown: `asOfResolved: false` with an `asOfReason` and no `provision` — use a text only when `asOfResolved` is `true`. Unresolved answers are not thrown, so a `try`/`catch` never sees them: `fetch_*`, `request_deadline`, `version_list_unavailable` and `version_lookup_cap` are worth asking again; the other reasons are final for that date. Consolidated versions have no legal force; only the act as published in the Official Journal (`baseCelex`) is authentic. `document` is always the act itself; `asOfVersion.celex` (and `date`) name the version the text comes from. `asOfVersion.validUntil`, when present, is the last day that version is the answer. The answer does not say whether an individual provision applied on that date, and `act.inForceToday` is about today, not `asOf`. An unknown act is a 404 `NotFoundError`; invalid input is a 400 (`InvalidCelexError` / `InvalidParamsError`). An API older than 2.26.0 has no such endpoint and also answers 404 (`NotFoundError`). `err.unknownEndpoint` is `false` there (the API sends it from 2.27.0): check `err.message.includes("Unknown API endpoint")`. **Cost:** 1 credit when no text is fetched; when the provision's text has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever the answer, and 1 if the fetch fails or finds no text. A fetch reserves up to 5 credits: a pool holding fewer gets `asOfReason: "insufficient_credits"`. `AS_OF_LOOKUP_REASONS` lists every documented reason.
 
 ## Citations
 
@@ -495,7 +495,7 @@ await client.semanticSearch({ query: "gdpr" }, { signal: controller.signal });
 Every non-2xx response maps to a typed error carrying `code`, `status`, `message`, `details`, `retryAfter`, the raw `body` and parsed `headers`:
 
 ```ts
-import { CreditsExhaustedError, NotFoundError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
+import { CreditsExhaustedError, NotFoundError, PaymentPastDueError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
 
 try {
   await client.semanticSearch({ query: "gdpr" });
@@ -504,14 +504,15 @@ try {
   else if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
   else if (err instanceof CreditsExhaustedError) console.log(`need ${err.weight}, have ${err.available}; resets ${err.resetsAt}`);
   else if (err instanceof TierForbiddenError) console.log((err.body as { upgradeUrl?: string })?.upgradeUrl);
-  else if (err instanceof NotFoundError) console.log("no such document");
+  else if (err instanceof PaymentPastDueError) console.log(`pay the open invoice: ${err.billingUrl ?? "in the dashboard"}`);
+  else if (err instanceof NotFoundError) console.log(err.unknownEndpoint || err.message.includes("Unknown API endpoint") ? "no such endpoint" : "no such document");
   else throw err;
 }
 ```
 
 | Class | `code` | HTTP |
 | --- | --- | --- |
-| `NotFoundError` | `NOT_FOUND` | 404 |
+| `NotFoundError` | `NOT_FOUND` | 404 — `.unknownEndpoint` is `true` when the API (2.27.0 or later) has no such endpoint: a mistyped path, a method newer than the API, or a national route for a country that is not available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API endpoint". |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.value` / `.allowed` name a refused filter, the value sent and the allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
@@ -519,6 +520,7 @@ try {
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
 | `NationalSemanticNotEnabledError` | `NATIONAL_SEMANTIC_NOT_ENABLED` | 409 — this jurisdiction has no semantic index to search; `.jurisdiction`; not retryable, refunded |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
+| `PaymentPastDueError` | `PAYMENT_PAST_DUE` | 403 — a subscription payment failed and was not completed in time; API requests are refused until the payment succeeds; pay the open invoice in the dashboard (`.billingUrl`; `.accessEndedAt` when known); not retryable. Before API 2.27.0 a failed payment was refused at once with a 403 without a code, raised as `TierForbiddenError`. |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
@@ -531,6 +533,8 @@ try {
 | `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx whose body was not JSON (e.g. a proxy HTML page) |
 | `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without a complete `_done` trailer, or the server sent an `_error` line (`rowsRead`, `details`) |
 | `LexAPIError` (base) | `INTERNAL` | any other status (e.g. 409, 413), with `status` kept |
+
+A handler that treated `TierForbiddenError` as a failed payment needs a `PaymentPastDueError` branch on API 2.27.0 and later.
 
 **`instanceof` across builds.** The package ships an ESM and a CommonJS build; in a process that loads both (a CommonJS dependency wrapping the SDK inside an ESM app, Next.js, …) they are two copies of every class. The error classes carry a shared brand (`Symbol.for`), so `err instanceof NotFoundError` is still true for an error thrown by the other copy. `isLexAPIError(err)` / `isLexAPIError(err, NotFoundError)` does the same as a function.
 
