@@ -112,10 +112,12 @@ const ERROR_KINDS = Symbol.for("@lexapi/client.errorKinds");
 
 /**
  * Response text kept off the error objects themselves: an error's
- * `bodyExcerpt`, and the parsed `body` of an `InvalidResponseError`. Read
- * through prototype getters, so neither is an own property of the error and
- * no inspection or serialisation of the error (`%o`, `showHidden`,
- * `JSON.stringify`, spread, `structuredClone`) shows it.
+ * `bodyExcerpt`, and the parsed `body` of an `InvalidResponseError`. Read and
+ * written through prototype accessors, so neither is an own property of the
+ * error: `console.log` (also with `%o`), `util.inspect` with `showHidden` or
+ * with `getters`, `JSON.stringify`, spread and `structuredClone` leave them
+ * out. `util.inspect` with `showHidden` and `getters` together does call the
+ * getters and shows them.
  */
 const EXCERPTS = new WeakMap<object, string>();
 const INVALID_BODIES = new WeakMap<object, unknown>();
@@ -204,11 +206,19 @@ export class LexAPIError extends Error {
    * For a response body that is not JSON, its first 200 characters (code
    * points); `undefined` otherwise. Raw response text; may contain document
    * text; do not show to a model or log by default. Not an own property of
-   * the error, so `console.log`, `util.inspect` (any options) and
-   * `JSON.stringify` leave it out; never part of `message`.
+   * the error, so `console.log` (also with `%o`), `util.inspect` with
+   * `showHidden` or with `getters`, `JSON.stringify`, spread and
+   * `structuredClone` leave it out (`util.inspect` with `showHidden` and
+   * `getters` together shows it); never part of `message`. Assigning to it
+   * replaces it (`undefined` clears it).
    */
   get bodyExcerpt(): string | undefined {
     return EXCERPTS.get(this);
+  }
+
+  set bodyExcerpt(value: string | undefined) {
+    if (value === undefined) EXCERPTS.delete(this);
+    else EXCERPTS.set(this, value);
   }
 
   /**
@@ -990,6 +1000,11 @@ export class InvalidResponseError extends LexAPIError {
 Object.defineProperty(InvalidResponseError.prototype, "body", {
   get(this: object): unknown {
     return INVALID_BODIES.get(this);
+  },
+  // Assigning replaces the stored value (`undefined` clears it), as on 0.4.0.
+  set(this: object, value: unknown): void {
+    if (value === undefined) INVALID_BODIES.delete(this);
+    else INVALID_BODIES.set(this, value);
   },
   enumerable: false,
   configurable: true,

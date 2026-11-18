@@ -51,6 +51,9 @@ picks up `0.2.0` on its own.
   be a non-empty string, `asOfResolved` a boolean, and `act` and `provenance` objects. Unknown extra fields are still accepted. To tell a malformed answer from an
   empty result, catch `InvalidResponseError`; an API error carried by a `2xx` answer keeps that
   status.
+- The message for a `2xx` body that is not JSON changed: it was, for example, `Expected a JSON body
+  (HTTP 200, content-type text/html; charset=utf-8)` and is now `Expected JSON, got text/html that
+  does not parse as JSON (1213 bytes)`. Do not match on error message text; use `code`.
 - A `2xx` body of only whitespace now throws `InvalidResponseError`; it returned an empty object.
 - A `2xx` JSON body that is not valid UTF-8 now throws `InvalidResponseError`; before, the invalid
   bytes were replaced and the body was parsed.

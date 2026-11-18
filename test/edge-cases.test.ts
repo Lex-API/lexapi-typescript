@@ -416,22 +416,44 @@ describe("empty webhook secret", () => {
 
 describe("NDJSON scanning and cancel()", () => {
   it("parses a multi-megabyte line delivered in small chunks in linear time", async () => {
-    const big = JSON.stringify({ celex: "X", htmlContent: "a".repeat(8_000_000) });
-    const text = `${META}\n${big}\n${DONE}\n`;
-    const bytes = new TextEncoder().encode(text);
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (let i = 0; i < bytes.length; i += 256) controller.enqueue(bytes.slice(i, i + 256));
-        controller.close();
-      },
-    });
-    const client = new LexAPI({ apiKey: "k", fetch: async () => new Response(body, { status: 200 }) });
-    const started = Date.now();
-    const stream = await client.export();
-    const rows: Array<{ htmlContent?: string }> = [];
-    for await (const row of stream) rows.push(row as { htmlContent?: string });
-    expect(rows[0]?.htmlContent).toHaveLength(8_000_000);
-    expect(Date.now() - started).toBeLessThan(3_000); // quadratic rescans take far longer
+    // Time one export whose single row holds `size` characters, delivered in 256-byte chunks.
+    const exportOnce = async (size: number): Promise<number> => {
+      const big = JSON.stringify({ celex: "X", htmlContent: "a".repeat(size) });
+      const bytes = new TextEncoder().encode(`${META}\n${big}\n${DONE}\n`);
+      // Chunks are produced on demand: a stream with every chunk queued up
+      // front costs the runtime more than linear time to drain by itself.
+      let offset = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset >= bytes.length) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(bytes.slice(offset, offset + 256));
+          offset += 256;
+        },
+      });
+      const client = new LexAPI({
+        apiKey: "k",
+        baseUrl: "http://127.0.0.1:9/api/v1",
+        fetch: async () => new Response(body, { status: 200 }),
+      });
+      const started = performance.now();
+      const stream = await client.export();
+      const rows: Array<{ htmlContent?: string }> = [];
+      for await (const row of stream) rows.push(row as { htmlContent?: string });
+      const elapsed = performance.now() - started;
+      expect(rows[0]?.htmlContent).toHaveLength(size);
+      return elapsed;
+    };
+    // Best of two runs at each size, measured in the same process, so machine
+    // load affects both sides. Four times the input takes about four times as
+    // long when the scan is linear and about sixteen times when it rescans.
+    const best = async (size: number): Promise<number> => Math.min(await exportOnce(size), await exportOnce(size));
+    await exportOnce(200_000); // warm-up
+    const small = await best(2_000_000);
+    const large = await best(8_000_000);
+    expect(large / Math.max(small, 1)).toBeLessThan(9);
   });
 
   it("cancel() during a pending read settles immediately and closes the socket", async () => {

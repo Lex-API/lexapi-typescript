@@ -535,6 +535,8 @@ describe("no error exposes the response text by default", () => {
     expect(error.body).toBeUndefined();
     error = await failure(client(raw(502, "")).getInfo());
     expect(error.bodyExcerpt).toBeUndefined();
+    expect(error.body).toBeUndefined();
+    expect(bare(error)).toBe("HTTP 502");
     error = await failure(client(raw(502, "null", "application/json")).getInfo());
     expect(error.bodyExcerpt).toBeUndefined();
     expect(error.body).toBeNull();
@@ -572,6 +574,30 @@ describe("no error exposes the response text by default", () => {
     // Other errors keep `body` (the API's error envelope) as an own property.
     const notFound = LexAPIError.fromResponse(404, { error: { code: "NOT_FOUND", message: "x" } });
     expect(Object.keys(notFound)).toContain("body");
+  });
+
+  it("body and bodyExcerpt can be assigned, e.g. to scrub them before logging", async () => {
+    const shaped = await invalid(client(asJson({ success: true, results: SENTINEL })).search({ query: "x" }));
+    expect(() => {
+      (shaped as { body: unknown }).body = undefined;
+    }).not.toThrow();
+    expect(shaped.body).toBeUndefined();
+    (shaped as { body: unknown }).body = { replaced: true };
+    expect(shaped.body).toEqual({ replaced: true });
+    expect(Object.getOwnPropertyNames(shaped)).not.toContain("body");
+
+    const upstream = await failure(client(raw(502, `<p>${SENTINEL}</p>`, "text/html")).getInfo());
+    expect(upstream.bodyExcerpt).toContain(SENTINEL);
+    expect(() => {
+      upstream.bodyExcerpt = undefined;
+    }).not.toThrow();
+    expect(upstream.bodyExcerpt).toBeUndefined();
+    upstream.bodyExcerpt = "[removed]";
+    expect(upstream.bodyExcerpt).toBe("[removed]");
+    expect(Object.getOwnPropertyNames(upstream)).not.toContain("bodyExcerpt");
+    // Each error keeps its own value.
+    const other = await failure(client(raw(502, "<p>other</p>", "text/html")).getInfo());
+    expect(other.bodyExcerpt).toBe("<p>other</p>");
   });
 
   it("the excerpt decodes only the first 800 bytes, with the same result as a full decode", async () => {
