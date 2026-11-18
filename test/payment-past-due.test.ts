@@ -85,6 +85,23 @@ describe("PaymentPastDueError", () => {
     expect(error.accessEndedAt).toBe("2026-11-25T09:14:03.000Z");
   });
 
+  it("a non-string value in details is used, not skipped: the field is undefined", () => {
+    const error = LexAPIError.fromResponse(403, {
+      ...PAST_DUE_BODY,
+      details: { billingUrl: 5, accessEndedAt: null },
+    }) as PaymentPastDueError;
+    expect(error.billingUrl).toBeUndefined();
+    expect(error.accessEndedAt).toBeUndefined();
+  });
+
+  it("the code maps by code on another status too", () => {
+    const error = LexAPIError.fromResponse(402, PAST_DUE_BODY) as PaymentPastDueError;
+    expect(error.constructor).toBe(PaymentPastDueError);
+    expect(error.code).toBe("PAYMENT_PAST_DUE");
+    expect(error.status).toBe(402);
+    expect(error.billingUrl).toBe("https://example.test/dashboard#billing");
+  });
+
   it("no usable fields at all: still the typed error, both undefined", () => {
     const error = LexAPIError.fromResponse(403, { code: "PAYMENT_PAST_DUE", error: "Payment past due" }) as PaymentPastDueError;
     expect(error).toBeInstanceOf(PaymentPastDueError);
@@ -129,10 +146,18 @@ describe("PaymentPastDueError", () => {
     const legacyCode = LexAPIError.fromResponse(403, { success: false, code: "TIER_FORBIDDEN", error: "Upgrade required" });
     expect(legacyCode.constructor).toBe(TierForbiddenError);
     // An API before 2.27.0: a failed payment was a 403 without a code.
-    const codeless = LexAPIError.fromResponse(403, { error: "Subscription inactive", message: "Please update your payment method." });
+    const codeless = LexAPIError.fromResponse(403, {
+      error: "Subscription inactive",
+      message: "Please activate your subscription or downgrade to the FREE tier",
+    });
     expect(codeless.constructor).toBe(TierForbiddenError);
     expect(codeless.code).toBe("TIER_FORBIDDEN");
     expect(codeless instanceof PaymentPastDueError).toBe(false);
+    // A 403 without the code stays the tier error, whatever fields it carries.
+    const withField = LexAPIError.fromResponse(403, { error: "Subscription inactive", billingUrl: "https://x.test/b" });
+    expect(withField.constructor).toBe(TierForbiddenError);
+    expect(withField.code).toBe("TIER_FORBIDDEN");
+    expect((withField as unknown as { billingUrl?: unknown }).billingUrl).toBeUndefined();
     // The legacy `error` text is never a code.
     expect(LexAPIError.fromResponse(403, { error: "PAYMENT_PAST_DUE" }).constructor).toBe(TierForbiddenError);
     expect(LexAPIError.fromResponse(403, null).constructor).toBe(TierForbiddenError);

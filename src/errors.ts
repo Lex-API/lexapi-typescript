@@ -329,11 +329,12 @@ export class NotFoundError extends LexAPIError {
   }
 
   /**
-   * `true` when the API has no such endpoint (`details.reason` is
-   * `"unknown_endpoint"`): an older API, a mistyped path, or a national route
-   * for a country that is not available — not a missing document. Read from
-   * `details` only, never from the message; always `false` on APIs before
-   * 2.27.0, which do not send the reason.
+   * `true` when the API (2.27.0 or later) has no such endpoint
+   * (`details.reason` is `"unknown_endpoint"`): a mistyped path, a method
+   * newer than the API, or a national route for a country that is not
+   * available. Always `false` on APIs before 2.27.0; there the message
+   * contains "Unknown API endpoint". Read from `details` only, never from
+   * the message.
    */
   get unknownEndpoint(): boolean {
     return detailsField(this.details, "reason") === "unknown_endpoint";
@@ -491,11 +492,12 @@ export class TierForbiddenError extends LexAPIError {
 
 /**
  * 403 — a subscription payment failed and was not completed in time
- * (`PAYMENT_PAST_DUE`, API 2.27.0). Every API request is refused until the
+ * (`PAYMENT_PAST_DUE`, API 2.27.0). API requests are refused until the
  * payment succeeds, so it is never retried: pay the open invoice in the
  * dashboard ({@link PaymentPastDueError.billingUrl}). Not a
- * `TierForbiddenError` — before API 2.27.0 this state was a 403 without a
- * code, which is raised as `TierForbiddenError`. Legacy-shape body
+ * `TierForbiddenError`. Before API 2.27.0 a failed payment was refused at
+ * once with a 403 without a code, raised as `TierForbiddenError`.
+ * Legacy-shape body
  * (`{code, error, message, accessEndedAt?, billingUrl}`): the getters read
  * `details` first, then the top level of the raw `body`.
  */
