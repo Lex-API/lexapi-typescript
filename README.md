@@ -495,7 +495,7 @@ await client.semanticSearch({ query: "gdpr" }, { signal: controller.signal });
 Every non-2xx response maps to a typed error carrying `code`, `status`, `message`, `details`, `retryAfter`, the raw `body` and parsed `headers`:
 
 ```ts
-import { CreditsExhaustedError, NotFoundError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
+import { CreditsExhaustedError, NotFoundError, PaymentPastDueError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
 
 try {
   await client.semanticSearch({ query: "gdpr" });
@@ -504,14 +504,15 @@ try {
   else if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
   else if (err instanceof CreditsExhaustedError) console.log(`need ${err.weight}, have ${err.available}; resets ${err.resetsAt}`);
   else if (err instanceof TierForbiddenError) console.log((err.body as { upgradeUrl?: string })?.upgradeUrl);
-  else if (err instanceof NotFoundError) console.log("no such document");
+  else if (err instanceof PaymentPastDueError) console.log(`pay the open invoice: ${err.billingUrl}`);
+  else if (err instanceof NotFoundError) console.log(err.unknownEndpoint ? "no such endpoint" : "no such document");
   else throw err;
 }
 ```
 
 | Class | `code` | HTTP |
 | --- | --- | --- |
-| `NotFoundError` | `NOT_FOUND` | 404 |
+| `NotFoundError` | `NOT_FOUND` | 404 — `.unknownEndpoint` is `true` when the API has no such endpoint — an older API, a mistyped path, or a national route for a country that is not available; `false` on APIs before 2.27.0 |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.value` / `.allowed` name a refused filter, the value sent and the allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
@@ -519,6 +520,7 @@ try {
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
 | `NationalSemanticNotEnabledError` | `NATIONAL_SEMANTIC_NOT_ENABLED` | 409 — this jurisdiction has no semantic index to search; `.jurisdiction`; not retryable, refunded |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
+| `PaymentPastDueError` | `PAYMENT_PAST_DUE` | 403 — a subscription payment failed and was not completed in time; pay the open invoice in the dashboard (`.billingUrl`; `.accessEndedAt` when known); not retryable; before API 2.27.0 this state was a code-less 403 raised as `TierForbiddenError` |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |

@@ -20,6 +20,15 @@ picks up `0.2.0` on its own.
   `LegislationAsOfRequest`, `LegislationAsOfResponse`, `LegislationAsOfVersion`,
   `LegislationAsOfAct`, `LegislationAsOfProvision`, `AsOfLookupReason`, `Provenance`; runtime list
   `AS_OF_LOOKUP_REASONS`.
+- **`PaymentPastDueError`** (403, code `PAYMENT_PAST_DUE`, API 2.27.0): a subscription payment failed
+  and was not completed in time, and every API request is refused until the payment succeeds. Never
+  retried. `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
+  the API says so. It extends `LexAPIError`, not `TierForbiddenError`; with this SDK on an API before
+  2.27.0 the state is still a code-less 403 raised as `TierForbiddenError`. `"PAYMENT_PAST_DUE"` is
+  added to `ErrorCode`.
+- **`NotFoundError.unknownEndpoint`**: `true` when the API has no such endpoint — an older API, a
+  mistyped path, or a national route for a country that is not available — rather than a missing
+  document. Always `false` on APIs before 2.27.0.
 
 ### Fixed
 

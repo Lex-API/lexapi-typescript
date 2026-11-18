@@ -21,6 +21,10 @@ export type ErrorCode =
   // 429 on a legacy daily-call plan: the quota is used up (API 2.4.0).
   | "QUOTA_EXHAUSTED"
   | "TIER_FORBIDDEN"
+  // 403 — a subscription payment failed and was not completed in time
+  // (API 2.27.0; legacy shape, top-level `accessEndedAt` / `billingUrl`) —
+  // `PaymentPastDueError`.
+  | "PAYMENT_PAST_DUE"
   | "CREDITS_EXHAUSTED"
   | "UPSTREAM_ERROR"
   | "TIMEOUT"
@@ -276,6 +280,8 @@ export class LexAPIError extends Error {
         return new RateLimitedError(message, status, details, retryAfter, context);
       case "TIER_FORBIDDEN":
         return new TierForbiddenError(message, status, details, retryAfter, context);
+      case "PAYMENT_PAST_DUE":
+        return new PaymentPastDueError(message, status, details, retryAfter, context);
       case "CREDITS_EXHAUSTED":
         return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
       case "NATIONAL_ALLOWANCE_EXHAUSTED":
@@ -305,7 +311,10 @@ export class LexAPIError extends Error {
   }
 }
 
-/** 404 — document or resource missing (`NOT_FOUND`). */
+/**
+ * 404 — document or resource missing (`NOT_FOUND`), or an endpoint the API
+ * does not have (see {@link NotFoundError.unknownEndpoint}).
+ */
 export class NotFoundError extends LexAPIError {
   static override readonly kind: string = "NotFoundError";
   constructor(
@@ -317,6 +326,17 @@ export class NotFoundError extends LexAPIError {
   ) {
     super("NOT_FOUND", message, status, details, retryAfter, context);
     this.name = "NotFoundError";
+  }
+
+  /**
+   * `true` when the API has no such endpoint (`details.reason` is
+   * `"unknown_endpoint"`): an older API, a mistyped path, or a national route
+   * for a country that is not available — not a missing document. Read from
+   * `details` only, never from the message; always `false` on APIs before
+   * 2.27.0, which do not send the reason.
+   */
+  get unknownEndpoint(): boolean {
+    return detailsField(this.details, "reason") === "unknown_endpoint";
   }
 }
 
@@ -466,6 +486,41 @@ export class TierForbiddenError extends LexAPIError {
   ) {
     super("TIER_FORBIDDEN", message, status, details, retryAfter, context);
     this.name = "TierForbiddenError";
+  }
+}
+
+/**
+ * 403 — a subscription payment failed and was not completed in time
+ * (`PAYMENT_PAST_DUE`, API 2.27.0). Every API request is refused until the
+ * payment succeeds, so it is never retried: pay the open invoice in the
+ * dashboard ({@link PaymentPastDueError.billingUrl}). Not a
+ * `TierForbiddenError` — before API 2.27.0 this state was a 403 without a
+ * code, which is raised as `TierForbiddenError`. Legacy-shape body
+ * (`{code, error, message, accessEndedAt?, billingUrl}`): the getters read
+ * `details` first, then the top level of the raw `body`.
+ */
+export class PaymentPastDueError extends LexAPIError {
+  static override readonly kind: string = "PaymentPastDueError";
+
+  constructor(
+    message: string,
+    status = 403,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super("PAYMENT_PAST_DUE", message, status, details, retryAfter, context);
+    this.name = "PaymentPastDueError";
+  }
+
+  /** When API access ended (ISO date-time); `undefined` when the server does not say. */
+  get accessEndedAt(): string | undefined {
+    return readString(detailsOrBodyField(this.details, this.body, "accessEndedAt"));
+  }
+
+  /** Where to pay the open invoice (absolute URL of the dashboard's billing page). */
+  get billingUrl(): string | undefined {
+    return readString(detailsOrBodyField(this.details, this.body, "billingUrl"));
   }
 }
 
