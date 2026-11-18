@@ -54,7 +54,7 @@ describe("default fetch", () => {
 });
 
 describe("custom fetch", () => {
-  it("is called directly, with the same arguments and receiver", async () => {
+  it("is called directly, without a receiver", async () => {
     const seen: Array<{ receiver: unknown; args: unknown[] }> = [];
     const custom = function (this: unknown, ...args: unknown[]): Promise<Response> {
       seen.push({ receiver: this, args });
@@ -77,7 +77,16 @@ describe("custom fetch", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect((init.headers as Record<string, string>)["x-api-key"]).toBe("lex_test_key");
     expect("body" in init).toBe(false);
-    // Called as a method of the client's internal options, as before.
-    expect((receiver as { fetchFn?: unknown }).fetchFn).toBe(custom);
+    expect(receiver).toBeUndefined();
+  });
+
+  it("may be the runtime's own fetch", async () => {
+    const { strict, calls } = strictGlobalFetch();
+    const client = new LexAPI({ ...OPTIONS, fetch: strict });
+
+    const info = await client.getInfo();
+
+    expect(info.service).toBe("LexAPI");
+    expect(calls).toHaveLength(1);
   });
 });

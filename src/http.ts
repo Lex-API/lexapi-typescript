@@ -451,9 +451,11 @@ export class HttpClient {
     body: string | undefined,
     signal: AbortSignal,
   ): Promise<Response> {
+    // Called unbound: a runtime's own `fetch` rejects any other receiver.
+    const fetchFn = this.opts.fetchFn;
     let target = url;
     for (let hop = 0; ; hop++) {
-      const response = await this.opts.fetchFn(target, {
+      const response = await fetchFn(target, {
         method,
         headers,
         ...(body !== undefined ? { body } : {}),
