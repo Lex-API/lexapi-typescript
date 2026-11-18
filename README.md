@@ -438,6 +438,8 @@ const client = new LexAPI({
 });
 ```
 
+Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the default ports), at most five per attempt; any other redirect is refused with a `NetworkError`, so the API key is never sent to another origin.
+
 ## Retries, timeouts and cancellation
 
 The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [PLAN.md §1.2](PLAN.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):

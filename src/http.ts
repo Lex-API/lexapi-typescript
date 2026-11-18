@@ -162,6 +162,41 @@ const ORIGIN_DEPENDENT_STATUSES = new Set([502, 503, 504]);
 /** Proxy-only statuses (Cloudflare unknown error / origin timeout): the app may have charged. */
 const PROXY_STATUSES = new Set([520, 524]);
 
+/** The redirect statuses `fetch` follows. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Most redirects followed for one attempt. */
+const MAX_REDIRECTS = 5;
+
+/**
+ * Where a redirect may lead: the origin it came from, or the same host over
+ * HTTPS when both sides use the default port. Anything else is refused with
+ * a `NetworkError` that names the target origin only.
+ */
+function redirectTarget(location: string, from: URL): URL {
+  let to: URL;
+  try {
+    to = new URL(location, from);
+  } catch {
+    throw new NetworkError("Refused to follow a redirect with an invalid Location header");
+  }
+  if (to.protocol !== "http:" && to.protocol !== "https:") {
+    throw new NetworkError("Refused to follow a redirect to a URL that is not http(s)");
+  }
+  if (to.username !== "" || to.password !== "") {
+    throw new NetworkError(`Refused to follow a redirect to a URL that carries credentials (${to.origin})`);
+  }
+  const httpsUpgrade =
+    from.protocol === "http:" &&
+    to.protocol === "https:" &&
+    to.hostname === from.hostname &&
+    from.port === "" &&
+    to.port === "";
+  if (to.origin !== from.origin && !httpsUpgrade) {
+    throw new NetworkError(`Refused to follow a redirect to another origin (${to.origin})`);
+  }
+  return to;
+}
+
 /** `true` when a transport error (or one of its causes) carries a never-reached-the-app code. */
 export function isNeverReachedError(error: unknown, depth = 0): boolean {
   if (depth > 6 || typeof error !== "object" || error === null) return false;
@@ -219,6 +254,10 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  *   `RequestAbortedError`, never retried.
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
  *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
+ * - Redirects are followed only within the API origin (or to the same host
+ *   over HTTPS on the default ports), at most five per attempt; any other
+ *   redirect is refused with a `NetworkError`, so the API key is never sent
+ *   to another origin.
  * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
  *   `RateLimit-Reset` and the JSON `retryAfter` field; on a 503
  *   `NATIONAL_SEMANTIC_UNAVAILABLE`, the JSON `retryAfter` field.
@@ -335,12 +374,7 @@ export class HttpClient {
       let response: Response | undefined;
       let retryTransport = false;
       try {
-        response = await this.opts.fetchFn(url, {
-          method,
-          headers,
-          ...(serializedBody !== undefined ? { body: serializedBody } : {}),
-          signal: controller.signal,
-        });
+        response = await this.fetchWithinOrigin(url, method, headers, serializedBody, controller.signal, touch);
         touch();
         if (response.ok) {
           return await onSuccess(response, { signal: controller.signal, timeoutMs, touch });
@@ -388,6 +422,53 @@ export class HttpClient {
         continue;
       }
       throw error;
+    }
+  }
+
+  /**
+   * `fetch` with redirects followed here rather than by the runtime, which
+   * would repeat every request header to whichever host a redirect names.
+   * Method and body change as `fetch` changes them: a 303, or a 301/302
+   * answer to a POST, continues as a body-less GET; 307/308 repeat the request.
+   */
+  private async fetchWithinOrigin(
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    signal: AbortSignal,
+    touch: () => void,
+  ): Promise<Response> {
+    let target = url;
+    for (let hop = 0; ; hop++) {
+      const response = await this.opts.fetchFn(target, {
+        method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+        redirect: "manual",
+        signal,
+      });
+      if (response.type === "opaqueredirect") {
+        throw new NetworkError("The API answered with a redirect, which this runtime does not expose");
+      }
+      const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
+      if (location === null) return response;
+      touch();
+      await response.body?.cancel().catch(() => undefined);
+      const next = redirectTarget(location, new URL(target));
+      if (hop >= MAX_REDIRECTS) {
+        throw new NetworkError(`Too many redirects (more than ${MAX_REDIRECTS})`);
+      }
+      if (
+        (response.status === 303 && method !== "GET") ||
+        ((response.status === 301 || response.status === 302) && method === "POST")
+      ) {
+        method = "GET";
+        body = undefined;
+        headers = { ...headers };
+        delete headers["content-type"];
+      }
+      target = next.href;
     }
   }
 }
