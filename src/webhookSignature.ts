@@ -25,7 +25,9 @@ export type WebhookBody = string | Uint8Array | ArrayBuffer;
 export interface VerifyWebhookOptions {
   /**
    * Reject deliveries whose signed `timestamp` is further than this from
-   * now (replay guard). Default 300 000 ms (5 minutes). `0` disables the check.
+   * now (replay guard; the edge passes, compared in whole microseconds).
+   * Default 300 000 ms (5 minutes). `0` disables the check, a negative value
+   * rejects every delivery, and `NaN` is a `RangeError`.
    */
   toleranceMs?: number;
   /** Clock override (testing). Default `Date.now()`. */
@@ -68,6 +70,10 @@ function assertSecret(secret: string): void {
       "Webhook secret is empty — pass the secret returned when the webhook was created",
     );
   }
+  // A key with a lone surrogate has no UTF-8 bytes: never sign with a repaired one.
+  if (!isWellFormed(secret)) {
+    throw new WebhookSignatureError("missing_secret", "Webhook secret is not well-formed Unicode (lone surrogate)");
+  }
 }
 
 type SubtleCryptoLike = {
@@ -94,8 +100,27 @@ async function getSubtle(): Promise<SubtleCryptoLike> {
   throw new Error("Web Crypto (crypto.subtle) is not available in this runtime");
 }
 
+/** A lone surrogate: a high one not followed by a low one, or a low one not preceded by a high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** `true` when a string has no lone surrogate, so it has a UTF-8 encoding. */
+function isWellFormed(text: string): boolean {
+  const native = (String.prototype as { isWellFormed?: (this: string) => boolean }).isWellFormed;
+  return typeof native === "function" ? native.call(text) : !LONE_SURROGATE.test(text);
+}
+
+/**
+ * The bytes a body stands for: a string's UTF-8 encoding. A string with a
+ * lone surrogate has none (`TextEncoder` would write U+FFFD in its place, a
+ * different text), so it is refused rather than repaired.
+ */
 function toBytes(body: WebhookBody): Uint8Array {
-  if (typeof body === "string") return new TextEncoder().encode(body);
+  if (typeof body === "string") {
+    if (!isWellFormed(body)) {
+      throw new WebhookSignatureError("malformed_body", "Webhook body string is not well-formed Unicode (lone surrogate)");
+    }
+    return new TextEncoder().encode(body);
+  }
   if (body instanceof Uint8Array) return body;
   return new Uint8Array(body);
 }
@@ -106,6 +131,49 @@ function toHex(buffer: ArrayBuffer): string {
   return hex;
 }
 
+/** Remove leading and trailing spaces, tabs, carriage returns and line feeds, and nothing else. */
+function trimHeader(value: string): string {
+  const space = (code: number) => code === 0x20 || code === 0x09 || code === 0x0d || code === 0x0a;
+  let start = 0;
+  let end = value.length;
+  while (start < end && space(value.charCodeAt(start))) start++;
+  while (end > start && space(value.charCodeAt(end - 1))) end--;
+  return value.slice(start, end);
+}
+
+const TIMESTAMP = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+/**
+ * A signed `timestamp` as epoch microseconds: a string
+ * `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM` offset,
+ * naming a date and time that exist, in years 0001–9999 (SDK contract §1.9).
+ * Fraction digits past the sixth are cut. Anything else is `undefined`.
+ */
+function timestampMicros(value: unknown): bigint | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = TIMESTAMP.exec(value);
+  if (!match) return undefined;
+  const [y, mo, d, h, mi, sec] = match.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const fraction = match[7];
+  const sign = match[8];
+  const offH = sign === undefined ? 0 : Number(match[9]);
+  const offM = sign === undefined ? 0 : Number(match[10]);
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  if (y < 1 || days === undefined || d < 1 || d > days || h > 23 || mi > 59 || sec > 59 || offH > 23 || offM > 59) return undefined;
+  const date = new Date(0);
+  date.setUTCFullYear(y, mo - 1, d);
+  date.setUTCHours(h, mi, sec, 0);
+  const micros = fraction === undefined ? 0 : Number(fraction.slice(0, 6).padEnd(6, "0"));
+  const offset = (sign === "-" ? -1 : 1) * (offH * 60 + offM) * 60_000_000;
+  return BigInt(date.getTime()) * BigInt(1000) + BigInt(micros) - BigInt(offset);
+}
+
+/** A finite millisecond figure as whole microseconds (rounded to the nearest). */
+function micros(ms: number): bigint {
+  return BigInt(Math.round(ms * 1000));
+}
+
 /** Constant-time comparison of two equal-purpose strings. */
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -114,7 +182,11 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Compute the expected `X-Webhook-Signature` (hex HMAC-SHA256) for a raw body. */
+/**
+ * Compute the expected `X-Webhook-Signature` (hex HMAC-SHA256) for a raw
+ * body. A string body is signed as its UTF-8 encoding; a string with a lone
+ * surrogate has none and throws `WebhookSignatureError("malformed_body")`.
+ */
 export async function computeSignature(rawBody: WebhookBody, secret: string): Promise<string> {
   assertSecret(secret);
   const subtle = await getSubtle();
@@ -133,25 +205,40 @@ export async function computeSignature(rawBody: WebhookBody, secret: string): Pr
  * HMAC-SHA256 of `rawBody` under `secret`. Constant-time comparison.
  * Signature only — use {@link verifyWebhook} to also check freshness.
  * Throws `WebhookSignatureError("missing_secret")` for an empty secret
- * (a configuration error, not a bad delivery).
+ * (a configuration error, not a bad delivery). A string body with a lone
+ * surrogate is `false`.
  */
 export async function verifySignature(
   rawBody: WebhookBody,
   signature: string | null | undefined,
   secret: string,
 ): Promise<boolean> {
-  // §1.9: a missing, empty, non-ASCII or non-hex header is a plain failure.
-  const candidate = typeof signature === "string" ? signature.trim().toLowerCase() : "";
-  const expected = await computeSignature(rawBody, secret); // validates the secret first
-  if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
-  return timingSafeEqual(expected, candidate);
+  // §1.9: spaces, tabs, CR and LF around the header are removed, nothing
+  // else; a missing, empty, non-ASCII or non-hex header is a plain failure.
+  const candidate = typeof signature === "string" ? trimHeader(signature) : "";
+  assertSecret(secret);
+  // A string with a lone surrogate has no UTF-8 bytes to verify: a plain failure.
+  if (typeof rawBody === "string" && !isWellFormed(rawBody)) return false;
+  const expected = await computeSignature(rawBody, secret);
+  if (!/^[0-9a-fA-F]{64}$/.test(candidate)) return false;
+  return timingSafeEqual(expected, candidate.toLowerCase());
 }
 
 /**
  * Verify a delivery and parse it into a typed {@link WebhookPayload}
- * (switch on `event`). Throws {@link WebhookSignatureError} on a missing
- * or invalid signature, a non-JSON body, or a `timestamp` outside
- * `toleranceMs` (default 5 minutes).
+ * (switch on `event`). Throws {@link WebhookSignatureError}; its `reason`
+ * is the first check that fails, in this order: an empty secret
+ * (`missing_secret`), an absent or empty header (`missing_signature`), the
+ * signature (`invalid_signature`), a body that is not one UTF-8 JSON object
+ * (`malformed_body`), a `timestamp` that is not
+ * `YYYY-MM-DDTHH:MM:SS[.fraction]` with `Z` or a `±HH:MM` offset, or is
+ * further than `toleranceMs` (default 5 minutes) from now (`stale_timestamp`).
+ *
+ * The body is decoded as strict UTF-8 (one leading byte order mark is
+ * ignored) and parsed from the same bytes the signature covers, as one
+ * strict JSON text (no `NaN` or `Infinity`). A string body stands for its
+ * UTF-8 encoding; a string with a lone surrogate has none and fails
+ * verification (`invalid_signature`).
  *
  * ```ts
  * app.post("/lexapi-webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -172,31 +259,49 @@ export async function verifyWebhook(
   options: VerifyWebhookOptions = {},
 ): Promise<WebhookPayload> {
   assertSecret(secret);
+  const toleranceMs = options.toleranceMs ?? 300_000;
+  if (typeof toleranceMs !== "number" || Number.isNaN(toleranceMs)) {
+    throw new RangeError(`toleranceMs must be a number, got ${String(toleranceMs)}`);
+  }
   if (!signature) {
     throw new WebhookSignatureError("missing_signature", "Missing X-Webhook-Signature header");
   }
-  if (!(await verifySignature(rawBody, signature, secret))) {
+  if (typeof rawBody === "string" && !isWellFormed(rawBody)) {
+    throw new WebhookSignatureError("invalid_signature", "Webhook body string is not well-formed Unicode (lone surrogate)");
+  }
+  const bytes = toBytes(rawBody);
+  if (!(await verifySignature(bytes, signature, secret))) {
     throw new WebhookSignatureError("invalid_signature", "X-Webhook-Signature does not match the body");
   }
-  let payload: WebhookPayload;
+  let payload: unknown;
   try {
-    const text = typeof rawBody === "string" ? rawBody : new TextDecoder().decode(toBytes(rawBody));
-    payload = JSON.parse(text) as WebhookPayload;
+    // The bytes the signature covers, decoded as strict UTF-8: any invalid
+    // sequence throws; one leading byte order mark is dropped.
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+    payload = JSON.parse(text);
   } catch {
     throw new WebhookSignatureError("malformed_body", "Webhook body is not valid JSON");
   }
-  const toleranceMs = options.toleranceMs ?? 300_000;
-  if (toleranceMs > 0) {
-    // A signed body that is JSON `null` has no timestamp either (and is stale).
-    const timestamp: unknown = typeof payload === "object" && payload !== null ? (payload as { timestamp?: unknown }).timestamp : undefined;
-    const sentAt = Date.parse(String(timestamp));
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new WebhookSignatureError("malformed_body", "Webhook body is not a JSON object");
+  }
+  // 0 disables the window; a negative one admits nothing. The distance is
+  // compared in whole microseconds, the edge included.
+  if (toleranceMs !== 0) {
+    const sentAt = timestampMicros((payload as { timestamp?: unknown }).timestamp);
     const now = options.now ?? Date.now();
-    if (Number.isNaN(sentAt) || Math.abs(now - sentAt) > toleranceMs) {
+    let fresh = sentAt !== undefined && toleranceMs > 0;
+    if (fresh && toleranceMs !== Infinity) {
+      const distance = micros(now) - sentAt!;
+      const limit = micros(toleranceMs);
+      fresh = distance <= limit && -distance <= limit;
+    }
+    if (!fresh) {
       throw new WebhookSignatureError(
         "stale_timestamp",
         `Webhook timestamp is outside the ${toleranceMs} ms tolerance window`,
       );
     }
   }
-  return payload;
+  return payload as WebhookPayload;
 }

@@ -301,15 +301,22 @@ export class LexAPIError extends Error {
     if (!typedCode && statusCode === undefined && status < 500) {
       return new LexAPIError(code, message, status, details, retryAfter, context);
     }
-    // §1.2: a quota-exhausted 429 exposes no retry-after value.
-    if (code === "QUOTA_EXHAUSTED" || (code === "RATE_LIMITED" && isQuota429(body, headers))) {
+    // §1.2: a quota 429 exposes no retry-after value. On a 429 the code
+    // QUOTA_EXHAUSTED, top-level or in the typed envelope, wins over any
+    // other code the body carries. Off a 429 the code changes neither the
+    // wait nor the retry-after value.
+    if (
+      code === "QUOTA_EXHAUSTED" ||
+      (status === 429 && hasQuotaCode(body)) ||
+      (status === 429 && code === "RATE_LIMITED" && isQuota429(body, headers))
+    ) {
       return new RateLimitedError(
         message,
         status,
         details,
-        undefined,
+        status === 429 ? undefined : retryAfter,
         context,
-        code === "QUOTA_EXHAUSTED" ? "QUOTA_EXHAUSTED" : "RATE_LIMITED",
+        code === "RATE_LIMITED" ? "RATE_LIMITED" : "QUOTA_EXHAUSTED",
       );
     }
     switch (code) {
@@ -620,7 +627,9 @@ export class RateLimitedError extends LexAPIError {
    * `undefined`.
    */
   get quotaExhausted(): boolean {
-    return this.code === "QUOTA_EXHAUSTED" || isQuota429(this.body, this.headers);
+    // §1.2: on any status when the code is QUOTA_EXHAUSTED; the body (code or
+    // shape) counts only on a 429 whose code is RATE_LIMITED.
+    return this.code === "QUOTA_EXHAUSTED" || (this.status === 429 && this.code === "RATE_LIMITED" && isQuota429(this.body, this.headers));
   }
 
   /** When a legacy quota resets: the body's `resetsAt`, else `usage.resetsAt`. */
@@ -632,7 +641,11 @@ export class RateLimitedError extends LexAPIError {
   }
 }
 
-/** 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade the plan. */
+/**
+ * 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade
+ * the plan. A failed payment (`PAYMENT_PAST_DUE`) is the subclass
+ * {@link PaymentPastDueError}: check for it first to tell the two apart.
+ */
 export class TierForbiddenError extends LexAPIError {
   static override readonly kind: string = "TierForbiddenError";
   constructor(
@@ -641,8 +654,9 @@ export class TierForbiddenError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    code: "TIER_FORBIDDEN" | "PAYMENT_PAST_DUE" = "TIER_FORBIDDEN",
   ) {
-    super("TIER_FORBIDDEN", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "TierForbiddenError";
   }
 }
@@ -651,14 +665,15 @@ export class TierForbiddenError extends LexAPIError {
  * 403 — a subscription payment failed and was not completed in time
  * (`PAYMENT_PAST_DUE`, API 2.27.0). API requests are refused until the
  * payment succeeds, so it is never retried: pay the open invoice in the
- * dashboard ({@link PaymentPastDueError.billingUrl}). Not a
- * `TierForbiddenError`. Before API 2.27.0 a failed payment was refused at
- * once with a 403 without a code, raised as `TierForbiddenError`.
+ * dashboard ({@link PaymentPastDueError.billingUrl}). Extends
+ * `TierForbiddenError`, so a handler for that class also catches it; its
+ * `code` is `PAYMENT_PAST_DUE`. Before API 2.27.0 a failed payment was
+ * refused at once with a 403 without a code, raised as `TierForbiddenError`.
  * Legacy-shape body
  * (`{code, error, message, accessEndedAt?, billingUrl}`): the getters read
  * `details` first, then the top level of the raw `body`.
  */
-export class PaymentPastDueError extends LexAPIError {
+export class PaymentPastDueError extends TierForbiddenError {
   static override readonly kind: string = "PaymentPastDueError";
 
   constructor(
@@ -668,7 +683,7 @@ export class PaymentPastDueError extends LexAPIError {
     retryAfter?: number,
     context?: LexAPIErrorContext,
   ) {
-    super("PAYMENT_PAST_DUE", message, status, details, retryAfter, context);
+    super(message, status, details, retryAfter, context, "PAYMENT_PAST_DUE");
     this.name = "PaymentPastDueError";
   }
 
@@ -1189,9 +1204,14 @@ function detailsField(details: unknown, key: string): unknown {
   return undefined;
 }
 
+/** `QUOTA_EXHAUSTED` as the top-level `code` or as `error.code` of the typed envelope. */
+function hasQuotaCode(body: unknown): boolean {
+  return detailsField(body, "code") === "QUOTA_EXHAUSTED" || detailsField(bodyField(body, "error"), "code") === "QUOTA_EXHAUSTED";
+}
+
 /** SDK contract §1.2 quota-429 test. */
 function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolean {
-  if (detailsField(body, "code") === "QUOTA_EXHAUSTED") return true;
+  if (hasQuotaCode(body)) return true;
   // Fallback for servers before API 2.4.0 (no top-level code).
   const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
   if (typeof resetsAt !== "string") return false;

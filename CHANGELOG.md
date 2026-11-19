@@ -16,6 +16,11 @@ Type-level changes to check when upgrading:
   `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
 - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
   `DocumentVersionResponse` it returned before.
+- `ExportStream.truncated` is typed `boolean` (was `boolean | undefined`).
+- `PaymentPastDueError` is a subclass of `TierForbiddenError`. Where a value's type is a union
+  that includes `PaymentPastDueError`, the `false` branch of `instanceof TierForbiddenError` no
+  longer includes it. At run time, a `TierForbiddenError` branch placed before a
+  `PaymentPastDueError` branch takes failed payments too.
 - `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
   `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares a
   property of the same name must rename it.
@@ -67,7 +72,7 @@ Type-level changes to check when upgrading:
 - **`PaymentPastDueError`** (403, code `PAYMENT_PAST_DUE`, API 2.27.0): a subscription payment failed
   and was not completed in time; API requests are refused until the payment succeeds. Never
   retried. `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
-  the API says so. It extends `LexAPIError`, not `TierForbiddenError`. Before API 2.27.0 a failed
+  the API says so. It extends `TierForbiddenError`. Before API 2.27.0 a failed
   payment was refused at once with a 403 without a code, raised as `TierForbiddenError`.
   `"PAYMENT_PAST_DUE"` is added to `ErrorCode`. Earlier SDK versions raise the base `LexAPIError`
   for this code.
@@ -119,7 +124,59 @@ Type-level changes to check when upgrading:
   `totalEdges`/`offset` (or a deliveries `total`), three pages in a row that repeat the one before.
   The page that shows the stall is not yielded and is on `err.body`. Cites/cited-by walks also end
   once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
-  A starting `offset`/`limit` that is not a non-negative (positive) integer is a `RangeError`.
+  A starting `offset` that is not an integer from 0, or a `limit` that is not an integer from 1, up
+  to 2^53 − 1, is a `RangeError` before any request.
+- `PaymentPastDueError` extends `TierForbiddenError`: an `instanceof TierForbiddenError` check also
+  catches a failed payment, as it did for the 403 without a code that APIs before 2.27.0 send.
+  Check `PaymentPastDueError` first to tell the two apart. `TierForbiddenError`'s constructor takes
+  an optional sixth parameter, the code (`"TIER_FORBIDDEN"` by default).
+- `verifyWebhook` decodes the body as strict UTF-8 before parsing it: a body that is not valid
+  UTF-8 (an invalid or truncated sequence, an encoded surrogate, an overlong form, latin-1 text) is
+  `WebhookSignatureError("malformed_body")`, like a body that is not JSON. Before, invalid bytes
+  were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
+  at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
+  covers). The signature check is unchanged.
+- A string webhook body with a lone surrogate (it has no UTF-8 encoding) fails verification:
+  `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
+  and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, such a string
+  was signed as U+FFFD; `verifyWebhook` parsed the string with the surrogate in it.
+- `verifyWebhook` reports the first failing check, in this order: `missing_secret`,
+  `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`,
+  `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
+  `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
+- The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
+  offset, naming a date and time that exist, in years 0001–9999; anything else is
+  `stale_timestamp`. Before, any text `Date.parse` accepted was read (a lower-case `z`, RFC 2822
+  dates). The distance from now is compared in whole microseconds (fraction digits past the sixth
+  are cut), and a delivery exactly at the edge of the window passes.
+- `toleranceMs: NaN` is a `RangeError`, and a negative `toleranceMs` rejects every delivery as
+  `stale_timestamp`. Before, both turned the replay check off. `0` still turns it off.
+- A webhook secret with a lone surrogate (it has no UTF-8 encoding) is
+  `WebhookSignatureError("missing_secret")` in every helper. Before, it was used with each surrogate
+  replaced by U+FFFD.
+- The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order mark,
+  a no-break space) fails. Hex digits in either case are accepted, as before.
+- Export lines end at a line feed byte only and are decoded as strict UTF-8, whatever charset the
+  response names: a line that is not UTF-8 is counted in `invalidLines` and the next line is read
+  intact. Before, invalid bytes were replaced with U+FFFD and the line was parsed. Lines are trimmed
+  of spaces, tabs and CR only (before: all Unicode whitespace); one byte order mark at the very start
+  of the stream is ignored, and one anywhere else makes its line invalid.
+- Export: `meta` is set only from the very first line of the stream; a `_meta` line after it is
+  skipped and not counted, also when it carries `_done` or `_error` (before, such a line was read as
+  the trailer). When `_meta` or `_done` holds an object, the fields are read from that object only
+  (before, keys beside it on the line were read too and won); the flat `{"_meta": true, ...}` form is
+  still read from the line. `X-Export-Truncated` counts only as `1` or `0`; any other value is
+  absent and `_meta.truncated` decides (before, it read as `false`). `stream.truncated` is `false` when neither the trailer, the header nor
+  `_meta` says (before: `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read
+  like `Uint8Array`; a chunk that is not bytes ends the stream with `NetworkError` and releases the
+  connection.
+- A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
+  (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries. The
+  shape test for servers before API 2.4.0 (`usage.resetsAt`, no wait) applies only to a 429 whose
+  code is `RATE_LIMITED`; a 429 with another code is retried as before. Off a 429, the code
+  `QUOTA_EXHAUSTED` no longer drops a `Retry-After` wait: `retryAfter` keeps it and the retry waits
+  it.
+- A `PAYMENT_PAST_DUE` answer is never retried, on any status (a 429 included).
 
 ### Fixed
 
@@ -145,12 +202,19 @@ Type-level changes to check when upgrading:
   wait with `maxDelayMs: Infinity`, or a `timeoutMs` above the limit, is clamped to it.
   `timeoutMs: Infinity` sets no limit.
 - An asctime `Retry-After` date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
+- `paginateNationalDocuments` checks `limit` before the first request: a value that is not a
+  positive integer is a `RangeError`, as on the other iterators. Before, it was sent.
+- Cites/cited-by walks: a page carrying `totalEdges` or an echoed `offset` ends a run of repeated
+  pages but is still the page the next one is compared with. Before, the comparison restarted
+  after it, so a server repeating the same page threw one request later.
+- Cites/cited-by walks: a group with a `citationCount` of 0 and a non-empty edge list counts its
+  list. Before, it counted 0 and the walk ended after that page.
 - A page without its list ended the walk with a `TypeError`; a `citationCount` that is not a count
   mis-stepped the offset (a walk could end early or re-request rows). Both are handled now.
 - An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
   the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
 - `verifyWebhook` on a correctly signed body that is JSON `null` throws
-  `WebhookSignatureError("stale_timestamp")`. Before, it threw a `TypeError`.
+  `WebhookSignatureError("malformed_body")`. Before, it threw a `TypeError`.
 
 ### Security
 

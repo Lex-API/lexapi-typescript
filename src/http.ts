@@ -537,6 +537,8 @@ function shouldRetryStatus(
   call: { isGet: boolean; free: boolean; readOnly: boolean },
 ): boolean {
   const status = error.status;
+  // A failed payment is refused until it is paid, whatever the status.
+  if (error.code === "PAYMENT_PAST_DUE") return false;
   // A server-side budget timeout answered as a partial 503 would hit the same
   // budget again: leave the retry (or a narrower request) to the caller.
   if (status === 503 && isBudgetTimeout(error.body)) return false;
