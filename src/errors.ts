@@ -307,7 +307,7 @@ export class LexAPIError extends Error {
     if (
       code === "QUOTA_EXHAUSTED" ||
       (status === 429 && hasQuotaCode(body)) ||
-      (code === "RATE_LIMITED" && isQuota429(body, headers))
+      (status === 429 && code === "RATE_LIMITED" && isQuota429(body, headers))
     ) {
       return new RateLimitedError(
         message,
@@ -626,7 +626,9 @@ export class RateLimitedError extends LexAPIError {
    * `undefined`.
    */
   get quotaExhausted(): boolean {
-    return this.code === "QUOTA_EXHAUSTED" || isQuota429(this.body, this.headers);
+    // §1.2: on any status when the code is QUOTA_EXHAUSTED; the body (code or
+    // shape) counts only on a 429 whose code is RATE_LIMITED.
+    return this.code === "QUOTA_EXHAUSTED" || (this.status === 429 && this.code === "RATE_LIMITED" && isQuota429(this.body, this.headers));
   }
 
   /** When a legacy quota resets: the body's `resetsAt`, else `usage.resetsAt`. */

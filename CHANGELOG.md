@@ -16,6 +16,7 @@ Type-level changes to check when upgrading:
   `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
 - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
   `DocumentVersionResponse` it returned before.
+- `ExportStream.truncated` is typed `boolean` (was `boolean | undefined`).
 - `PaymentPastDueError` is a subclass of `TierForbiddenError`. Where a value's type is a union
   that includes `PaymentPastDueError`, the `false` branch of `instanceof TierForbiddenError` no
   longer includes it. At run time, a `TierForbiddenError` branch placed before a
@@ -136,14 +137,32 @@ Type-level changes to check when upgrading:
   covers). The signature check is unchanged.
 - A string webhook body with a lone surrogate (it has no UTF-8 encoding) fails verification:
   `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
-  and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, the surrogate was
-  replaced with U+FFFD and the result was signed and parsed.
-- Export lines are decoded one by one as strict UTF-8, whatever charset the response names: a line
-  that is not valid UTF-8 is counted in `invalidLines` and the next line is read intact. Before,
-  invalid bytes were replaced with U+FFFD and the line was parsed. One byte order mark at the start
-  of the stream is ignored, as before.
+  and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, such a string
+  was signed as U+FFFD; `verifyWebhook` parsed the string with the surrogate in it.
+- `verifyWebhook` reports the first failing check, in this order: `missing_secret`,
+  `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`,
+  `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
+  `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
+- The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
+  offset, with a real date and time; anything else is `stale_timestamp`. Before, any text
+  `Date.parse` accepted was read (a lower-case `z`, RFC 2822 dates).
+- The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order mark,
+  a no-break space) fails. Hex digits in either case are accepted, as before.
+- Export lines end at a line feed byte only and are decoded as strict UTF-8, whatever charset the
+  response names: a line that is not UTF-8 is counted in `invalidLines` and the next line is read
+  intact. Before, invalid bytes were replaced with U+FFFD and the line was parsed. Lines are trimmed
+  of spaces, tabs and CR only (before: all Unicode whitespace); one byte order mark at the very start
+  of the stream is ignored, and one anywhere else makes its line invalid.
+- Export: `meta` is set only from the very first line of the stream; a `_meta` line after it is
+  skipped and not counted. `stream.truncated` is `false` when neither the trailer, the header nor
+  `_meta` says (before: `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read
+  like `Uint8Array`; a chunk that is not bytes ends the stream with `NetworkError` and releases the
+  connection.
 - A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
-  (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries.
+  (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries. The
+  shape test for servers before API 2.4.0 (`usage.resetsAt`, no wait) applies only to a 429 whose
+  code is `RATE_LIMITED`; a 429 with another code is retried as before.
+- A `PAYMENT_PAST_DUE` answer is never retried, on any status (a 429 included).
 
 ### Fixed
 

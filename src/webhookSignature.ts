@@ -125,6 +125,43 @@ function toHex(buffer: ArrayBuffer): string {
   return hex;
 }
 
+/** Remove leading and trailing spaces, tabs, carriage returns and line feeds, and nothing else. */
+function trimHeader(value: string): string {
+  const space = (code: number) => code === 0x20 || code === 0x09 || code === 0x0d || code === 0x0a;
+  let start = 0;
+  let end = value.length;
+  while (start < end && space(value.charCodeAt(start))) start++;
+  while (end > start && space(value.charCodeAt(end - 1))) end--;
+  return value.slice(start, end);
+}
+
+const TIMESTAMP = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+/**
+ * A signed `timestamp` as epoch milliseconds: a string
+ * `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM` offset, a
+ * real calendar date and time (SDK contract §1.9). Anything else is
+ * `undefined`.
+ */
+function timestampMs(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = TIMESTAMP.exec(value);
+  if (!match) return undefined;
+  const [y, mo, d, h, mi, sec] = match.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const fraction = match[7];
+  const sign = match[8];
+  const offH = sign === undefined ? 0 : Number(match[9]);
+  const offM = sign === undefined ? 0 : Number(match[10]);
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  if (days === undefined || d < 1 || d > days || h > 23 || mi > 59 || sec > 59 || offH > 23 || offM > 59) return undefined;
+  const date = new Date(0);
+  date.setUTCFullYear(y, mo - 1, d);
+  date.setUTCHours(h, mi, sec, 0);
+  const offset = (sign === "-" ? -1 : 1) * (offH * 60 + offM) * 60_000;
+  return date.getTime() + (fraction === undefined ? 0 : Number(`0.${fraction}`) * 1000) - offset;
+}
+
 /** Constant-time comparison of two equal-purpose strings. */
 function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -164,21 +201,26 @@ export async function verifySignature(
   signature: string | null | undefined,
   secret: string,
 ): Promise<boolean> {
-  // §1.9: a missing, empty, non-ASCII or non-hex header is a plain failure.
-  const candidate = typeof signature === "string" ? signature.trim().toLowerCase() : "";
+  // §1.9: spaces, tabs, CR and LF around the header are removed, nothing
+  // else; a missing, empty, non-ASCII or non-hex header is a plain failure.
+  const candidate = typeof signature === "string" ? trimHeader(signature) : "";
   assertSecret(secret);
   // A string with a lone surrogate has no UTF-8 bytes to verify: a plain failure.
   if (typeof rawBody === "string" && !isWellFormed(rawBody)) return false;
   const expected = await computeSignature(rawBody, secret);
-  if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
-  return timingSafeEqual(expected, candidate);
+  if (!/^[0-9a-fA-F]{64}$/.test(candidate)) return false;
+  return timingSafeEqual(expected, candidate.toLowerCase());
 }
 
 /**
  * Verify a delivery and parse it into a typed {@link WebhookPayload}
- * (switch on `event`). Throws {@link WebhookSignatureError} on a missing
- * or invalid signature, a body that is not UTF-8 JSON (`malformed_body`),
- * or a `timestamp` outside `toleranceMs` (default 5 minutes).
+ * (switch on `event`). Throws {@link WebhookSignatureError}; its `reason`
+ * is the first check that fails, in this order: an empty secret
+ * (`missing_secret`), an absent or empty header (`missing_signature`), the
+ * signature (`invalid_signature`), a body that is not one UTF-8 JSON object
+ * (`malformed_body`), a `timestamp` that is not
+ * `YYYY-MM-DDTHH:MM:SS[.fraction]` with `Z` or a `±HH:MM` offset, or is
+ * further than `toleranceMs` (default 5 minutes) from now (`stale_timestamp`).
  *
  * The body is decoded as strict UTF-8 (one leading byte order mark is
  * ignored) and parsed from the same bytes the signature covers, as one
@@ -215,27 +257,28 @@ export async function verifyWebhook(
   if (!(await verifySignature(bytes, signature, secret))) {
     throw new WebhookSignatureError("invalid_signature", "X-Webhook-Signature does not match the body");
   }
-  let payload: WebhookPayload;
+  let payload: unknown;
   try {
     // The bytes the signature covers, decoded as strict UTF-8: any invalid
     // sequence throws; one leading byte order mark is dropped.
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-    payload = JSON.parse(text) as WebhookPayload;
+    payload = JSON.parse(text);
   } catch {
     throw new WebhookSignatureError("malformed_body", "Webhook body is not valid JSON");
   }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new WebhookSignatureError("malformed_body", "Webhook body is not a JSON object");
+  }
   const toleranceMs = options.toleranceMs ?? 300_000;
   if (toleranceMs > 0) {
-    // A signed body that is JSON `null` has no timestamp either (and is stale).
-    const timestamp: unknown = typeof payload === "object" && payload !== null ? (payload as { timestamp?: unknown }).timestamp : undefined;
-    const sentAt = Date.parse(String(timestamp));
+    const sentAt = timestampMs((payload as { timestamp?: unknown }).timestamp);
     const now = options.now ?? Date.now();
-    if (Number.isNaN(sentAt) || Math.abs(now - sentAt) > toleranceMs) {
+    if (sentAt === undefined || Math.abs(now - sentAt) > toleranceMs) {
       throw new WebhookSignatureError(
         "stale_timestamp",
         `Webhook timestamp is outside the ${toleranceMs} ms tolerance window`,
       );
     }
   }
-  return payload;
+  return payload as WebhookPayload;
 }

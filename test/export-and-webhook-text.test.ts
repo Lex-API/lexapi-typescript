@@ -113,10 +113,10 @@ describe("export lines are strict UTF-8", () => {
     }
   });
 
-  it("an invalid _meta line is counted and the next line is the envelope", async () => {
+  it("an invalid first line is counted; a _meta line after it is skipped", async () => {
     const body = bytes([0xff], "\n", META, '{"celex":"A"}\n', DONE);
     const { rows, invalidLines, meta } = await readAll(exportClient([body]));
-    expect(meta?.total).toBe(2);
+    expect(meta).toBeUndefined();
     expect(rows).toEqual([{ celex: "A" }]);
     expect(invalidLines).toBe(1);
   });

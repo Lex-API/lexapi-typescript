@@ -510,12 +510,12 @@ describe("export _error text", () => {
 });
 
 describe("verifyWebhook", () => {
-  it("a signed body that is JSON null is a stale_timestamp WebhookSignatureError, not a TypeError", async () => {
+  it("a signed body that is JSON null is a malformed_body WebhookSignatureError, not a TypeError", async () => {
     const { computeSignature, verifyWebhook, WebhookSignatureError } = await import("../src/index.js");
     const sig = await computeSignature("null", "whsec");
     const e = await caught(verifyWebhook("null", sig, "whsec"));
     expect(e).toBeInstanceOf(WebhookSignatureError);
-    expect((e as { reason: string }).reason).toBe("stale_timestamp");
+    expect((e as { reason: string }).reason).toBe("malformed_body");
   });
 });
 
