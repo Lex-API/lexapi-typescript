@@ -10,6 +10,7 @@
  */
 
 import type { RateLimitInfo, ResponseHeaders } from "./headers.js";
+import type { InForceLookup, NotFoundReason, SnapshotCandidate } from "./types.js";
 
 /** Stable error codes from the OpenAPI `ErrorResponse.error.code` enum. */
 export type ErrorCode =
@@ -381,8 +382,120 @@ export class NotFoundError extends LexAPIError {
    * the message.
    */
   get unknownEndpoint(): boolean {
-    return detailsField(this.details, "reason") === "unknown_endpoint";
+    return ownField(this.details, "reason") === "unknown_endpoint";
   }
+
+  // The accessors below read `details` only when it is a plain JSON object,
+  // and only its own keys; anything else gives each accessor's default.
+
+  /**
+   * `details.reason` when it is a string: `unknown_endpoint`, or on
+   * `getDocumentAtDate` (API 2.28.0) `before_tracking` / `boundary_unknown`.
+   * `undefined` on a 404 without one (e.g. a document not in the corpus).
+   */
+  get reason(): NotFoundReason | undefined {
+    return readString(ownField(this.details, "reason"));
+  }
+
+  /**
+   * `true` when `getDocumentAtDate` was asked about a date before the
+   * document entered the corpus (`details.reason` is `"before_tracking"`);
+   * {@link trackedSince} says when that was.
+   */
+  get beforeTracking(): boolean {
+    return ownField(this.details, "reason") === "before_tracking";
+  }
+
+  /**
+   * `true` when LexAPI has no record of when a version stored before API
+   * 2.28.0 began, so it cannot say which snapshot it held on the date and
+   * does not guess (`details.reason` is `"boundary_unknown"`). Refunded.
+   * Read the {@link candidates} with `getDocumentVersion`.
+   */
+  get boundaryUnknown(): boolean {
+    return ownField(this.details, "reason") === "boundary_unknown";
+  }
+
+  /** `before_tracking` only: when the document entered the corpus (`details.trackedSince`). */
+  get trackedSince(): string | undefined {
+    return readString(ownField(this.details, "trackedSince"));
+  }
+
+  /**
+   * On `before_tracking` for an EU act: the request that answers which
+   * version is listed for a date (`legislationAsOf`).
+   */
+  get inForceLookup(): InForceLookup | undefined {
+    const value = ownField(this.details, "inForceLookup");
+    if (!isPlainJsonObject(value)) return undefined;
+    const lookup: InForceLookup = {};
+    const method = readString(ownField(value, "method"));
+    const path = readString(ownField(value, "path"));
+    if (method !== undefined) lookup.method = method;
+    if (path !== undefined) lookup.path = path;
+    return lookup;
+  }
+
+  /**
+   * `boundary_unknown` only: the versions the date could fall in — the
+   * first 10 items of `details.candidates`
+   * that are objects with an integer `version` (`fetchedAt` / `observedFrom`
+   * are `null` when not strings). `[]` when there are none. For these
+   * versions `fetchedAt` can be the last fetch and later than the date.
+   */
+  get candidates(): SnapshotCandidate[] {
+    return readCandidates(this.details).kept;
+  }
+
+  /**
+   * `boundary_unknown` only: `true` when more versions matched than
+   * {@link candidates} lists (`details.candidatesTruncated` is `true`, or
+   * more than 10 usable candidates were sent).
+   */
+  get candidatesTruncated(): boolean {
+    return ownField(this.details, "candidatesTruncated") === true || readCandidates(this.details).more;
+  }
+}
+
+/** At most this many `NotFoundError.candidates` are returned. */
+const MAX_SNAPSHOT_CANDIDATES = 10;
+
+function readCandidates(details: unknown): { kept: SnapshotCandidate[]; more: boolean } {
+  const list = ownField(details, "candidates");
+  const kept: SnapshotCandidate[] = [];
+  if (!Array.isArray(list)) return { kept, more: false };
+  for (const item of list) {
+    // `ownField` reads nothing from an item that is not a plain object.
+    const version = ownField(item, "version");
+    if (typeof version !== "number" || !Number.isInteger(version)) continue;
+    if (kept.length === MAX_SNAPSHOT_CANDIDATES) return { kept, more: true };
+    const fetchedAt = ownField(item, "fetchedAt");
+    const observedFrom = ownField(item, "observedFrom");
+    kept.push({
+      version: version + 0, // -0 → 0
+      fetchedAt: typeof fetchedAt === "string" ? fetchedAt : null,
+      observedFrom: typeof observedFrom === "string" ? observedFrom : null,
+    });
+  }
+  return { kept, more: false };
+}
+
+/**
+ * An object as `JSON.parse` makes them — also one from another realm (a VM
+ * context): not `null`, not an array, tagged `[object Object]`.
+ */
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+/** `value[key]` when `value` is a plain object that has `key` as its own property. */
+function ownField(value: unknown, key: string): unknown {
+  return isPlainJsonObject(value) && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
 }
 
 /** 400 — CELEX failed validation (`INVALID_CELEX`). */

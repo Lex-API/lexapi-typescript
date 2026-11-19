@@ -44,7 +44,7 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 0 | `getNationalCoverage` (public) |
 | 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 (an unknown id too) |
 | 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
-| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law |
+| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law; `asOf` adds nothing |
 
 Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge. The national-law call allowance follows the same rule: a failed call (other than a 404) gives its call back too.
 
@@ -134,6 +134,8 @@ for (const hit of articles.results) {
 ```
 
 Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
+
+EU legislation hits, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl` and `getDocumentMetadata` carry the in-force label of the act when its status is known (API 2.19.0): `inForce` (today, UTC), with `notInForceReason`, `endOfValidity` or `entryIntoForce`; all absent when unknown. `semanticLegislationSearch({ inForce: true })` keeps only hits known to be in force today and reports what it removed in `inForceFilter`. Documents, snapshots and EU semantic hits also carry `provenance` and `fieldProvenance` (API 2.20.0).
 
 ### The text in force on a date (`asOf`)
 
@@ -289,7 +291,23 @@ const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei
 for (const h of hits.results) console.log(h.document.documentKind, h.document.ecli, h.document.dateOfDocument);
 const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
 if (articles.partial) console.warn(articles.hint); // SEARCH_INCOMPLETE: results may be missing better matches
+
+// asOf labels each hit for a date (API 2.29.0); the texts searched and returned are today's
+const dated = await client.nationalLegislationSemanticSearch("AT", { query: "Recht auf Auskunft", asOf: "2020-06-01" });
+for (const h of dated.results) {
+  if (h.asOfResolved) console.log(h.article_ref, h.asOfVersion?.validFrom, h.asOfVersion?.checkedAt);
+  else console.log(h.article_ref, h.asOfReason); // e.g. "provision_amended_since" — today's wording, not established for the date
+}
 ```
+
+**National `asOf` (API 2.29.0).** The search runs over today's texts only: a provision repealed or
+replaced since the date cannot be found, and the text is never swapped. A hit is resolved
+(`asOfResolved: true`, `asOfVersion: { kind: "current_unit", validFrom, validTo, sourceId, checkedAt }`)
+only when the publisher's dates, as of LexAPI's last recorded read of the act (`checkedAt`), show
+that today's wording already applied on the date. An unresolved hit keeps today's wording; it is not
+established as the text for the date (`asOfReason`, listed in `NATIONAL_AS_OF_REASONS`). LexAPI
+holds such dates for Austria and Spain; elsewhere every hit is `asof_not_available`. `asOf` is a
+`YYYY-MM-DD` string. `isNationalAsOfVersion(v)` tells it from the EU `asOfVersion` by `kind`.
 
 **Incomplete national searches.** When the national index could not complete a semantic search,
 results may be incomplete: with hits left the answer carries `partial: true`,
@@ -415,20 +433,31 @@ The `_meta`/`_done` envelope lines are never yielded as rows; the stream is sing
 
 ## Point-in-time versions
 
-Versions are LexAPI *observation snapshots* — the document as fetched — not legal in-force reconstructions; history begins at first ingestion. (For the text in force on a date, use a consolidated CELEX or `semanticLegislationSearch({ asOf })`.)
+Versions are LexAPI's fetch snapshots — the document as LexAPI fetched it — not the law in force on a date; history begins at first ingestion. (For the version of an EU act for a date, use `legislationAsOf`.)
 
 ```ts
+import { NotFoundError } from "@lexapi/client";
+
 const history = await client.listDocumentVersions("32016R0679");
 console.log(history.currentVersion, history.trackedSince);
 
 const snapshot = await client.getDocumentVersion("32016R0679", 2);
 console.log(snapshot.document.parsedContent, snapshot.corpusVersion);
 
-const atDate = await client.getDocumentAtDate("32016R0679", "2026-03-20");
-console.log(atDate.asOf, atDate.document.version);
+try {
+  const atDate = await client.getDocumentAtDate("32016R0679", "2026-04-01");
+  console.log(atDate.kind);                   // "observation_snapshot" — not the law in force on that date
+  console.log(atDate.document.observedFrom);  // when this version began in LexAPI's fetch history (null: no record of it)
+  console.log(atDate.document.observedUntil); // when the next version's text arrived (null: current version)
+  if (atDate.inForceLookup) console.log("for the act on a date, use legislationAsOf");
+} catch (err) {
+  if (err instanceof NotFoundError && err.beforeTracking) console.log(err.trackedSince); // tracking began later
+  else if (err instanceof NotFoundError && err.boundaryUnknown) console.log(err.candidates); // read them with getDocumentVersion
+  else throw err;
+}
 ```
 
-Each call costs 1 credit. Dates before the document entered the corpus reject with `NotFoundError` carrying the tracking start date.
+`fetchedAt` is when a version's text arrived at LexAPI; `observedFrom` is when the version began in LexAPI's fetch history, `null` when LexAPI has no record of it — then `fetchedAt` is the last fetch of its text, not when the version began. A future date returns the current version with `dateInFuture: true` (and `xWarning`). Each call costs 1 credit; a `boundaryUnknown` 404 is refunded. A date before the document entered the corpus rejects with `NotFoundError` (`beforeTracking`, `trackedSince`); a date next to a version stored before API 2.28.0 whose start LexAPI has no record of rejects with `boundaryUnknown` and `candidates` (`{ version, fetchedAt, observedFrom }`, at most 10, `candidatesTruncated` beyond; `[]` when none).
 
 ## Response headers
 
@@ -512,7 +541,7 @@ try {
 
 | Class | `code` | HTTP |
 | --- | --- | --- |
-| `NotFoundError` | `NOT_FOUND` | 404 — `.unknownEndpoint` is `true` when the API (2.27.0 or later) has no such endpoint: a mistyped path, a method newer than the API, or a national route for a country that is not available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API endpoint". |
+| `NotFoundError` | `NOT_FOUND` | 404 — `.unknownEndpoint` is `true` when the API (2.27.0 or later) has no such endpoint: a mistyped path, a method newer than the API, or a national route for a country that is not available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API endpoint". `.reason` is `details.reason`; on `getDocumentAtDate` (API 2.28.0) `.beforeTracking` (with `.trackedSince`, `.inForceLookup`) or `.boundaryUnknown` (with `.candidates`, `.candidatesTruncated`). |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.value` / `.allowed` name a refused filter, the value sent and the allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |

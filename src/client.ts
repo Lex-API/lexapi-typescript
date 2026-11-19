@@ -32,6 +32,7 @@ import type {
   DocumentMetadataRequest,
   DocumentMetadataResponse,
   DocumentVersionResponse,
+  DocumentAtDateResponse,
   DocumentVersionsResponse,
   InfoResponse,
   NationalCoverageResponse,
@@ -358,14 +359,15 @@ export class LexAPI {
   }
 
   // ── Point-in-time versions ────────────────────────────────────────
-  // Versions are LexAPI observation snapshots (content-hash changes between
-  // fetches), NOT legal in-force reconstructions; history begins at first
-  // ingestion. For the text in force on a date, use a consolidated CELEX or
-  // semanticLegislationSearch({ asOf }).
+  // Versions are LexAPI's fetch snapshots (content-hash changes between
+  // fetches), NOT the law in force on a date; history begins at first
+  // ingestion. For the version of an EU act for a date, use legislationAsOf.
 
   /**
    * `GET /documents/{celex}/versions` — version history, newest first,
-   * current version included and flagged. 1 credit.
+   * current version included and flagged. These are LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async listDocumentVersions(
     celex: string,
@@ -385,7 +387,9 @@ export class LexAPI {
   /**
    * `GET /documents/{celex}/versions/{version}` — one immutable snapshot
    * including `parsedContent`. `corpusVersion` mirrors the
-   * `X-Corpus-Version` response header. 1 credit.
+   * `X-Corpus-Version` response header. This is one of LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async getDocumentVersion(
     celex: string,
@@ -404,18 +408,28 @@ export class LexAPI {
   }
 
   /**
-   * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI observed as
-   * current on `date` (`YYYY-MM-DD`, end-of-day UTC inclusive). Dates
-   * before the document entered the corpus reject with `NotFoundError`
-   * carrying the tracking start date. 1 credit.
+   * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI held as current
+   * at the end of `date` (`YYYY-MM-DD`, UTC), from its own fetch history
+   * (`kind: "observation_snapshot"`). This is not the law in force on that
+   * date: for the version of an EU act for a date use `legislationAsOf`
+   * (`inForceLookup` points to it). The snapshot was the current one from
+   * `document.observedFrom` until `document.observedUntil` (`null` for the
+   * current version). A future date returns the current version with
+   * `dateInFuture: true`.
+   *
+   * A date before the document entered the corpus rejects with
+   * `NotFoundError` where `beforeTracking` is `true` (`trackedSince`); a date
+   * next to a version stored before API 2.28.0 whose start LexAPI has no
+   * record of rejects with `boundaryUnknown` `true` and `candidates`
+   * (refunded). 1 credit.
    */
   async getDocumentAtDate(
     celex: string,
     date: string,
     params: VersionParams = {},
     options?: CallOptions,
-  ): Promise<DocumentVersionResponse> {
-    return this.call<DocumentVersionResponse>({
+  ): Promise<DocumentAtDateResponse> {
+    return this.call<DocumentAtDateResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
       shape: { fields: [{ path: "document", kind: "object" }] },
@@ -916,7 +930,17 @@ export class LexAPI {
    * `attribution` and `document` (the matched act's listing summary) on
    * every hit; the index fields (`law_title`, `article_ref`, `section`,
    * `language`, `in_force`, `valid_from`, `valid_to`, `law_type`) are
-   * always present, `null` when the index has nothing (API 2.8.0). No `hyde`, no `asOf` — both are EU-only.
+   * always present, `null` when the index has nothing (API 2.8.0).
+   *
+   * **`asOf` (API 2.29.0)** labels each hit for a date (`asOfResolved`,
+   * `asOfReason`, `asOfVersion`); the response adds `asOf` and
+   * `asOfSummary`. The search runs over today's texts only. A hit is
+   * resolved only when the publisher's dates, as of LexAPI's last recorded
+   * read of the act (`asOfVersion.checkedAt`), show today's wording already
+   * applied on the date; an unresolved hit keeps today's wording — it is not
+   * established as the text for the date. LexAPI holds such dates for
+   * Austria and Spain.
+   *
    * `NationalSemanticLegislationOptions` has no `hyde` field, and this SDK
    * never forwards one on this call even if a caller bypasses the type
    * system — the server now validates `hyde` as a boolean on this route too
@@ -933,7 +957,7 @@ export class LexAPI {
       method: "POST",
       path: `/${jurisdictionSegment(jurisdiction)}/legislation/semantic`,
       shape: { lists: ["results"], required: ["results"] },
-      body: nationalSemanticWireBody(request, { allowHyde: false }),
+      body: nationalSemanticWireBody(request, { allowHyde: false, allowAsOf: true }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -969,7 +993,7 @@ export class LexAPI {
       method: "POST",
       path: "/search/semantic",
       shape: { lists: ["results"], required: ["results"] },
-      body: semanticWireBody(request),
+      body: semanticWireBody(request, { legislation: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -992,6 +1016,11 @@ export class LexAPI {
    * cannot be answered keeps its latest text with `asOfResolved: false` and
    * an `asOfReason`. The response adds `asOf` and `asOfSummary`.
    *
+   * **In force today:** EU hits carry `inForce` (with `notInForceReason`,
+   * `endOfValidity`, `entryIntoForce`) when the act's status is known;
+   * `inForce: true` keeps only hits known to be in force today and reports
+   * what it removed in `inForceFilter`.
+   *
    * **Cost:** 5 credits for the search; with `asOf`, each live fetch of a
    * version the corpus does not hold reserves 5 and settles by outcome
    * (Cellar 4, browser 5, no text 1, failed 0) — at most 3 per request by
@@ -1006,7 +1035,7 @@ export class LexAPI {
       method: "POST",
       path: "/legislation/semantic",
       shape: { lists: ["results"], required: ["results"] },
-      body: semanticWireBody(request),
+      body: semanticWireBody(request, { legislation: true }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -1130,9 +1159,14 @@ export class LexAPI {
   }
 }
 
-/** Map camel-cased SDK semantic options to the wire shape (`min_score`, `include: ["text"]`). */
+/**
+ * Map camel-cased SDK semantic options to the wire shape (`min_score`,
+ * `include: ["text"]`). `asOf` and `inForce` are legislation options: never
+ * sent on case-law search, even when set on the request object.
+ */
 function semanticWireBody(
   request: SemanticCaseLawSearchOptions & SemanticLegislationSearchOptions,
+  { legislation }: { legislation: boolean },
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -1141,7 +1175,8 @@ function semanticWireBody(
   if (request.includeText) body["include"] = ["text"];
   if (request.filters !== undefined) body["filters"] = request.filters;
   if (request.hyde !== undefined) body["hyde"] = request.hyde;
-  if (request.asOf !== undefined) body["asOf"] = request.asOf;
+  if (legislation && request.asOf !== undefined) body["asOf"] = request.asOf;
+  if (legislation && request.inForce !== undefined) body["inForce"] = request.inForce;
   return body;
 }
 
@@ -1150,8 +1185,8 @@ function semanticWireBody(
  * deliberately don't extend `SemanticSearchOptions` (a narrower `language`,
  * exact `filters` interfaces — see `NationalSemanticCaseLawOptions`), so
  * `filters` is read as `unknown` here rather than `Record<string, unknown>`
- * to avoid the missing-index-signature assignability error. Never forwards
- * `asOf` — the national legislation options type has no such field.
+ * to avoid the missing-index-signature assignability error. `asOf` is sent
+ * only for legislation (`allowAsOf`).
  */
 function nationalSemanticWireBody(
   request: {
@@ -1162,8 +1197,9 @@ function nationalSemanticWireBody(
     includeText?: boolean;
     filters?: unknown;
     hyde?: boolean;
+    asOf?: string;
   },
-  { allowHyde = true }: { allowHyde?: boolean } = {},
+  { allowHyde = true, allowAsOf = false }: { allowHyde?: boolean; allowAsOf?: boolean } = {},
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -1175,6 +1211,7 @@ function nationalSemanticWireBody(
   // system set one on the (typed hyde-less) request object — the server
   // validates it strictly as a boolean on this route too (400 otherwise).
   if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
+  if (allowAsOf && request.asOf !== undefined) body["asOf"] = request.asOf;
   return body;
 }
 
