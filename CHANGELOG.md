@@ -134,6 +134,14 @@ Type-level changes to check when upgrading:
   were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
   at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
   covers). The signature check is unchanged.
+- A string webhook body with a lone surrogate (it has no UTF-8 encoding) fails verification:
+  `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
+  and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, the surrogate was
+  replaced with U+FFFD and the result was signed and parsed.
+- Export lines are decoded one by one as strict UTF-8, whatever charset the response names: a line
+  that is not valid UTF-8 is counted in `invalidLines` and the next line is read intact. Before,
+  invalid bytes were replaced with U+FFFD and the line was parsed. One byte order mark at the start
+  of the stream is ignored, as before.
 - A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
   (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries.
 

@@ -94,12 +94,27 @@ async function getSubtle(): Promise<SubtleCryptoLike> {
   throw new Error("Web Crypto (crypto.subtle) is not available in this runtime");
 }
 
+/** A lone surrogate: a high one not followed by a low one, or a low one not preceded by a high one. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** `true` when a string has no lone surrogate, so it has a UTF-8 encoding. */
+function isWellFormed(text: string): boolean {
+  const native = (String.prototype as { isWellFormed?: (this: string) => boolean }).isWellFormed;
+  return typeof native === "function" ? native.call(text) : !LONE_SURROGATE.test(text);
+}
+
 /**
- * The bytes a body stands for. A string is encoded as UTF-8; `TextEncoder`
- * writes each lone surrogate as U+FFFD (EF BF BD).
+ * The bytes a body stands for: a string's UTF-8 encoding. A string with a
+ * lone surrogate has none (`TextEncoder` would write U+FFFD in its place, a
+ * different text), so it is refused rather than repaired.
  */
 function toBytes(body: WebhookBody): Uint8Array {
-  if (typeof body === "string") return new TextEncoder().encode(body);
+  if (typeof body === "string") {
+    if (!isWellFormed(body)) {
+      throw new WebhookSignatureError("malformed_body", "Webhook body string is not well-formed Unicode (lone surrogate)");
+    }
+    return new TextEncoder().encode(body);
+  }
   if (body instanceof Uint8Array) return body;
   return new Uint8Array(body);
 }
@@ -118,7 +133,11 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Compute the expected `X-Webhook-Signature` (hex HMAC-SHA256) for a raw body. */
+/**
+ * Compute the expected `X-Webhook-Signature` (hex HMAC-SHA256) for a raw
+ * body. A string body is signed as its UTF-8 encoding; a string with a lone
+ * surrogate has none and throws `WebhookSignatureError("malformed_body")`.
+ */
 export async function computeSignature(rawBody: WebhookBody, secret: string): Promise<string> {
   assertSecret(secret);
   const subtle = await getSubtle();
@@ -137,7 +156,8 @@ export async function computeSignature(rawBody: WebhookBody, secret: string): Pr
  * HMAC-SHA256 of `rawBody` under `secret`. Constant-time comparison.
  * Signature only — use {@link verifyWebhook} to also check freshness.
  * Throws `WebhookSignatureError("missing_secret")` for an empty secret
- * (a configuration error, not a bad delivery).
+ * (a configuration error, not a bad delivery). A string body with a lone
+ * surrogate is `false`.
  */
 export async function verifySignature(
   rawBody: WebhookBody,
@@ -146,7 +166,10 @@ export async function verifySignature(
 ): Promise<boolean> {
   // §1.9: a missing, empty, non-ASCII or non-hex header is a plain failure.
   const candidate = typeof signature === "string" ? signature.trim().toLowerCase() : "";
-  const expected = await computeSignature(rawBody, secret); // validates the secret first
+  assertSecret(secret);
+  // A string with a lone surrogate has no UTF-8 bytes to verify: a plain failure.
+  if (typeof rawBody === "string" && !isWellFormed(rawBody)) return false;
+  const expected = await computeSignature(rawBody, secret);
   if (!/^[0-9a-f]{64}$/.test(candidate)) return false;
   return timingSafeEqual(expected, candidate);
 }
@@ -158,9 +181,10 @@ export async function verifySignature(
  * or a `timestamp` outside `toleranceMs` (default 5 minutes).
  *
  * The body is decoded as strict UTF-8 (one leading byte order mark is
- * ignored) and parsed from the same bytes the signature covers. A string
- * body stands for its UTF-8 encoding, as in {@link computeSignature}: a
- * lone surrogate in it is read as U+FFFD.
+ * ignored) and parsed from the same bytes the signature covers, as one
+ * strict JSON text (no `NaN` or `Infinity`). A string body stands for its
+ * UTF-8 encoding; a string with a lone surrogate has none and fails
+ * verification (`invalid_signature`).
  *
  * ```ts
  * app.post("/lexapi-webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -183,6 +207,9 @@ export async function verifyWebhook(
   assertSecret(secret);
   if (!signature) {
     throw new WebhookSignatureError("missing_signature", "Missing X-Webhook-Signature header");
+  }
+  if (typeof rawBody === "string" && !isWellFormed(rawBody)) {
+    throw new WebhookSignatureError("invalid_signature", "Webhook body string is not well-formed Unicode (lone surrogate)");
   }
   const bytes = toBytes(rawBody);
   if (!(await verifySignature(bytes, signature, secret))) {

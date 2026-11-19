@@ -23,6 +23,21 @@ export async function runSmoke(lib, label) {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (url.includes("/export")) {
+      // A byte order mark, a line that is not UTF-8, and a character split across chunks.
+      const text = new TextEncoder().encode('{"_meta":{"total":1}}\n{"celex":"x\u00e9"}\n{"celex":"Größe"}\n{"_done":{"complete":true}}\n');
+      const bad = text.indexOf(0xc3); // the é: make it latin-1
+      const bytes = new Uint8Array([0xef, 0xbb, 0xbf, ...text.subarray(0, bad), 0xe9, ...text.subarray(bad + 2)]);
+      const split = bytes.indexOf(0xc3) + 1; // inside the ö
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, split));
+          controller.enqueue(bytes.slice(split));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "application/x-ndjson; charset=utf-16" } });
+    }
     if (url.endsWith("/resolve")) {
       return new Response(new TextEncoder().encode("<html>proxy page</html>"), {
         status: 200,
@@ -113,6 +128,17 @@ export async function runSmoke(lib, label) {
   const body = JSON.stringify({ event: "webhook.test", timestamp: new Date().toISOString() });
   const sig = createHmac("sha256", "secret").update(body).digest("hex");
   assert.equal(await verifySignature(body, sig, "secret"), true);
+
+  // Export lines are strict UTF-8 on this runtime.
+  const exported = await client.export();
+  const rows = [];
+  for await (const row of exported) rows.push(row);
+  assert.deepEqual(rows, [{ celex: "Größe" }]);
+  assert.equal(exported.invalidLines, 1);
+
+  // A string body with a lone surrogate fails verification (no isWellFormed on Node 18).
+  const lone = '{"x":"\ud800"}';
+  assert.equal(await verifySignature(lone, createHmac("sha256", "secret").update(lone).digest("hex"), "secret"), false);
 
   // Webhook bodies are strict UTF-8 on this runtime: one byte order mark is
   // ignored; invalid bytes under a valid signature are a malformed body.

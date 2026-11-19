@@ -222,7 +222,9 @@ export interface ExportHeaderInfo {
  *   after the rows that did arrive (the `_error` body is on its `details` and
  *   on `stream.error`). Unknown `_done` fields (`truncatedBy`, `credits`) are
  *   kept on `done`.
- * - Lines that are not JSON objects are counted in `invalidLines`, not yielded.
+ * - Lines are read as strict UTF-8, whatever charset the response names (one
+ *   byte order mark at the start is ignored). Lines that are not UTF-8, or not
+ *   JSON objects, are counted in `invalidLines`, not yielded.
  * - `_meta`/`_done`/`_error` lines are never yielded as rows.
  */
 export interface ExportStream extends AsyncIterable<ExportRow> {
@@ -266,20 +268,31 @@ export interface ExportStreamOptions {
   signal?: AbortSignal;
 }
 
+/** A line whose bytes are not UTF-8: an invalid line. */
+const INVALID_LINE = Symbol("invalid line");
+type Line = string | typeof INVALID_LINE;
+
 /**
  * Pull-based NDJSON line reader over a fetch body. Every read has an idle
  * timeout and honours the caller's signal; any failure cancels the body so
- * the connection is released. Each decoded chunk is scanned once and partial
- * lines are kept as pieces (joined once, when the line completes), so a
- * multi-megabyte line (`includeHtml`) costs O(n), not O(n²).
+ * the connection is released. Each chunk is scanned once for newline bytes
+ * and partial lines are kept as byte pieces (joined once, when the line
+ * completes), so a multi-megabyte line (`includeHtml`) costs O(n), not O(n²).
+ * Lines are decoded one by one as strict UTF-8, whatever charset the response
+ * names: a newline byte never occurs inside a multi-byte sequence, so a
+ * character split across chunks decodes whole, and a line that is not UTF-8
+ * is an invalid line without affecting the next. One byte order mark at the
+ * start of the stream is ignored.
  */
 class NdjsonReader {
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
-  private readonly decoder = new TextDecoder();
-  /** Pieces of the line currently being received. */
-  private partial: string[] = [];
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  /** Byte pieces of the line currently being received. */
+  private partial: Uint8Array[] = [];
   /** Complete lines not yet handed out. */
-  private readonly ready: string[] = [];
+  private readonly ready: Line[] = [];
+  /** No line has been completed yet (a byte order mark may lead it). */
+  private atStart = true;
   private eof = false;
   private released = false;
   /** Data rows handed out so far (for error messages). */
@@ -298,8 +311,8 @@ class NdjsonReader {
     else signal?.addEventListener("abort", this.onAbort, { once: true });
   }
 
-  /** Next trimmed, non-empty line, or `undefined` at EOF. */
-  async nextLine(): Promise<string | undefined> {
+  /** Next trimmed, non-empty line (or an invalid one), or `undefined` at EOF. */
+  async nextLine(): Promise<Line | undefined> {
     const { signal } = this.options;
     if (signal?.aborted) {
       this.cancel();
@@ -309,33 +322,61 @@ class NdjsonReader {
       const line = this.ready.shift();
       if (line !== undefined) return line;
       if (this.eof) {
-        const tail = this.partial.join("").trim();
-        this.partial = [];
-        return tail || undefined;
+        if (this.partial.length === 0) return undefined;
+        this.completeLine();
+        continue;
       }
       const chunk = await this.read();
       if (chunk === undefined) {
         this.eof = true;
-        this.ingest(this.decoder.decode());
         this.release();
       } else {
-        this.ingest(this.decoder.decode(chunk, { stream: true }));
+        this.ingest(chunk);
       }
     }
   }
 
-  private ingest(text: string): void {
+  private ingest(chunk: Uint8Array): void {
     let pos = 0;
     for (;;) {
-      const newline = text.indexOf("\n", pos);
+      const newline = chunk.indexOf(0x0a, pos);
       if (newline === -1) break;
-      this.partial.push(text.slice(pos, newline));
-      const line = this.partial.join("").trim();
-      this.partial = [];
-      if (line) this.ready.push(line);
+      this.partial.push(chunk.subarray(pos, newline));
+      this.completeLine();
       pos = newline + 1;
     }
-    if (pos < text.length) this.partial.push(text.slice(pos));
+    // Kept past this read: a copy, in case the source reuses its buffer.
+    if (pos < chunk.length) this.partial.push(chunk.slice(pos));
+  }
+
+  /** Decode the pieces received so far as one line and queue it unless it is blank. */
+  private completeLine(): void {
+    let bytes: Uint8Array;
+    if (this.partial.length === 1) {
+      bytes = this.partial[0]!;
+    } else {
+      let size = 0;
+      for (const piece of this.partial) size += piece.length;
+      bytes = new Uint8Array(size);
+      let at = 0;
+      for (const piece of this.partial) {
+        bytes.set(piece, at);
+        at += piece.length;
+      }
+    }
+    this.partial = [];
+    if (this.atStart) {
+      this.atStart = false;
+      if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) bytes = bytes.subarray(3);
+    }
+    let line: string;
+    try {
+      line = this.decoder.decode(bytes).trim();
+    } catch {
+      this.ready.push(INVALID_LINE);
+      return;
+    }
+    if (line) this.ready.push(line);
   }
 
   private async read(): Promise<Uint8Array | undefined> {
@@ -427,8 +468,9 @@ function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | u
     : { message: text(value) };
 }
 
-/** Parse one NDJSON line; `undefined` when it is not a JSON object. */
-function parseLine(line: string): Record<string, unknown> | undefined {
+/** Parse one NDJSON line; `undefined` when it is not UTF-8 or not a JSON object. */
+function parseLine(line: Line): Record<string, unknown> | undefined {
+  if (line === INVALID_LINE) return undefined;
   try {
     const value = JSON.parse(line) as unknown;
     return typeof value === "object" && value !== null && !Array.isArray(value)

@@ -238,16 +238,6 @@ describe("webhook bodies are strict UTF-8", () => {
     expect((event as unknown as { data: { note: string } }).data.note).toBe("Größe € 𝄞");
   });
 
-  it("a string body is signed and parsed as its UTF-8 encoding: a lone surrogate reads as U+FFFD", async () => {
-    const text = RAW.replace('"é"', '"\uD800"');
-    const bytes = enc.encode(text);
-    expect(Array.from(bytes)).toContain(0xbd); // U+FFFD is EF BF BD
-    const signature = sign(bytes);
-    expect(await verifySignature(text, signature, SECRET)).toBe(true);
-    const event = await verifyWebhook(text, signature, SECRET, { now: NOW });
-    expect((event as unknown as { data: { note: string } }).data.note).toBe("�");
-  });
-
   it("a body nested 100,000 levels deep is malformed_body or parsed, never a raw RangeError", async () => {
     const deep = enc.encode(`{"timestamp":"2026-11-19T12:00:00.000Z","x":${"[".repeat(100_000)}${"]".repeat(100_000)}}`);
     const outcome = await verifyWebhook(deep, sign(deep), SECRET, { now: NOW }).then(
