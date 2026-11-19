@@ -16,6 +16,10 @@ Type-level changes to check when upgrading:
   `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
 - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
   `DocumentVersionResponse` it returned before.
+- `PaymentPastDueError` is a subclass of `TierForbiddenError`. Where a value's type is a union
+  that includes `PaymentPastDueError`, the `false` branch of `instanceof TierForbiddenError` no
+  longer includes it. At run time, a `TierForbiddenError` branch placed before a
+  `PaymentPastDueError` branch takes failed payments too.
 - `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
   `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares a
   property of the same name must rename it.
@@ -67,7 +71,7 @@ Type-level changes to check when upgrading:
 - **`PaymentPastDueError`** (403, code `PAYMENT_PAST_DUE`, API 2.27.0): a subscription payment failed
   and was not completed in time; API requests are refused until the payment succeeds. Never
   retried. `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
-  the API says so. It extends `LexAPIError`, not `TierForbiddenError`. Before API 2.27.0 a failed
+  the API says so. It extends `TierForbiddenError`. Before API 2.27.0 a failed
   payment was refused at once with a 403 without a code, raised as `TierForbiddenError`.
   `"PAYMENT_PAST_DUE"` is added to `ErrorCode`. Earlier SDK versions raise the base `LexAPIError`
   for this code.
@@ -120,6 +124,18 @@ Type-level changes to check when upgrading:
   The page that shows the stall is not yielded and is on `err.body`. Cites/cited-by walks also end
   once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
   A starting `offset`/`limit` that is not a non-negative (positive) integer is a `RangeError`.
+- `PaymentPastDueError` extends `TierForbiddenError`: an `instanceof TierForbiddenError` check also
+  catches a failed payment, as it did for the 403 without a code that APIs before 2.27.0 send.
+  Check `PaymentPastDueError` first to tell the two apart. `TierForbiddenError`'s constructor takes
+  an optional sixth parameter, the code (`"TIER_FORBIDDEN"` by default).
+- `verifyWebhook` decodes the body as strict UTF-8 before parsing it: a body that is not valid
+  UTF-8 (an invalid or truncated sequence, an encoded surrogate, an overlong form, latin-1 text) is
+  `WebhookSignatureError("malformed_body")`, like a body that is not JSON. Before, invalid bytes
+  were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
+  at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
+  covers). The signature check is unchanged.
+- A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
+  (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries.
 
 ### Fixed
 
@@ -145,6 +161,13 @@ Type-level changes to check when upgrading:
   wait with `maxDelayMs: Infinity`, or a `timeoutMs` above the limit, is clamped to it.
   `timeoutMs: Infinity` sets no limit.
 - An asctime `Retry-After` date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
+- `paginateNationalDocuments` checks `limit` before the first request: a value that is not a
+  positive integer is a `RangeError`, as on the other iterators. Before, it was sent.
+- Cites/cited-by walks: a page carrying `totalEdges` or an echoed `offset` ends a run of repeated
+  pages but is still the page the next one is compared with. Before, the comparison restarted
+  after it, so a server repeating the same page threw one request later.
+- Cites/cited-by walks: a group with a `citationCount` of 0 and a non-empty edge list counts its
+  list. Before, it counted 0 and the walk ended after that page.
 - A page without its list ended the walk with a `TypeError`; a `citationCount` that is not a count
   mis-stepped the offset (a walk could end early or re-request rows). Both are handled now.
 - An export `_error` line whose value or `code` is an array nested too deep to turn into text ends

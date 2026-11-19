@@ -534,10 +534,12 @@ export class LexAPI {
    * an `offset` other than the one requested, or, when the answers carry
    * neither `totalEdges` nor `offset`, after three pages in a row that each
    * repeat the one before (comparing the list only; a page with either
-   * signal ends a run). When a walk throws, the pages already yielded stay
+   * signal ends a run, and its list is still the one the next page is
+   * compared with). When a walk throws, the pages already yielded stay
    * valid; the page that showed the stall is not yielded and is on the
    * error's `body`. A starting `offset` or `limit` that is not a non-negative
-   * (positive) integer is a `RangeError` before any request.
+   * (positive) integer is a `RangeError` before any request. A group whose
+   * `citationCount` is 0 but whose edge list is not empty counts its list.
    */
   async *paginateCites(
     celexNumber: string,
@@ -557,7 +559,8 @@ export class LexAPI {
    * an `offset` other than the one requested, or, when the answers carry
    * neither `totalEdges` nor `offset`, after three pages in a row that each
    * repeat the one before (comparing the list only; a page with either
-   * signal ends a run). When a walk throws, the pages already yielded stay
+   * signal ends a run, and its list is still the one the next page is
+   * compared with). When a walk throws, the pages already yielded stay
    * valid; the page that showed the stall is not yielded and is on the
    * error's `body`. A starting `offset` or `limit` that is not a non-negative
    * (positive) integer is a `RangeError` before any request.
@@ -892,7 +895,8 @@ export class LexAPI {
    * `page` together with `cursor` is a 400 ("Use either cursor or page,
    * not both"), so this strips `page` at runtime, not just in the type
    * (`Omit` alone only guards TypeScript callers — a JS caller, or one
-   * using `as`, could otherwise still pass it through).
+   * using `as`, could otherwise still pass it through). A `limit` that is
+   * not a positive integer is a `RangeError` before any request.
    */
   async *paginateNationalDocuments(
     jurisdiction: string,
@@ -900,6 +904,7 @@ export class LexAPI {
     options?: CallOptions,
   ): AsyncGenerator<NationalDocumentListResponse, void> {
     const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
+    startingPosition(undefined, rest.limit, 1);
     let cursor = rest.cursor;
     const sent = new Set<string>();
     for (;;) {
@@ -1298,9 +1303,15 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
 
 type EdgeGroup = CitedDocumentGroup | CitingDocumentGroup;
 
-/** A group's edge rows: its `citationCount` when that is a count, else the length of its edge list. */
+/**
+ * A group's edge rows: its `citationCount` when that is a count, else the
+ * length of its edge list (0 without one). A count of 0 next to a non-empty
+ * edge list counts the list.
+ */
 function edgeRows(group: EdgeGroup): number {
-  return count(group.citationCount) ?? (Array.isArray(group.citations) ? group.citations.length : 0);
+  const listed = Array.isArray(group.citations) ? group.citations.length : 0;
+  const counted = count(group.citationCount);
+  return counted === undefined || counted === 0 ? listed : counted;
 }
 
 async function* paginateEdges<
@@ -1331,9 +1342,10 @@ async function* paginateEdges<
       previous = form;
       if (repeats >= REPEATS_BEFORE_THROW) throw stalled("the server repeated the same page", page);
     } else {
-      // A page with a position signal ends any run of repeats.
+      // A page with a position signal is not counted and ends any run of
+      // repeats; its list is still the one the next page is compared with.
       repeats = 0;
-      previous = undefined;
+      previous = compactForm(groups);
     }
     yield page;
     // SDK contract §1.4: offsets count edge rows; advance by the sum of the

@@ -109,13 +109,13 @@ describe("PaymentPastDueError", () => {
     expect(error.billingUrl).toBeUndefined();
   });
 
-  it("is a LexAPIError and not a TierForbiddenError", () => {
+  it("is a LexAPIError and a TierForbiddenError", () => {
     const error = LexAPIError.fromResponse(403, PAST_DUE_BODY);
     expect(error instanceof LexAPIError).toBe(true);
     expect(error instanceof PaymentPastDueError).toBe(true);
-    expect(error instanceof TierForbiddenError).toBe(false);
+    expect(error instanceof TierForbiddenError).toBe(true);
     expect(isLexAPIError(error, PaymentPastDueError)).toBe(true);
-    expect(isLexAPIError(error, TierForbiddenError)).toBe(false);
+    expect(isLexAPIError(error, TierForbiddenError)).toBe(true);
     expect(new TierForbiddenError("x") instanceof PaymentPastDueError).toBe(false);
     expect(PaymentPastDueError.kind).toBe("PaymentPastDueError");
   });

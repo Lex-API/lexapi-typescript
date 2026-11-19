@@ -73,6 +73,8 @@ export async function runSmoke(lib, label) {
     billingUrl: "https://example.test/billing",
   });
   assert.ok(pastDue instanceof lib.PaymentPastDueError);
+  assert.ok(pastDue instanceof lib.TierForbiddenError);
+  assert.equal(pastDue.code, "PAYMENT_PAST_DUE");
   assert.equal(pastDue.billingUrl, "https://example.test/billing");
   assert.equal(pastDue.accessEndedAt, undefined);
   const unknown = lib.LexAPIError.fromResponse(404, {
@@ -111,6 +113,24 @@ export async function runSmoke(lib, label) {
   const body = JSON.stringify({ event: "webhook.test", timestamp: new Date().toISOString() });
   const sig = createHmac("sha256", "secret").update(body).digest("hex");
   assert.equal(await verifySignature(body, sig, "secret"), true);
+
+  // Webhook bodies are strict UTF-8 on this runtime: one byte order mark is
+  // ignored; invalid bytes under a valid signature are a malformed body.
+  const signed = (bytes) => createHmac("sha256", "secret").update(bytes).digest("hex");
+  const utf8 = new TextEncoder().encode(body);
+  const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...utf8]);
+  assert.equal((await lib.verifyWebhook(withBom, signed(withBom), "secret")).event, "webhook.test");
+  for (const bad of [[0xff], [0xed, 0xa0, 0x80], [0xc0, 0xaf], [0xe2, 0x82]]) {
+    const bytes = new Uint8Array([...utf8.subarray(0, 10), ...bad, ...utf8.subarray(10)]);
+    await assert.rejects(
+      () => lib.verifyWebhook(bytes, signed(bytes), "secret"),
+      (err) => err instanceof lib.WebhookSignatureError && err.reason === "malformed_body",
+    );
+  }
+  const deep = new TextEncoder().encode(`{"timestamp":"${new Date().toISOString()}","x":${"[".repeat(100_000)}${"]".repeat(100_000)}}`);
+  await lib.verifyWebhook(deep, signed(deep), "secret").catch((err) => {
+    assert.ok(err instanceof lib.WebhookSignatureError && err.reason === "malformed_body", String(err));
+  });
   assert.equal(AS_OF_REASONS.length, 20);
   assert.ok(CITATION_TYPES.includes("transposition"));
 

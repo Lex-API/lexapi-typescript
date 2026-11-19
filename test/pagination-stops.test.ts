@@ -289,13 +289,24 @@ describe("paginateCites / paginateCitedBy", () => {
     expect(requests()).toBe(1); // one edge < limit 2: a short page
   });
 
-  it("a citationCount of 0 is a count", async () => {
+  it("a citationCount of 0 is a count when the group has no edges", async () => {
     const { client, requests } = server(() => ({
       success: true, targetDocument: "X", limit: 2, offset: 0,
-      citedBy: [{ celexNumber: "A", citationCount: 0, citations: [{ extractedAt: "t1" }, { extractedAt: "t2" }] }],
+      citedBy: [{ celexNumber: "A", citationCount: 0, citations: [] }],
     }));
     await walk(client.paginateCitedBy("X", { limit: 2 }));
     expect(requests()).toBe(1); // 0 rows: the walk ends
+  });
+
+  it("a citationCount of 0 next to a non-empty edge list counts the list", async () => {
+    const { client, requests } = server((url) => ({
+      success: true, targetDocument: "X", limit: 2, offset: qp(url, "offset", 0),
+      citedBy: url.searchParams.get("offset") === "0"
+        ? [{ celexNumber: "A", citationCount: 0, citations: [{ extractedAt: "t1" }, { extractedAt: "t2" }] }]
+        : [],
+    }));
+    await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(requests()).toBe(2); // 2 rows: a full page, then an empty one
   });
 
   it("an edge nested 100,000 levels deep is compared without a RangeError", async () => {
@@ -428,16 +439,17 @@ describe("stall checks, finer points", () => {
 
   it("a page with a position signal resets a run of repeated pages (cited-by)", async () => {
     const group = [{ celexNumber: "A", citationCount: 2 }];
-    // Two repeats, then a page with totalEdges, then two repeats: never three in a row.
-    const signal = [false, false, false, true, false, false, false];
+    // Two repeats, then a page with totalEdges (not counted), then two repeats:
+    // never three counted in a row.
+    const signal = [false, false, false, true, false, false];
     const { client, requests } = server((_, call) => ({
       success: true, targetDocument: "X", limit: 2, ...(signal[call] ? { totalEdges: 1000 } : {}),
-      citedBy: call < 7 ? group : [{ celexNumber: "A", citationCount: 1 }],
+      citedBy: call < 6 ? group : [{ celexNumber: "A", citationCount: 1 }],
     }));
     const { pages, error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
     expect(error).toBeUndefined();
-    expect(requests()).toBe(8);
-    expect(pages).toHaveLength(8);
+    expect(requests()).toBe(7);
+    expect(pages).toHaveLength(7);
   });
 
   it("a page with a usable total resets a run of repeated deliveries", async () => {

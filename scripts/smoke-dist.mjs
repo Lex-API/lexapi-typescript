@@ -18,6 +18,7 @@ assert.ok(!(new cjs.NotFoundError("x") instanceof sdk.UpstreamError));
 assert.ok(sdk.isLexAPIError(new cjs.TimeoutError("x"), sdk.TimeoutError));
 const pastDue = cjs.LexAPIError.fromResponse(403, { code: "PAYMENT_PAST_DUE", error: "Payment past due" });
 assert.ok(pastDue instanceof sdk.PaymentPastDueError);
-assert.ok(!(pastDue instanceof sdk.TierForbiddenError));
+assert.ok(pastDue instanceof sdk.TierForbiddenError);
+assert.equal(pastDue.code, "PAYMENT_PAST_DUE");
 assert.ok(new cjs.WebhookSignatureError("invalid_signature", "x") instanceof sdk.WebhookSignatureError);
 console.log("smoke:dist dual-package instanceof OK");

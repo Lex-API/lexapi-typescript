@@ -404,6 +404,8 @@ app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (r
 });
 ```
 
+`verifyWebhook` decodes the body as strict UTF-8 (one leading byte order mark is ignored) and parses it from the same bytes the signature covers; a body that is not valid UTF-8, or not JSON, throws `WebhookSignatureError("malformed_body")`. Pass the raw bytes (`Buffer`, `Uint8Array`, `ArrayBuffer`); a string stands for its UTF-8 encoding (a lone surrogate in it reads as U+FFFD).
+
 `verifySignature(rawBody, signature, secret)` is the signature-only check. Both use Web Crypto (constant-time comparison); an empty `secret` throws `WebhookSignatureError("missing_secret")` (a configuration error, not a bad delivery).
 
 ## Corpus export (BUSINESS, SCALE, ENTERPRISE)
@@ -511,7 +513,7 @@ The SDK retries automatically **only when a retry cannot charge you twice** (the
 
 **Timeout:** `timeoutMs` (default 95 s) is an *inactivity* limit per attempt: the longest the SDK waits for the next bytes — until the response head, then between body chunks (the timer restarts on every chunk), for JSON bodies and export streams alike. It is not a deadline for the whole call. On expiry you get `TimeoutError` with `code: "REQUEST_TIMEOUT"` (status 0). `fetch` cannot time the connect phase separately, so it counts inside the first window. The 95 s default sits above the API's 90 s deadline on document reads, so that timeout comes back as a typed, refunded 504; the CDN ends any wait at 100 s. `timeoutMs: Infinity` sets no limit, and `0` times out at once (on an export stream's body reads, `0` sets no idle limit); a value above 2^31−1 ms is clamped to that.
 
-**Iterators:** `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` and `paginateNationalDocuments` yield each page as it arrives and end by the documented stop conditions (a short or empty page, `totalEdges` / `total` reached, no `nextCursor`, `hasMore` not `true`, a page without its list). They throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page echoing an `offset` other than the one requested; a `nextCursor` already sent in the walk; and, only when the answers carry no usable `totalEdges`/`offset` (cites, cited-by) or `total` (deliveries), three pages in a row that repeat the one before (cites, cited-by: the same list; deliveries: no unseen `id`); a page with such a signal ends a run. A national `nextCursor` that is not a string throws too. When a walk throws, the pages already yielded stay valid; the page that showed the stall is not yielded and is on `err.body`. A starting `offset` that is not an integer ≥ 0, or a `limit` that is not an integer ≥ 1, is a `RangeError` before any request.
+**Iterators:** `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` and `paginateNationalDocuments` yield each page as it arrives and end by the documented stop conditions (a short or empty page, `totalEdges` / `total` reached, no `nextCursor`, `hasMore` not `true`, a page without its list). They throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page echoing an `offset` other than the one requested; a `nextCursor` already sent in the walk; and, only when the answers carry no usable `totalEdges`/`offset` (cites, cited-by) or `total` (deliveries), three pages in a row that repeat the one before (cites, cited-by: the same list; deliveries: no unseen `id`); a page with such a signal ends a run (on cites/cited-by its list is still the one the next page is compared with). A national `nextCursor` that is not a string throws too. When a walk throws, the pages already yielded stay valid; the page that showed the stall is not yielded and is on `err.body`. A starting `offset` that is not an integer ≥ 0, or a `limit` that is not an integer ≥ 1, is a `RangeError` before any request (every iterator, `paginateNationalDocuments` included). Cites/cited-by advance by each group's `citationCount`; a group whose count is 0 but whose edge list is not empty counts its list.
 
 **Cancellation:** every method takes `{ signal }`. Aborting cancels the in-flight request, any retry wait and an export stream (the connection is released), and rejects with `RequestAbortedError` (`code: "ABORTED"`, `cause` = the signal's reason).
 
@@ -534,8 +536,8 @@ try {
   if (err instanceof RateLimitedError && err.quotaExhausted) console.log(`legacy quota resets ${err.resetsAt}`);
   else if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
   else if (err instanceof CreditsExhaustedError) console.log(`need ${err.weight}, have ${err.available}; resets ${err.resetsAt}`);
+  else if (err instanceof PaymentPastDueError) console.log(`pay the open invoice: ${err.billingUrl ?? "in the dashboard"}`); // before TierForbiddenError: it extends it
   else if (err instanceof TierForbiddenError) console.log((err.body as { upgradeUrl?: string })?.upgradeUrl);
-  else if (err instanceof PaymentPastDueError) console.log(`pay the open invoice: ${err.billingUrl ?? "in the dashboard"}`);
   else if (err instanceof NotFoundError) console.log(err.unknownEndpoint || err.message.includes("Unknown API endpoint") ? "no such endpoint" : "no such document");
   else throw err;
 }
@@ -551,7 +553,7 @@ try {
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
 | `NationalSemanticNotEnabledError` | `NATIONAL_SEMANTIC_NOT_ENABLED` | 409 — this jurisdiction has no semantic index to search; `.jurisdiction`; not retryable, refunded |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
-| `PaymentPastDueError` | `PAYMENT_PAST_DUE` | 403 — a subscription payment failed and was not completed in time; API requests are refused until the payment succeeds; pay the open invoice in the dashboard (`.billingUrl`; `.accessEndedAt` when known); not retryable. Before API 2.27.0 a failed payment was refused at once with a 403 without a code, raised as `TierForbiddenError`. |
+| `PaymentPastDueError` (extends `TierForbiddenError`) | `PAYMENT_PAST_DUE` | 403 — a subscription payment failed and was not completed in time; API requests are refused until the payment succeeds; pay the open invoice in the dashboard (`.billingUrl`; `.accessEndedAt` when known); not retryable. Before API 2.27.0 a failed payment was refused at once with a 403 without a code, raised as `TierForbiddenError`. |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
@@ -565,7 +567,7 @@ try {
 | `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without a complete `_done` trailer, or the server sent an `_error` line (`rowsRead`, `details`) |
 | `LexAPIError` (base) | `INTERNAL` | any other status (e.g. 409, 413), with `status` kept |
 
-A handler that treated `TierForbiddenError` as a failed payment needs a `PaymentPastDueError` branch on API 2.27.0 and later.
+`PaymentPastDueError` extends `TierForbiddenError`, so a handler for `TierForbiddenError` still catches a failed payment, as it did before API 2.27.0. To tell the two apart, check `PaymentPastDueError` (or `err.code === "PAYMENT_PAST_DUE"`) first.
 
 **Response text on errors.** No error message quotes the response body. For a body that is not JSON, the first 200 characters (code points) are on `err.bodyExcerpt`; for an `InvalidResponseError` about JSON of the wrong shape, the parsed value is on `err.body`. Both are raw response content that may contain document text: do not show them to a model or log them by default. Neither is an own property of the error (both are read through getters), so `console.log(err)`, `util.inspect(err)` and `JSON.stringify(err)` leave them out. A `2xx` answer with `success: false` and an API error in its body throws that error (e.g. `NotFoundError`) with the `2xx` status.
 

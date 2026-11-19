@@ -94,6 +94,10 @@ async function getSubtle(): Promise<SubtleCryptoLike> {
   throw new Error("Web Crypto (crypto.subtle) is not available in this runtime");
 }
 
+/**
+ * The bytes a body stands for. A string is encoded as UTF-8; `TextEncoder`
+ * writes each lone surrogate as U+FFFD (EF BF BD).
+ */
 function toBytes(body: WebhookBody): Uint8Array {
   if (typeof body === "string") return new TextEncoder().encode(body);
   if (body instanceof Uint8Array) return body;
@@ -150,8 +154,13 @@ export async function verifySignature(
 /**
  * Verify a delivery and parse it into a typed {@link WebhookPayload}
  * (switch on `event`). Throws {@link WebhookSignatureError} on a missing
- * or invalid signature, a non-JSON body, or a `timestamp` outside
- * `toleranceMs` (default 5 minutes).
+ * or invalid signature, a body that is not UTF-8 JSON (`malformed_body`),
+ * or a `timestamp` outside `toleranceMs` (default 5 minutes).
+ *
+ * The body is decoded as strict UTF-8 (one leading byte order mark is
+ * ignored) and parsed from the same bytes the signature covers. A string
+ * body stands for its UTF-8 encoding, as in {@link computeSignature}: a
+ * lone surrogate in it is read as U+FFFD.
  *
  * ```ts
  * app.post("/lexapi-webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -175,12 +184,15 @@ export async function verifyWebhook(
   if (!signature) {
     throw new WebhookSignatureError("missing_signature", "Missing X-Webhook-Signature header");
   }
-  if (!(await verifySignature(rawBody, signature, secret))) {
+  const bytes = toBytes(rawBody);
+  if (!(await verifySignature(bytes, signature, secret))) {
     throw new WebhookSignatureError("invalid_signature", "X-Webhook-Signature does not match the body");
   }
   let payload: WebhookPayload;
   try {
-    const text = typeof rawBody === "string" ? rawBody : new TextDecoder().decode(toBytes(rawBody));
+    // The bytes the signature covers, decoded as strict UTF-8: any invalid
+    // sequence throws; one leading byte order mark is dropped.
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
     payload = JSON.parse(text) as WebhookPayload;
   } catch {
     throw new WebhookSignatureError("malformed_body", "Webhook body is not valid JSON");
