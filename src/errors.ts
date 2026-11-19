@@ -10,6 +10,7 @@
  */
 
 import type { RateLimitInfo, ResponseHeaders } from "./headers.js";
+import type { InForceLookup, NotFoundReason, SnapshotCandidate } from "./types.js";
 
 /** Stable error codes from the OpenAPI `ErrorResponse.error.code` enum. */
 export type ErrorCode =
@@ -382,6 +383,60 @@ export class NotFoundError extends LexAPIError {
    */
   get unknownEndpoint(): boolean {
     return detailsField(this.details, "reason") === "unknown_endpoint";
+  }
+
+  /**
+   * `details.reason` when it is a string: `unknown_endpoint`, or on
+   * `getDocumentAtDate` (API 2.28.0) `before_tracking` / `boundary_unknown`.
+   * `undefined` on a 404 without one (e.g. a document not in the corpus).
+   */
+  get reason(): NotFoundReason | undefined {
+    return readString(detailsField(this.details, "reason"));
+  }
+
+  /**
+   * `true` when `getDocumentAtDate` was asked about a date before the
+   * document entered the corpus (`details.reason` is `"before_tracking"`);
+   * {@link trackedSince} says when that was.
+   */
+  get beforeTracking(): boolean {
+    return detailsField(this.details, "reason") === "before_tracking";
+  }
+
+  /**
+   * `true` when LexAPI has no record of when a version stored before API
+   * 2.28.0 began, so it cannot say which snapshot it held on the date and
+   * does not guess (`details.reason` is `"boundary_unknown"`). Refunded.
+   * Read the {@link candidates} with `getDocumentVersion`.
+   */
+  get boundaryUnknown(): boolean {
+    return detailsField(this.details, "reason") === "boundary_unknown";
+  }
+
+  /** `before_tracking` only: when the document entered the corpus (`details.trackedSince`). */
+  get trackedSince(): string | undefined {
+    return readString(detailsField(this.details, "trackedSince"));
+  }
+
+  /** `before_tracking` on an EU act `legislationAsOf` resolves: where the version for a date is answered. */
+  get inForceLookup(): InForceLookup | undefined {
+    const value = detailsField(this.details, "inForceLookup");
+    return isPlainObject(value) ? (value as InForceLookup) : undefined;
+  }
+
+  /**
+   * `boundary_unknown` only: the versions the date could fall in (at most
+   * 10; can be empty). For these versions `fetchedAt` can be the last fetch
+   * and later than the date.
+   */
+  get candidates(): SnapshotCandidate[] | undefined {
+    const value = detailsField(this.details, "candidates");
+    return Array.isArray(value) ? (value.filter(isPlainObject) as unknown as SnapshotCandidate[]) : undefined;
+  }
+
+  /** `boundary_unknown` only: `true` when more versions matched than {@link candidates} lists. */
+  get candidatesTruncated(): boolean {
+    return detailsField(this.details, "candidatesTruncated") === true;
   }
 }
 
@@ -1062,6 +1117,11 @@ function readNumber(value: unknown): number | undefined {
 /** `value` when it is a non-empty string; anything else counts as absent. */
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/** A JSON object: not `null`, not an array. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readString(value: unknown): string | undefined {

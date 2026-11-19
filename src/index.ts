@@ -72,9 +72,11 @@ export type {
 export {
   AS_OF_REASONS,
   AS_OF_LOOKUP_REASONS,
+  NATIONAL_AS_OF_REASONS,
   CITATION_PROVENANCES,
   CITATION_RESOLUTIONS,
   CITATION_TYPES,
+  isNationalAsOfVersion,
   isNationalDecision,
 } from "./types.js";
 export type {
@@ -177,6 +179,11 @@ export type {
   SemanticCaseLawSearchResponse,
   AsOfReason,
   AsOfVersion,
+  EuSemanticCaseLawResult,
+  EuSemanticLegislationResult,
+  FieldProvenance,
+  InForceLabel,
+  NotInForceReason,
   SemanticLegislationResult,
   SemanticLegislationSearchResponse,
   LegislationAsOfRequest,
@@ -220,6 +227,8 @@ export type {
   NationalSemanticLegislationOptions,
   NationalSemanticCaseLawResult,
   NationalSemanticLegislationResult,
+  NationalAsOfReason,
+  NationalAsOfVersion,
   NationalSemanticCaseLawResponse,
   NationalSemanticLegislationResponse,
   NationalSearchPartialReason,
@@ -252,5 +261,10 @@ export type {
   VersionParams,
   DocumentVersionsResponse,
   DocumentVersionResponse,
+  DocumentAtDateResponse,
+  DocumentAtDateSnapshot,
+  InForceLookup,
+  NotFoundReason,
+  SnapshotCandidate,
 } from "./types.js";
 export { VERSION } from "./version.js";

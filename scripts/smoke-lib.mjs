@@ -82,6 +82,17 @@ export async function runSmoke(lib, label) {
   assert.ok(unknown instanceof lib.NotFoundError);
   assert.equal(unknown.unknownEndpoint, true);
   assert.equal(new lib.NotFoundError("x").unknownEndpoint, false);
+  const boundary = lib.LexAPIError.fromResponse(404, {
+    success: false,
+    error: { code: "NOT_FOUND", message: "x", details: { reason: "boundary_unknown", candidates: [{ version: 1 }, "x"] } },
+  });
+  assert.equal(boundary.boundaryUnknown, true);
+  assert.deepEqual(boundary.candidates, [{ version: 1 }]);
+
+  await client.nationalLegislationSemanticSearch("AT", { query: "Auskunft", asOf: new Date("2020-06-01T23:30:00Z") });
+  assert.equal(JSON.parse(calls.at(-1).init.body).asOf, "2020-06-01");
+  assert.deepEqual(lib.NATIONAL_AS_OF_REASONS, ["provision_amended_since", "no_longer_in_force", "provision_dates_unknown", "asof_not_available"]);
+  assert.equal(lib.isNationalAsOfVersion({ kind: "current_unit" }), true);
 
   // Timeout and cancellation work on this runtime.
   const stalled = (_url, init) =>

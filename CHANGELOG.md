@@ -9,6 +9,37 @@ picks up `0.2.0` on its own.
 
 ### Added
 
+- **National `asOf` labels** (API 2.29.0): `nationalLegislationSemanticSearch` takes `asOf`
+  (`YYYY-MM-DD`, or a `Date`, sent as its UTC calendar day) and sends it; before, the option did not
+  exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
+  `NATIONAL_AS_OF_REASONS`) and, when resolved, `asOfVersion: NationalAsOfVersion`
+  (`{ kind: "current_unit", validFrom, validTo, sourceId, checkedAt }`); the response adds `asOf`
+  and `asOfSummary`. The search runs over today's texts only: a hit is resolved only when the
+  publisher's dates, as of LexAPI's last recorded read of the act (`checkedAt`), show today's
+  wording already applied on the date; an unresolved hit keeps today's wording, which is not
+  established as the text for the date. LexAPI holds such dates for Austria and Spain.
+  `isNationalAsOfVersion(v)` tells it from the EU `AsOfVersion` by `kind`.
+- **Snapshot timing on the version endpoints** (API 2.28.0): `observedFrom` on every version
+  (`listDocumentVersions`, `getDocumentVersion`, `getDocumentAtDate`): when the version began,
+  `null` when LexAPI has no record of it. `getDocumentAtDate` now returns `DocumentAtDateResponse`
+  (a `DocumentVersionResponse` with `kind: "observation_snapshot"`, `document.observedUntil`,
+  `inForceLookup`, `dateInFuture` and `xWarning`). These are LexAPI's fetch snapshots, not the law
+  in force on a date; for the version of an EU act for a date use `legislationAsOf`.
+- **`NotFoundError` details** (API 2.28.0): `reason` (`details.reason`), `beforeTracking` (with
+  `trackedSince` and `inForceLookup`) and `boundaryUnknown` (with `candidates` —
+  `{ version, fetchedAt, observedFrom }[]` — and `candidatesTruncated`) for the 404s of
+  `getDocumentAtDate`. Read from `details` only. `unknownEndpoint` is unchanged.
+- **In-force label** (API 2.19.0): `inForce`, `notInForceReason`, `endOfValidity`,
+  `entryIntoForce` (`InForceLabel`, `NotInForceReason`) on documents (`getDocument`,
+  `getDocumentsBatch`, `getDocumentByUrl`), on `getDocumentMetadata`'s `metadata` and on
+  `semanticLegislationSearch` hits; the `inForce` option of `semanticLegislationSearch` (sent when
+  set) and the response's `inForceFilter`.
+- **Provenance** (API 2.20.0): `provenance` and `fieldProvenance` (`FieldProvenance`) on documents,
+  `getDocumentMetadata`'s `metadata`, single version snapshots and EU semantic hits
+  (`EuSemanticCaseLawResult`, `EuSemanticLegislationResult`, now the element types of `results`);
+  `fieldProvenance` on `semanticSearch` responses with `hypotheticalDocument`.
+- **`/info` semantic result caps** (API 2.24.0): `subscription.maxSemanticResults` and
+  `subscription.maxSemanticLegislationResults`.
 - **`legislationAsOf({ document, asOf, provision?, language? }, options?)`** (`POST /legislation/as-of`,
   1 credit when no text is fetched; 4, or 5 live from EUR-Lex, when the provision's text is fetched,
   whatever the answer; 1 if the fetch fails). **Requires LexAPI API 2.26.0.** The version of
@@ -62,6 +93,9 @@ picks up `0.2.0` on its own.
 
 ### Fixed
 
+- `NationalSemanticLegislationResult` typed the fields it shares with the EU hit (`id`, `score`,
+  `text`, `snippet`, `chapter`, `exact_match_law_id`, `metadata`) as `unknown`; they now have their
+  types. Other keys are still readable as `unknown`.
 - `InvalidResponseError` no longer carries the response text on `body`, where `console.log(err)`
   and `JSON.stringify(err)` printed it. The excerpt is on `bodyExcerpt`; for JSON of the wrong shape
   the parsed value is on `body`, read through a getter and not an own property of the error. The
