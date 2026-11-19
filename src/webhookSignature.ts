@@ -25,7 +25,9 @@ export type WebhookBody = string | Uint8Array | ArrayBuffer;
 export interface VerifyWebhookOptions {
   /**
    * Reject deliveries whose signed `timestamp` is further than this from
-   * now (replay guard). Default 300 000 ms (5 minutes). `0` disables the check.
+   * now (replay guard; the edge passes, compared in whole microseconds).
+   * Default 300 000 ms (5 minutes). `0` disables the check, a negative value
+   * rejects every delivery, and `NaN` is a `RangeError`.
    */
   toleranceMs?: number;
   /** Clock override (testing). Default `Date.now()`. */
@@ -67,6 +69,10 @@ function assertSecret(secret: string): void {
       "missing_secret",
       "Webhook secret is empty — pass the secret returned when the webhook was created",
     );
+  }
+  // A key with a lone surrogate has no UTF-8 bytes: never sign with a repaired one.
+  if (!isWellFormed(secret)) {
+    throw new WebhookSignatureError("missing_secret", "Webhook secret is not well-formed Unicode (lone surrogate)");
   }
 }
 
@@ -138,12 +144,12 @@ function trimHeader(value: string): string {
 const TIMESTAMP = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
 
 /**
- * A signed `timestamp` as epoch milliseconds: a string
- * `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM` offset, a
- * real calendar date and time (SDK contract §1.9). Anything else is
- * `undefined`.
+ * A signed `timestamp` as epoch microseconds: a string
+ * `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM` offset,
+ * naming a date and time that exist, in years 0001–9999 (SDK contract §1.9).
+ * Fraction digits past the sixth are cut. Anything else is `undefined`.
  */
-function timestampMs(value: unknown): number | undefined {
+function timestampMicros(value: unknown): bigint | undefined {
   if (typeof value !== "string") return undefined;
   const match = TIMESTAMP.exec(value);
   if (!match) return undefined;
@@ -154,12 +160,18 @@ function timestampMs(value: unknown): number | undefined {
   const offM = sign === undefined ? 0 : Number(match[10]);
   const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
-  if (days === undefined || d < 1 || d > days || h > 23 || mi > 59 || sec > 59 || offH > 23 || offM > 59) return undefined;
+  if (y < 1 || days === undefined || d < 1 || d > days || h > 23 || mi > 59 || sec > 59 || offH > 23 || offM > 59) return undefined;
   const date = new Date(0);
   date.setUTCFullYear(y, mo - 1, d);
   date.setUTCHours(h, mi, sec, 0);
-  const offset = (sign === "-" ? -1 : 1) * (offH * 60 + offM) * 60_000;
-  return date.getTime() + (fraction === undefined ? 0 : Number(`0.${fraction}`) * 1000) - offset;
+  const micros = fraction === undefined ? 0 : Number(fraction.slice(0, 6).padEnd(6, "0"));
+  const offset = (sign === "-" ? -1 : 1) * (offH * 60 + offM) * 60_000_000;
+  return BigInt(date.getTime()) * BigInt(1000) + BigInt(micros) - BigInt(offset);
+}
+
+/** A finite millisecond figure as whole microseconds (rounded to the nearest). */
+function micros(ms: number): bigint {
+  return BigInt(Math.round(ms * 1000));
 }
 
 /** Constant-time comparison of two equal-purpose strings. */
@@ -247,6 +259,10 @@ export async function verifyWebhook(
   options: VerifyWebhookOptions = {},
 ): Promise<WebhookPayload> {
   assertSecret(secret);
+  const toleranceMs = options.toleranceMs ?? 300_000;
+  if (typeof toleranceMs !== "number" || Number.isNaN(toleranceMs)) {
+    throw new RangeError(`toleranceMs must be a number, got ${String(toleranceMs)}`);
+  }
   if (!signature) {
     throw new WebhookSignatureError("missing_signature", "Missing X-Webhook-Signature header");
   }
@@ -269,11 +285,18 @@ export async function verifyWebhook(
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     throw new WebhookSignatureError("malformed_body", "Webhook body is not a JSON object");
   }
-  const toleranceMs = options.toleranceMs ?? 300_000;
-  if (toleranceMs > 0) {
-    const sentAt = timestampMs((payload as { timestamp?: unknown }).timestamp);
+  // 0 disables the window; a negative one admits nothing. The distance is
+  // compared in whole microseconds, the edge included.
+  if (toleranceMs !== 0) {
+    const sentAt = timestampMicros((payload as { timestamp?: unknown }).timestamp);
     const now = options.now ?? Date.now();
-    if (sentAt === undefined || Math.abs(now - sentAt) > toleranceMs) {
+    let fresh = sentAt !== undefined && toleranceMs > 0;
+    if (fresh && toleranceMs !== Infinity) {
+      const distance = micros(now) - sentAt!;
+      const limit = micros(toleranceMs);
+      fresh = distance <= limit && -distance <= limit;
+    }
+    if (!fresh) {
       throw new WebhookSignatureError(
         "stale_timestamp",
         `Webhook timestamp is outside the ${toleranceMs} ms tolerance window`,

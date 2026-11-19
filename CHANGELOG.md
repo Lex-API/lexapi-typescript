@@ -124,7 +124,8 @@ Type-level changes to check when upgrading:
   `totalEdges`/`offset` (or a deliveries `total`), three pages in a row that repeat the one before.
   The page that shows the stall is not yielded and is on `err.body`. Cites/cited-by walks also end
   once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
-  A starting `offset`/`limit` that is not a non-negative (positive) integer is a `RangeError`.
+  A starting `offset` that is not an integer from 0, or a `limit` that is not an integer from 1, up
+  to 2^53 − 1, is a `RangeError` before any request.
 - `PaymentPastDueError` extends `TierForbiddenError`: an `instanceof TierForbiddenError` check also
   catches a failed payment, as it did for the 403 without a code that APIs before 2.27.0 send.
   Check `PaymentPastDueError` first to tell the two apart. `TierForbiddenError`'s constructor takes
@@ -144,8 +145,15 @@ Type-level changes to check when upgrading:
   `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
   `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
 - The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
-  offset, with a real date and time; anything else is `stale_timestamp`. Before, any text
-  `Date.parse` accepted was read (a lower-case `z`, RFC 2822 dates).
+  offset, naming a date and time that exist, in years 0001–9999; anything else is
+  `stale_timestamp`. Before, any text `Date.parse` accepted was read (a lower-case `z`, RFC 2822
+  dates). The distance from now is compared in whole microseconds (fraction digits past the sixth
+  are cut), and a delivery exactly at the edge of the window passes.
+- `toleranceMs: NaN` is a `RangeError`, and a negative `toleranceMs` rejects every delivery as
+  `stale_timestamp`. Before, both turned the replay check off. `0` still turns it off.
+- A webhook secret with a lone surrogate (it has no UTF-8 encoding) is
+  `WebhookSignatureError("missing_secret")` in every helper. Before, it was used with each surrogate
+  replaced by U+FFFD.
 - The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order mark,
   a no-break space) fails. Hex digits in either case are accepted, as before.
 - Export lines end at a line feed byte only and are decoded as strict UTF-8, whatever charset the
@@ -154,14 +162,20 @@ Type-level changes to check when upgrading:
   of spaces, tabs and CR only (before: all Unicode whitespace); one byte order mark at the very start
   of the stream is ignored, and one anywhere else makes its line invalid.
 - Export: `meta` is set only from the very first line of the stream; a `_meta` line after it is
-  skipped and not counted. `stream.truncated` is `false` when neither the trailer, the header nor
+  skipped and not counted, also when it carries `_done` or `_error` (before, such a line was read as
+  the trailer). When `_meta` or `_done` holds an object, the fields are read from that object only
+  (before, keys beside it on the line were read too and won); the flat `{"_meta": true, ...}` form is
+  still read from the line. `X-Export-Truncated` counts only as `1` or `0`; any other value is
+  absent and `_meta.truncated` decides (before, it read as `false`). `stream.truncated` is `false` when neither the trailer, the header nor
   `_meta` says (before: `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read
   like `Uint8Array`; a chunk that is not bytes ends the stream with `NetworkError` and releases the
   connection.
 - A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
   (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries. The
   shape test for servers before API 2.4.0 (`usage.resetsAt`, no wait) applies only to a 429 whose
-  code is `RATE_LIMITED`; a 429 with another code is retried as before.
+  code is `RATE_LIMITED`; a 429 with another code is retried as before. Off a 429, the code
+  `QUOTA_EXHAUSTED` no longer drops a `Retry-After` wait: `retryAfter` keeps it and the retry waits
+  it.
 - A `PAYMENT_PAST_DUE` answer is never retried, on any status (a 429 included).
 
 ### Fixed
@@ -200,7 +214,7 @@ Type-level changes to check when upgrading:
 - An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
   the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
 - `verifyWebhook` on a correctly signed body that is JSON `null` throws
-  `WebhookSignatureError("stale_timestamp")`. Before, it threw a `TypeError`.
+  `WebhookSignatureError("malformed_body")`. Before, it threw a `TypeError`.
 
 ### Security
 

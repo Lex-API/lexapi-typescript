@@ -6,7 +6,7 @@ import {
   TimeoutError,
 } from "./errors.js";
 import { parseHeaderInteger } from "./headers.js";
-import { timerDelay } from "./retryHints.js";
+import { timerDelay, trimSpaces } from "./retryHints.js";
 import type { Language } from "./types.js";
 
 // ── GET /export (NDJSON stream, BUSINESS / SCALE / ENTERPRISE) ───────
@@ -196,8 +196,9 @@ export interface ExportHeaderInfo {
    */
   streaming: number | undefined;
   /**
-   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap. A hint
-   * only; `stream.truncated` prefers `_done.truncated` once it is read.
+   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap (`0`:
+   * it did not; any other value is `undefined`). A hint only;
+   * `stream.truncated` prefers `_done.truncated` once it is read.
    */
   truncated: boolean | undefined;
 }
@@ -599,11 +600,13 @@ class NdjsonReader {
   }
 }
 
-/** Lift the nested `_meta` / `_done` object's fields to the top level (keeping the raw key). */
+/** The nested `_meta` / `_done` object's fields at the top level (keeping the raw key). */
 function liftEnvelope<T>(parsed: Record<string, unknown>, key: "_meta" | "_done"): T {
   const inner = parsed[key];
+  // §1.8: an object under the key is the envelope; keys beside it on the line
+  // are not read. The flat form (`{"_meta": true, ...}`) is read from the line.
   if (typeof inner === "object" && inner !== null && !Array.isArray(inner)) {
-    return { ...(inner as Record<string, unknown>), ...parsed } as T;
+    return { ...(inner as Record<string, unknown>), [key]: inner } as T;
   }
   return parsed as T;
 }
@@ -709,12 +712,13 @@ class ExportStreamImpl implements ExportStream {
     }
     // §1.8: `_meta` counts only on the very first line of the stream; a later
     // one (also after a blank first line) is skipped, never a row.
-    if ("_meta" in parsed && !this.lines.firstLineBlank) {
-      this.meta = liftEnvelope<ExportMeta>(parsed, "_meta");
+    // It is the `_meta` line even when it also carries `_done` or `_error`.
+    if ("_meta" in parsed) {
+      if (!this.lines.firstLineBlank) this.meta = liftEnvelope<ExportMeta>(parsed, "_meta");
     } else if ("_done" in parsed) {
       this.done = liftEnvelope<ExportDone>(parsed, "_done");
       this.lines.cancel();
-    } else if (!("_meta" in parsed)) {
+    } else {
       // Defensive: no _meta envelope — treat the line as the first row.
       this.pendingFirstRow = parsed as ExportRow;
     }
@@ -760,12 +764,13 @@ class ExportStreamImpl implements ExportStream {
           this.invalidLines++;
           continue;
         }
+        // A later `_meta` line is skipped, also when it carries `_done` or `_error`.
+        if ("_meta" in parsed) continue;
         if ("_done" in parsed) {
           this.done = liftEnvelope<ExportDone>(parsed, "_done");
           if (!this.complete) throw this.incomplete(this.failureReason());
           return;
         }
-        if ("_meta" in parsed) continue; // never surface envelope lines as rows
         const error = errorLine(parsed);
         if (error !== undefined) {
           this.error = error; // a failure signal, never a row
@@ -779,6 +784,12 @@ class ExportStreamImpl implements ExportStream {
       this.lines.cancel();
     }
   }
+}
+
+/** `X-Export-Truncated`: `1` or `0` (spaces and tabs around allowed); anything else is absent. */
+function truncatedFlag(value: string | null): boolean | undefined {
+  const flag = value === null ? undefined : trimSpaces(value);
+  return flag === "1" ? true : flag === "0" ? false : undefined;
 }
 
 /** Build an `ExportStream` from a raw `/export` fetch response. */
@@ -795,7 +806,7 @@ export async function createExportStream(
   const stream = new ExportStreamImpl(new NdjsonReader(response.body, options), {
     total: parseHeaderInteger(totalHeader),
     streaming: parseHeaderInteger(streamingHeader),
-    truncated: truncatedHeader !== null ? truncatedHeader === "1" : undefined,
+    truncated: truncatedFlag(truncatedHeader),
   });
   await stream.init();
   return stream;

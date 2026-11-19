@@ -301,9 +301,10 @@ export class LexAPIError extends Error {
     if (!typedCode && statusCode === undefined && status < 500) {
       return new LexAPIError(code, message, status, details, retryAfter, context);
     }
-    // §1.2: a quota-exhausted 429 exposes no retry-after value. On a 429 the
-    // code QUOTA_EXHAUSTED, top-level or in the typed envelope, wins over
-    // any other code the body carries.
+    // §1.2: a quota 429 exposes no retry-after value. On a 429 the code
+    // QUOTA_EXHAUSTED, top-level or in the typed envelope, wins over any
+    // other code the body carries. Off a 429 the code changes neither the
+    // wait nor the retry-after value.
     if (
       code === "QUOTA_EXHAUSTED" ||
       (status === 429 && hasQuotaCode(body)) ||
@@ -313,7 +314,7 @@ export class LexAPIError extends Error {
         message,
         status,
         details,
-        undefined,
+        status === 429 ? undefined : retryAfter,
         context,
         code === "RATE_LIMITED" ? "RATE_LIMITED" : "QUOTA_EXHAUSTED",
       );
