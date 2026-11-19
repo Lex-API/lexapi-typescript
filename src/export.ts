@@ -276,6 +276,26 @@ export interface ExportStreamOptions {
 const INVALID_LINE = Symbol("invalid line");
 type Line = string | typeof INVALID_LINE;
 
+const NO_BYTES = new Uint8Array(0);
+
+/**
+ * The bytes a streaming decoder holds after `previous` (what it held before)
+ * and then `chunk` were decoded without an error: the start of a character
+ * not yet complete, at most three bytes, copied.
+ */
+function heldBytes(previous: Uint8Array, chunk: Uint8Array): Uint8Array {
+  const n = chunk.length;
+  if (n > 0 && chunk[n - 1]! < 0x80) return NO_BYTES;
+  const tail = n >= 3 ? chunk.subarray(n - 3) : new Uint8Array([...previous, ...chunk].slice(-3));
+  for (let k = 1; k <= tail.length; k++) {
+    const byte = tail[tail.length - k]!;
+    if ((byte & 0xc0) === 0x80) continue; // a continuation byte
+    const size = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return size > k ? tail.slice(tail.length - k) : NO_BYTES;
+  }
+  return NO_BYTES;
+}
+
 function strictDecoder(): TextDecoder {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 }
@@ -321,6 +341,8 @@ class NdjsonReader {
   private readonly reader: ReadableStreamDefaultReader<unknown>;
   /** Decodes the line in progress; holds the bytes of a character split across chunks. */
   private decoder = strictDecoder();
+  /** A copy of the bytes the decoder holds (a character not yet complete), so it can be rebuilt. */
+  private carry: Uint8Array = NO_BYTES;
   /** Text pieces of the line in progress. */
   private partial: string[] = [];
   /** The line in progress already holds bytes that are not UTF-8. */
@@ -379,6 +401,39 @@ class NdjsonReader {
   private ingest(value: unknown): void {
     const chunk = byteView(value);
     if (chunk === undefined) throw new TypeError("Export stream yielded a chunk that is not bytes");
+    if (!this.broken) {
+      // Common case: the whole chunk is UTF-8. Decode it in one call and
+      // split the text, as a non-strict reader would.
+      let text: string | undefined;
+      try {
+        text = this.decoder.decode(chunk, { stream: true });
+      } catch {
+        // Rebuild the decoder as it was before this chunk, then find the
+        // invalid line byte by byte.
+        this.decoder = strictDecoder();
+        if (this.carry.length > 0) this.decoder.decode(this.carry, { stream: true });
+      }
+      if (text !== undefined) {
+        this.carry = heldBytes(this.carry, chunk);
+        let pos = 0;
+        for (;;) {
+          const newline = text.indexOf("\n", pos);
+          if (newline === -1) break;
+          this.partial.push(text.slice(pos, newline));
+          const line = this.partial.length === 1 ? this.partial[0]! : this.partial.join("");
+          this.partial = [];
+          this.complete(line);
+          pos = newline + 1;
+        }
+        if (pos < text.length) this.partial.push(pos === 0 ? text : text.slice(pos));
+        return;
+      }
+    }
+    this.ingestBytes(chunk);
+  }
+
+  /** A chunk that is not all UTF-8, or that continues a line that is not. */
+  private ingestBytes(chunk: Uint8Array): void {
     const first = chunk.indexOf(0x0a);
     if (first === -1) {
       this.feed(chunk);
@@ -400,6 +455,7 @@ class NdjsonReader {
     }
     this.partial = [];
     this.broken = false;
+    this.carry = NO_BYTES;
     this.complete(line);
     // The complete lines after it: one call when they are all UTF-8.
     if (first < last) this.completeRegion(chunk.subarray(first + 1, last + 1));
@@ -438,15 +494,17 @@ class NdjsonReader {
     }
   }
 
-  /** Bytes of the line in progress. */
+  /** Bytes of the line in progress (after a line feed, or continuing a line that is not UTF-8). */
   private feed(bytes: Uint8Array): void {
     if (this.broken || bytes.length === 0) return;
     try {
       const text = this.decoder.decode(bytes, { stream: true });
       if (text) this.partial.push(text);
+      this.carry = heldBytes(this.carry, bytes);
     } catch {
       this.broken = true;
       this.decoder = strictDecoder();
+      this.carry = NO_BYTES;
     }
   }
 
