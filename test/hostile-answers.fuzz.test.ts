@@ -3,7 +3,17 @@
 // and every call (and every iterator) ends.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { LexAPI, LexAPIError, WebhooksAPI, type RetryOptions } from "../src/index.js";
+import {
+  LexAPI,
+  LexAPIError,
+  WebhookSignatureError,
+  WebhooksAPI,
+  computeSignature,
+  getCreditUsage,
+  parseResponseHeaders,
+  verifyWebhook,
+  type RetryOptions,
+} from "../src/index.js";
 
 const BASE = "http://127.0.0.1:9/api/v1";
 const ATTEMPT_TIMEOUT_MS = 12_345;
@@ -136,16 +146,44 @@ const CALLS: Record<string, (c: LexAPI) => Promise<unknown>> = {
   "webhooks.paginateDeliveries": (c) => drain(c.webhooks.paginateDeliveries("w", { limit: 2 })),
 };
 
-/** Drain an async iterable, at most 30 items (a hostile server may invent new items for ever). */
+/** Drain an async iterable to its end (the request budget bounds a walk that never ends). */
 async function drain(it: AsyncIterable<unknown>): Promise<number> {
   let n = 0;
-  for await (const _ of it) if (++n >= 30) break;
+  for await (const _ of it) n++;
   return n;
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+const ROUNDS = Number(process.env["FUZZ_ROUNDS"] ?? 20);
+const BASE_SEED = Number(process.env["FUZZ_SEED"] ?? 1);
+/** Requests one call (or one whole iterator walk) may make before it counts as not ending. */
+const REQUEST_BUDGET = 400;
+/** Seeds never collide between methods: each method owns a block of a million. */
+const seedOf = (methodIndex: number, round: number) => BASE_SEED + methodIndex * 1_000_000 + round;
+
+class BudgetExceeded extends Error {}
+
+const STANDALONE: Record<string, (rand: () => number) => Promise<unknown> | unknown> = {
+  getCreditUsage: (rand) => getCreditUsage(JSON.parse(jsonText(rand, 0).replace(/^\[{100,}.*$/s, "{}")) as never),
+  parseResponseHeaders: (rand) => {
+    const headers = new Headers();
+    for (let i = 0; i < 6; i++) headers.set(HEADER_NAMES[Math.floor(rand() * HEADER_NAMES.length)]!, HEADER_VALUES[Math.floor(rand() * HEADER_VALUES.length)]!);
+    return parseResponseHeaders(headers);
+  },
+  verifyWebhook: async (rand) => {
+    const body = jsonText(rand, 0);
+    const sig = rand() < 0.5 ? HEADER_VALUES[Math.floor(rand() * HEADER_VALUES.length)] : await computeSignature(body, "whsec");
+    try {
+      return await verifyWebhook(body, sig, "whsec", { toleranceMs: rand() < 0.5 ? 0 : 300_000 });
+    } catch (e) {
+      if (e instanceof WebhookSignatureError) return undefined;
+      throw e;
+    }
+  },
+};
 
 describe("hostile answers", () => {
   it("covers every public method", () => {
@@ -155,39 +193,66 @@ describe("hostile answers", () => {
     expect(Object.keys(CALLS).sort()).toEqual(expected);
   });
 
-  it.each([
-    ["default retry policy", {}],
-    ["unbounded maxDelayMs", { maxDelayMs: Infinity, baseDelayMs: 1e12 }],
-  ] as Array<[string, RetryOptions]>)("only SDK errors escape and every wait is a valid timer delay (%s)", async (_label, retry) => {
-    const real = globalThis.setTimeout;
-    const waits: number[] = [];
-    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-      if (ms === ATTEMPT_TIMEOUT_MS) return real(fn, ms);
-      waits.push(ms as number);
-      return real(fn, 0);
-    }) as typeof setTimeout);
-
-    const escaped: string[] = [];
-    const rounds = Number(process.env["FUZZ_ROUNDS"] ?? 20);
-    for (const [name, call] of Object.entries(CALLS)) {
-      for (let round = 0; round < rounds; round++) {
-        const seed = round * 7919 + name.length * 104729 + name.charCodeAt(0);
-        const rand = prng(seed);
-        const fetchFn = vi.fn(async (url: string | URL | Request) => {
-          if (!String(url).startsWith("http://127.0.0.1:")) throw new Error("refused a request off loopback");
-          return hostileReply(rand);
-        });
-        const client = new LexAPI({ apiKey: "lex_test_key", baseUrl: BASE, fetch: fetchFn, timeoutMs: ATTEMPT_TIMEOUT_MS, retry });
+  it("standalone helpers never throw on hostile input (only WebhookSignatureError from verifyWebhook)", async () => {
+    const failures: string[] = [];
+    for (const [index, [name, run]] of Object.entries(STANDALONE).entries()) {
+      for (let round = 0; round < ROUNDS * 5; round++) {
+        const seed = seedOf(1000 + index, round);
         try {
-          await call(client);
+          await run(prng(seed));
         } catch (e) {
-          if (!(e instanceof LexAPIError)) escaped.push(`${name} seed ${seed}: ${(e as Error)?.constructor?.name}: ${String((e as Error)?.message).slice(0, 120)}`);
+          failures.push(`${name} seed ${seed}: ${(e as Error)?.constructor?.name}: ${String((e as Error)?.message).slice(0, 120)}`);
         }
       }
     }
-    expect(escaped).toEqual([]);
-    const bad = waits.filter((ms) => !(typeof ms === "number" && ms >= 0 && ms <= MAX_TIMER_MS));
-    expect(bad).toEqual([]);
-    expect(waits.length).toBeGreaterThan(0);
-  }, 120_000);
+    expect(failures).toEqual([]);
+  }, 600_000);
+
+  it.each([
+    ["default retry policy", {}, ATTEMPT_TIMEOUT_MS],
+    ["unbounded maxDelayMs", { maxDelayMs: Infinity, baseDelayMs: 1e12 }, ATTEMPT_TIMEOUT_MS],
+    ["a timeout above the timer limit", {}, 3e9],
+  ] as Array<[string, RetryOptions, number]>)("only SDK errors escape, every call ends, every timer delay is valid (%s)", async (_label, retry, timeoutMs) => {
+    const attemptTimer = Math.min(timeoutMs, MAX_TIMER_MS);
+    const real = globalThis.setTimeout;
+    let delays: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms as number);
+      // The attempt timer keeps its delay; every retry wait runs at once.
+      return ms === attemptTimer ? real(fn, Math.min(ms, ATTEMPT_TIMEOUT_MS)) : real(fn, 0);
+    }) as typeof setTimeout);
+
+    const failures: string[] = [];
+    let retryWaits = 0;
+    for (const [index, [name, call]] of Object.entries(CALLS).entries()) {
+      for (let round = 0; round < ROUNDS; round++) {
+        const seed = seedOf(index, round);
+        const rand = prng(seed);
+        let requests = 0;
+        const fetchFn = vi.fn(async (url: string | URL | Request) => {
+          if (!String(url).startsWith("http://127.0.0.1:")) throw new Error("refused a request off loopback");
+          if (++requests > REQUEST_BUDGET) throw new BudgetExceeded();
+          return hostileReply(rand);
+        });
+        const client = new LexAPI({ apiKey: "lex_test_key", baseUrl: BASE, fetch: fetchFn, timeoutMs, retry });
+        delays = [];
+        try {
+          await call(client);
+        } catch (e) {
+          const budget = e instanceof BudgetExceeded || (e instanceof LexAPIError && e.cause instanceof BudgetExceeded);
+          if (budget) failures.push(`${name} seed ${seed}: did not end within ${REQUEST_BUDGET} requests`);
+          else if (!(e instanceof LexAPIError)) failures.push(`${name} seed ${seed}: ${(e as Error)?.constructor?.name}: ${String((e as Error)?.message).slice(0, 120)}`);
+        }
+        for (const ms of delays) {
+          if (!(typeof ms === "number" && ms >= 0 && ms <= MAX_TIMER_MS)) failures.push(`${name} seed ${seed}: timer delay ${ms}`);
+          if (ms !== attemptTimer) retryWaits++;
+        }
+        if (timeoutMs !== ATTEMPT_TIMEOUT_MS && requests > 0 && !delays.includes(MAX_TIMER_MS)) {
+          failures.push(`${name} seed ${seed}: the attempt timeout was not clamped to the timer limit`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+    expect(retryWaits).toBeGreaterThan(0);
+  }, 600_000);
 });

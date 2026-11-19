@@ -104,6 +104,20 @@ Type-level changes to check when upgrading:
 - An error body that is not valid UTF-8 is treated as not JSON: the error carries the code derived
   from the status and the message `HTTP <status>`.
 
+- Retry hints are read strictly (SDK contract §1.2): `Retry-After` and `RateLimit-Reset` as decimal
+  seconds or, for `Retry-After`, an RFC 9110 HTTP-date ending in `GMT`, `UTC` or `+0000` (dates with
+  other zone names, impossible dates and other text are ignored); a body `retryAfter` only as a
+  number ≥ 0. An unusable hint counts as none: the retry uses the normal back-off, a legacy 429 with
+  `usage.resetsAt` and no usable hint is a quota 429, and a national 503 whose only hint is unusable
+  is not retried.
+- Figures that are not usable numbers read as absent: integer headers (`result.headers`, export
+  counts) accept only digits up to 2^53−1, and `getCreditUsage` ignores a figure that is not a finite
+  number or a `resetsAt` that is not a string.
+- The iterators throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page
+  echoing another `offset`, a national `nextCursor` already sent, or, without `totalEdges`/`offset`
+  (or a deliveries `total`), three pages in a row that repeat the one before. Cites/cited-by walks
+  also end once the offset reaches `totalEdges`.
+
 ### Fixed
 
 - `NationalSemanticLegislationResult` typed the fields it shares with the EU hit (`id`, `score`,
@@ -124,27 +138,17 @@ Type-level changes to check when upgrading:
   after the client is created is the one used.
 - A runtime with no global `fetch` and no `fetch` option now fails at construction with a clear
   error. Previously a `globalThis.fetch` set to `undefined` constructed and failed at the first call.
-- A negative `retryAfter` in an error body is absent, so the retry uses the normal back-off and
-  `err.retryAfter` is `undefined`. Before, it read as `0`.
-- A `Retry-After` header of digits too large for a number, or of text that is not an HTTP-date in
-  one of the three RFC 9110 forms (`junk 1` read as a date in 2001), is absent. Before, both read as
-  `0`, a retry at once. An asctime date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
-- A `RateLimit-Reset` header that is not unsigned decimal seconds (`-0`, `0x10`, `1e3`) is absent.
-- A retry wait or timeout is never handed to a timer above 2^31−1 ms; a longer timer fires at once
-  in Node and Bun, so a huge server wait with `maxDelayMs: Infinity` retried immediately.
-- Integer headers (`result.headers`, for example `rateLimit.remaining`) too large for a number read
-  as absent instead of `Infinity`. `X-Export-Total` / `X-Export-Streaming` that are not a
-  non-negative integer read as absent instead of `NaN`, `Infinity`, a negative number or `0`.
-- `getCreditUsage` reads a `credits` or `usage` figure that is not a finite number as absent:
-  `unitsCharged` is `0` and `creditsRemaining` falls back as when the field is missing. Before, it
-  returned `Infinity` or the string as sent.
-- `paginateCites`, `paginateCitedBy`, `paginateNationalDocuments` and
-  `webhooks.paginateDeliveries` stop at a page that brings nothing they have not yielded already, so
-  a server that repeats a page no longer makes them loop for ever. A page without its list ends the
-  walk instead of throwing a `TypeError`, and a `citationCount` that is not a count falls back to the
-  length of the group's edge list.
+- Waits and timeouts longer than the timer limit (2^31−1 ms) no longer fire at once: a huge server
+  wait with `maxDelayMs: Infinity`, or a `timeoutMs` above the limit, is clamped to it.
+  `timeoutMs: Infinity` sets no limit.
+- An asctime `Retry-After` date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
+- A page without its list (`paginateCites`, `paginateCitedBy`, `paginateNationalDocuments`,
+  `webhooks.paginateDeliveries`) ends the walk, and a `citationCount` that is not a count counts the
+  group's edge list. Before, both threw a `TypeError`.
 - An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
   the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
+- `verifyWebhook` on a correctly signed body that is JSON `null` throws
+  `WebhookSignatureError("stale_timestamp")`. Before, it threw a `TypeError`.
 
 ### Security
 

@@ -1,12 +1,14 @@
 import type { CallOptions } from "./client.js";
 import { parseResponseHeaders } from "./headers.js";
 import type { HttpClient, RequestOptions } from "./http.js";
+import { REPEATS_BEFORE_THROW, count, stalled } from "./paging.js";
 import type {
   WebhookCreateRequest,
   WebhookCreateResponse,
   WebhookDeleteResponse,
   WebhookDeliveriesParams,
   WebhookDeliveriesResponse,
+  WebhookDelivery,
   WebhookListResponse,
   WebhookResponse,
   WebhookTestResponse,
@@ -157,9 +159,10 @@ export class WebhooksAPI {
    * Walk the whole delivery history page by page (`limit` per page, default
    * 50), starting at `offset`, newest first (SDK contract §1.4). Each
    * delivery is yielded at most once (deduplicated on `id`): a delivery
-   * created during the walk shifts later pages by one. Stops on an empty page,
-   * when the offset reaches `total`, or at a page whose deliveries were all
-   * yielded already (that page is not yielded). Pages are free (0 credits).
+   * created during the walk shifts later pages by one. Stops on an empty page
+   * or when the offset reaches `total`. Without a usable `total`, three pages
+   * in a row that bring no unseen `id` throw `InvalidResponseError`. Pages
+   * are free (0 credits).
    *
    * ```ts
    * for await (const page of client.webhooks.paginateDeliveries(id)) {
@@ -175,23 +178,31 @@ export class WebhooksAPI {
     const limit = params.limit ?? 50;
     let offset = params.offset ?? 0;
     const seen = new Set<string>();
+    let repeats = 0;
     for (;;) {
       const page = await this.deliveries(id, { limit, offset }, options);
-      const deliveries = page.deliveries ?? [];
-      const count = deliveries.length;
-      let newIds = 0;
+      const listed: unknown = page.deliveries;
+      const deliveries: WebhookDelivery[] = Array.isArray(listed) ? listed : [];
+      const rows = deliveries.length;
+      let readable = 0;
+      let unseen = 0;
       const fresh = deliveries.filter((d) => {
         if (typeof d.id !== "string") return true;
+        readable++;
         if (seen.has(d.id)) return false;
         seen.add(d.id);
-        newIds++;
+        unseen++;
         return true;
       });
-      // A page of deliveries already yielded: the server did not move on.
-      if (count > 0 && newIds === 0) return;
+      const total = count(page.total);
+      if (total === undefined) {
+        // No usable total: only pages of already-yielded ids, again and again, are a stall.
+        repeats = readable > 0 && unseen === 0 ? repeats + 1 : 0;
+        if (repeats >= REPEATS_BEFORE_THROW) throw stalled("the server repeated the same deliveries", page);
+      }
       yield { ...page, deliveries: fresh };
-      offset += count;
-      if (count === 0 || (typeof page.total === "number" && offset >= page.total)) return;
+      offset += rows;
+      if (rows === 0 || (total !== undefined && offset >= total)) return;
     }
   }
 }

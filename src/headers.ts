@@ -117,11 +117,20 @@ function str(headers: HeaderGetter, name: string): string | undefined {
   return value === null ? undefined : value;
 }
 
+/**
+ * An integer header: `1*DIGIT` after trimming spaces and tabs, at most
+ * 2^53 − 1; anything else (a sign, a fraction, an exponent, hex) is absent.
+ */
+export function parseHeaderInteger(value: string | null | undefined): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (!/^[0-9]+$/.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
 function int(headers: HeaderGetter, name: string): number | undefined {
-  const value = headers.get(name);
-  if (value === null) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return parseHeaderInteger(headers.get(name));
 }
 
 /** Drop `undefined` keys so the object only shows headers that were present. */

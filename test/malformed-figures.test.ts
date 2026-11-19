@@ -306,7 +306,7 @@ describe("export lines", () => {
   });
 });
 
-// ── 5. iterators against a server that ignores offset / cursor ──────────
+// ── 5. iterators: see pagination-stops.test.ts ─────────────────────────
 
 /** Collect at most `max` pages, so a looping iterator fails instead of hanging. */
 async function collect<T>(it: AsyncIterable<T>, max = 20): Promise<T[]> {
@@ -317,90 +317,6 @@ async function collect<T>(it: AsyncIterable<T>, max = 20): Promise<T[]> {
   }
   return out;
 }
-
-describe("iterators stop when a page brings nothing new", () => {
-  it("paginateDeliveries: the same page again and again, no total", async () => {
-    const page = JSON.stringify({ success: true, limit: 2, deliveries: [{ id: "a" }, { id: "b" }] });
-    const fetchFn = stub([{ status: 200, body: page }]);
-    const pages = await collect(client(fetchFn).webhooks.paginateDeliveries("w", { limit: 2 }));
-    expect(pages.map((p) => p.deliveries.map((d) => d.id))).toEqual([["a", "b"]]);
-    expect(fetchFn).toHaveBeenCalledTimes(2);
-  });
-
-  it("paginateDeliveries: a total that is never reached", async () => {
-    const page = JSON.stringify({ success: true, total: 1e9, limit: 2, deliveries: [{ id: "a" }, { id: "b" }] });
-    const fetchFn = stub([{ status: 200, body: page }]);
-    const pages = await collect(client(fetchFn).webhooks.paginateDeliveries("w", { limit: 2 }));
-    expect(pages).toHaveLength(1);
-  });
-
-  it("paginateDeliveries: a page without the deliveries list ends the walk", async () => {
-    const fetchFn = stub([{ status: 200, body: JSON.stringify({ success: true, total: 9 }) }]);
-    const pages = await collect(client(fetchFn).webhooks.paginateDeliveries("w"));
-    expect(pages).toHaveLength(1);
-    expect(pages[0]!.deliveries).toEqual([]);
-  });
-
-  it("paginateCites / paginateCitedBy: the same full page again and again", async () => {
-    const group = { celexNumber: "32016R0679", citationCount: 2, citations: [{ citationType: "reference", extractedAt: "t1" }, { citationType: "reference", extractedAt: "t2" }] };
-    const cites = stub([{ status: 200, body: JSON.stringify({ success: true, sourceDocument: "X", limit: 2, offset: 0, cites: [group] }) }]);
-    expect(await collect(client(cites).paginateCites("X", { limit: 2 }))).toHaveLength(1);
-    expect(cites).toHaveBeenCalledTimes(2);
-    const citedBy = stub([{ status: 200, body: JSON.stringify({ success: true, targetDocument: "X", limit: 2, offset: 0, citedBy: [group] }) }]);
-    expect(await collect(client(citedBy).paginateCitedBy("X", { limit: 2 }))).toHaveLength(1);
-    expect(citedBy).toHaveBeenCalledTimes(2);
-  });
-
-  it("paginateCitedBy: groups without edge details, the same page again and again", async () => {
-    const body = JSON.stringify({ success: true, targetDocument: "X", limit: 4, offset: 0, citedBy: [{ celexNumber: "A", citationCount: 4 }] });
-    const fetchFn = stub([{ status: 200, body }]);
-    expect(await collect(client(fetchFn).paginateCitedBy("X", { limit: 4 }))).toHaveLength(1);
-  });
-
-  it("paginateCitedBy: one source spanning several full pages is walked to the end", async () => {
-    const page = (offset: number, count: number) =>
-      JSON.stringify({ success: true, targetDocument: "X", limit: 4, offset, citedBy: [{ celexNumber: "A", citationCount: count }] });
-    const fetchFn = stub([
-      { status: 200, body: page(0, 4) },
-      { status: 200, body: page(4, 4) },
-      { status: 200, body: page(8, 1) },
-    ]);
-    expect(await collect(client(fetchFn).paginateCitedBy("X", { limit: 4 }))).toHaveLength(3);
-  });
-
-  it("paginateCites / paginateCitedBy: a page without its list ends the walk", async () => {
-    const cites = stub([{ status: 200, body: JSON.stringify({ success: true, sourceDocument: "X" }) }]);
-    expect(await collect(client(cites).paginateCites("X"))).toHaveLength(1);
-    const citedBy = stub([{ status: 200, body: JSON.stringify({ success: true, targetDocument: "X" }) }]);
-    expect(await collect(client(citedBy).paginateCitedBy("X"))).toHaveLength(1);
-  });
-
-  it("paginateCitedBy: citation counts that are not counts fall back to the edge list", async () => {
-    for (const count of ['"2"', "1e999", "-4", "2.5", "null"]) {
-      const body = `{"success":true,"targetDocument":"X","limit":2,"offset":0,"citedBy":[{"celexNumber":"A","citationCount":${count},"citations":[{"extractedAt":"t1"}]}]}`;
-      const fetchFn = stub([{ status: 200, body }]);
-      expect(await collect(client(fetchFn).paginateCitedBy("X", { limit: 2 })), count).toHaveLength(1);
-      expect(fetchFn).toHaveBeenCalledTimes(1); // 1 edge < limit 2: a short page
-    }
-  });
-
-  it("paginateNationalDocuments: the same cursor and page again and again", async () => {
-    const body = JSON.stringify({
-      jurisdiction: "AT", total: 3, totalExact: true, limit: 1, includeRepealed: false,
-      hasMore: true, nextCursor: "c1", results: [{ id: "AT-NOR-1" }],
-    });
-    const fetchFn = stub([{ status: 200, body }]);
-    expect(await collect(client(fetchFn).paginateNationalDocuments("AT", { limit: 1 }))).toHaveLength(1);
-    expect(fetchFn).toHaveBeenCalledTimes(2);
-  });
-
-  it("paginateNationalDocuments: a page without results ends the walk", async () => {
-    const body = JSON.stringify({ jurisdiction: "AT", hasMore: true, nextCursor: "c1" });
-    const fetchFn = stub([{ status: 200, body }]);
-    const pages = await collect(client(fetchFn).paginateNationalDocuments("AT"));
-    expect(pages).toHaveLength(1);
-  });
-});
 
 describe("deeply nested values the SDK turns into text", () => {
   const deep = "[".repeat(100_000) + "1" + "]".repeat(100_000);
@@ -422,5 +338,197 @@ describe("deeply nested values the SDK turns into text", () => {
     const body = `{"success":true,"targetDocument":"X","limit":2,"offset":0,"citedBy":[{"celexNumber":"A","citations":[${deep}]}]}`;
     const fetchFn = stub([{ status: 200, body }]);
     expect(await collect(client(fetchFn).paginateCitedBy("X", { limit: 2 }))).toHaveLength(1);
+  });
+});
+
+// ── the hint grammar, piece by piece ────────────────────────────────────
+
+describe("the retry-hint grammar", () => {
+  const NOW = Date.UTC(2026, 10, 19, 12, 0, 0);
+  const at = (y: number, mo: number, d: number, h = 8, mi = 49, s = 37) => Date.UTC(y, mo, d, h, mi, s);
+
+  it.each([
+    ["Sun, 06 Nov 1994 08:49:37 GMT", at(1994, 10, 6)],
+    ["sun, 06 nov 1994 08:49:37 gmt", at(1994, 10, 6)],
+    ["Sun, 06 Nov 1994 08:49:37 UTC", at(1994, 10, 6)],
+    ["Sun, 06 Nov 1994 08:49:37 +0000", at(1994, 10, 6)],
+    ["Sun Nov  6 08:49:37 1994", at(1994, 10, 6)],
+    ["Sun Nov 06 08:49:37 1994", at(1994, 10, 6)],
+    ["Wed Feb  1 00:00:00 2028", at(2028, 1, 1, 0, 0, 0)],
+    ["Tue, 29 Feb 2028 23:59:59 GMT", at(2028, 1, 29, 23, 59, 59)],
+    ...["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(
+      (day) => [`${day}, 06-Nov-94 08:49:37 GMT`, at(1994, 10, 6)] as [string, number],
+    ),
+    // RFC 9110 §5.6.7: a two-digit year more than 50 years ahead is in the past century.
+    ["Sunday, 06-Nov-76 08:49:37 GMT", at(2076, 10, 6)],
+    ["Sunday, 06-Nov-77 08:49:37 GMT", at(1977, 10, 6)],
+    ["Sunday, 06-Nov-26 08:49:37 GMT", at(2026, 10, 6)],
+  ])("%j is an HTTP-date", async (text, ms) => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs(text, NOW)).toBe(ms);
+  });
+
+  it.each([
+    "Sun, 06 Nov 1994 08:49:37 GMT x",
+    "x Sun, 06 Nov 1994 08:49:37 GMT",
+    "Sun, 06 Nov 1994 08:49:37",
+    "Sun, 06 Nov 1994 08:49:37 EST",
+    "Sun, 06 Nov 1994 08:49:37 CET",
+    "Sun, 06 Nov 1994 08:49:37 +0100",
+    "Sun, 6 Nov 1994 08:49:37 GMT",
+    "Sun, 30 Feb 1994 08:49:37 GMT",
+    "Sun, 29 Feb 2027 08:49:37 GMT",
+    "Sun, 06 Nov 1994 24:00:00 GMT",
+    "Sun, 06 Nov 1994 08:60:00 GMT",
+    "Sun, 06 Nov 1994 08:49:60 GMT",
+    "Sun, 00 Nov 1994 08:49:37 GMT",
+    "Sun, 06-Nov-94 08:49:37 GMT",
+    "Sunday, 06 Nov 1994 08:49:37 GMT",
+    "Sun Nov 6 08:49:37 1994",
+    "Sun Nov  6 08:49:37 1994 GMT",
+    "Sun Nov  6 08:49:37 94",
+    "Funday, 06-Nov-94 08:49:37 GMT",
+  ])("%j is not", async (text) => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs(text, NOW)).toBeUndefined();
+  });
+
+  it.each(["+5", "-5", ".5", "5.", "1_000", "1e3", "0x10", "5 5", "５"])("RateLimit-Reset %j is absent", async (v) => {
+    const e = (await caught(
+      client(stub([limited('{"error":"x"}', { "ratelimit-reset": v })]), { maxRetries: 0 }).getInfo(),
+    )) as RateLimitedError;
+    expect(e.retryAfter).toBeUndefined();
+  });
+
+  it("numeric hints are trimmed of spaces and tabs", async () => {
+    for (const [name, v] of [["retry-after", "\t7 "], ["ratelimit-reset", " \t7\t"]] as const) {
+      const e = (await caught(client(stub([limited('{"error":"x"}', { [name]: v })]), { maxRetries: 0 }).getInfo())) as RateLimitedError;
+      expect(e.retryAfter, name).toBe(7);
+    }
+  });
+
+  it("-0 in the body is a wait of 0; an unusable top-level value falls back to error.details", async () => {
+    const zero = (await caught(client(stub([limited(top("-0"))]), { maxRetries: 0 }).getInfo())) as RateLimitedError;
+    expect(Object.is(zero.retryAfter, 0)).toBe(true);
+    const body = '{"success":false,"retryAfter":-5,"error":{"code":"RATE_LIMITED","message":"x","details":{"retryAfter":4}}}';
+    const e = (await caught(client(stub([limited(body)]), { maxRetries: 0 }).getInfo())) as RateLimitedError;
+    expect(e.retryAfter).toBe(4);
+  });
+
+  it("a legacy 429 with usage.resetsAt and only unusable hints is a quota 429 and is not retried", async () => {
+    const body = '{"error":"Daily quota exceeded","retryAfter":"soon","usage":{"resetsAt":"2026-12-01T00:00:00Z"}}';
+    const fetchFn = stub([limited(body, { "retry-after": "junk 1" })]);
+    const e = (await caught(client(fetchFn, { maxRetries: 2 }).getInfo())) as RateLimitedError;
+    expect(e.quotaExhausted).toBe(true);
+    expect(e.retryAfter).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a usable hint keeps a legacy 429 a rate limit", async () => {
+    const body = '{"error":"Too many requests","usage":{"resetsAt":"2026-12-01T00:00:00Z"}}';
+    const e = (await caught(client(stub([limited(body, { "retry-after": "3" })]), { maxRetries: 0 }).getInfo())) as RateLimitedError;
+    expect(e.quotaExhausted).toBe(false);
+    expect(e.retryAfter).toBe(3);
+  });
+
+  it("a national 503 whose only hint is unusable is not retried", async () => {
+    const fetchFn = stub([{ status: 503, body: NATIONAL_503('"later"'), headers: { ...APP, "retry-after": "junk 1" } }]);
+    const e = (await caught(client(fetchFn, { maxRetries: 2 }).nationalSemanticSearch("AT", { query: "x" }))) as LexAPIError;
+    expect(e.retryAfter).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("integer headers", () => {
+  it.each(["1e3", "12.5", "0x10", "1_000", "+5", "-5", "", " ", "9007199254740992", "12abc"])("%j reads as absent", async (v) => {
+    const res = await client(stub([{ ...OK, headers: { "ratelimit-remaining": v, "x-corpus-version": v } }])).getInfo();
+    expect(res.headers?.rateLimit?.remaining).toBeUndefined();
+    expect(res.headers?.corpusVersion).toBeUndefined();
+  });
+
+  it("digits, trimmed of spaces and tabs, up to 2^53 - 1 read as before", async () => {
+    const res = await client(stub([{ ...OK, headers: { "ratelimit-remaining": " 59\t", "x-cache-age": "9007199254740991" } }])).getInfo();
+    expect(res.headers?.rateLimit?.remaining).toBe(59);
+    expect(res.headers?.cacheAge).toBe(9007199254740991);
+  });
+
+  it("an export count header is trimmed", async () => {
+    const ndjson = '{"_meta":{"total":1}}\n{"_done":{"complete":true}}\n';
+    const fetchFn = vi.fn(async () => new Response(ndjson, { status: 200, headers: { "x-export-total": " 12\t", "x-export-streaming": "\t3" } }));
+    const stream = await client(fetchFn).export();
+    expect(stream.headers.total).toBe(12);
+    expect(stream.headers.streaming).toBe(3);
+    await stream.cancel();
+  });
+
+  it("getCreditUsage reads a resetsAt that is not a string as absent", () => {
+    expect(getCreditUsage({ credits: { resetsAt: 5 }, usage: { resetsAt: "2026-12-01" } } as never).resetsAt).toBe("2026-12-01");
+    expect(getCreditUsage({ credits: { resetsAt: {} } } as never).resetsAt).toBeUndefined();
+    expect(getCreditUsage({ usage: { resetsAt: null } } as never).resetsAt).toBeNull();
+  });
+});
+
+describe("timers", () => {
+  it("timeoutMs: Infinity sets no attempt timer; a finite value above the timer limit is clamped, not shortened", async () => {
+    const real = globalThis.setTimeout;
+    const delays: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms as number);
+      return real(fn, 50);
+    }) as typeof setTimeout);
+    const fetchFn = stub([OK]);
+    await new LexAPI({ apiKey: "k", baseUrl: BASE, fetch: fetchFn, timeoutMs: Infinity }).getInfo();
+    expect(delays).toEqual([]);
+    await new LexAPI({ apiKey: "k", baseUrl: BASE, fetch: stub([OK]), timeoutMs: 3e9 }).getInfo();
+    expect(delays.every((d) => d === MAX_TIMER_MS)).toBe(true);
+    expect(delays.length).toBeGreaterThan(0);
+  });
+
+  it("timeoutMs: 0 times out at once", async () => {
+    const fetchFn = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+    );
+    const e = await caught(new LexAPI({ apiKey: "k", baseUrl: BASE, fetch: fetchFn, timeoutMs: 0, retry: { maxRetries: 0 } }).getInfo());
+    expect((e as LexAPIError).code).toBe("REQUEST_TIMEOUT");
+  });
+});
+
+describe("export _error text", () => {
+  it("keeps the value as text, or its kind when it cannot be turned into text", async () => {
+    const deep = "[".repeat(100_000) + "1" + "]".repeat(100_000);
+    for (const [value, message] of [['"boom"', "boom"], ["[1,2]", "1,2"], [deep, "array"]] as const) {
+      const ndjson = ['{"_meta":{"total":1}}', `{"_error":${value}}`, '{"_done":{"complete":true}}'].join("\n") + "\n";
+      const stream = await client(vi.fn(async () => new Response(ndjson, { status: 200 }))).export();
+      const e = (await caught((async () => {
+        for await (const _ of stream) void _;
+      })())) as IncompleteExportError;
+      expect(e).toBeInstanceOf(IncompleteExportError);
+      expect(stream.error).toEqual({ message });
+    }
+  });
+});
+
+describe("verifyWebhook", () => {
+  it("a signed body that is JSON null is a stale_timestamp WebhookSignatureError, not a TypeError", async () => {
+    const { computeSignature, verifyWebhook, WebhookSignatureError } = await import("../src/index.js");
+    const sig = await computeSignature("null", "whsec");
+    const e = await caught(verifyWebhook("null", sig, "whsec"));
+    expect(e).toBeInstanceOf(WebhookSignatureError);
+    expect((e as { reason: string }).reason).toBe("stale_timestamp");
+  });
+});
+
+describe("trimming (a fetch Headers object trims on its own; a custom one may not)", () => {
+  it("numeric hints and integer headers drop leading and trailing spaces and tabs only", async () => {
+    const { decimalSeconds, retryAfterHeaderSeconds } = await import("../src/retryHints.js");
+    const { parseResponseHeaders } = await import("../src/index.js");
+    expect(decimalSeconds(" \t7\t ")).toBe(7);
+    expect(retryAfterHeaderSeconds("\t7 ")).toBe(7);
+    expect(decimalSeconds("\n7")).toBeUndefined();
+    const raw: Record<string, string> = { "ratelimit-remaining": " 59\t", "x-cache-age": "\n5" };
+    const headers = parseResponseHeaders({ get: (name: string) => raw[name] ?? null });
+    expect(headers.rateLimit?.remaining).toBe(59);
+    expect(headers.cacheAge).toBeUndefined();
   });
 });

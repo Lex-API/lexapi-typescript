@@ -5,7 +5,8 @@ import {
   IncompleteExportError,
   TimeoutError,
 } from "./errors.js";
-import { timerDelay } from "./http.js";
+import { parseHeaderInteger } from "./headers.js";
+import { timerDelay } from "./retryHints.js";
 import type { Language } from "./types.js";
 
 // ── GET /export (NDJSON stream, BUSINESS / SCALE / ENTERPRISE) ───────
@@ -346,7 +347,7 @@ class NdjsonReader {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const interruptions = new Promise<never>((_, reject) => {
-      if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
+      if (idleTimeoutMs !== undefined && idleTimeoutMs > 0 && idleTimeoutMs !== Infinity) {
         timer = setTimeout(() => {
           reject(
             new TimeoutError(`Export stream received no data for ${idleTimeoutMs}ms (after ${this.rows} rows)`, 0),
@@ -578,14 +579,6 @@ class ExportStreamImpl implements ExportStream {
   }
 }
 
-/** A row-count header: a non-negative integer, else absent. */
-function countHeader(value: string | null): number | undefined {
-  const text = value?.trim() ?? "";
-  if (!/^\d+$/.test(text)) return undefined;
-  const count = Number(text);
-  return Number.isFinite(count) ? count : undefined;
-}
-
 /** Build an `ExportStream` from a raw `/export` fetch response. */
 export async function createExportStream(
   response: Response,
@@ -598,8 +591,8 @@ export async function createExportStream(
   const streamingHeader = response.headers.get("x-export-streaming");
   const truncatedHeader = response.headers.get("x-export-truncated");
   const stream = new ExportStreamImpl(new NdjsonReader(response.body, options), {
-    total: countHeader(totalHeader),
-    streaming: countHeader(streamingHeader),
+    total: parseHeaderInteger(totalHeader),
+    streaming: parseHeaderInteger(streamingHeader),
     truncated: truncatedHeader !== null ? truncatedHeader === "1" : undefined,
   });
   await stream.init();

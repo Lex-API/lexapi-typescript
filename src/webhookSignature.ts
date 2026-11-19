@@ -187,7 +187,9 @@ export async function verifyWebhook(
   }
   const toleranceMs = options.toleranceMs ?? 300_000;
   if (toleranceMs > 0) {
-    const sentAt = Date.parse(String((payload as { timestamp?: unknown }).timestamp));
+    // A signed body that is JSON `null` has no timestamp either (and is stale).
+    const timestamp: unknown = typeof payload === "object" && payload !== null ? (payload as { timestamp?: unknown }).timestamp : undefined;
+    const sentAt = Date.parse(String(timestamp));
     const now = options.now ?? Date.now();
     if (Number.isNaN(sentAt) || Math.abs(now - sentAt) > toleranceMs) {
       throw new WebhookSignatureError(
