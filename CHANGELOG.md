@@ -10,8 +10,10 @@ picks up `0.2.0` on its own.
 Type-level changes to check when upgrading:
 
 - `NationalSemanticLegislationResult` fields it shares with the EU hit, previously typed `unknown`,
-  now have their types (`score: number`, `asOfVersion: NationalAsOfVersion`, …). Code that
+  now have their types (`score?: number`, `asOfVersion?: NationalAsOfVersion`, …). Code that
   redeclares them in an `interface … extends`, or assigns a fixture of another shape, must follow.
+- An `interface … extends` or subclass that redeclares a newly added optional member (for example
+  `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
 - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
   `DocumentVersionResponse` it returned before.
 - `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,

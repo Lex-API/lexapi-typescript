@@ -382,7 +382,7 @@ export class NotFoundError extends LexAPIError {
    * the message.
    */
   get unknownEndpoint(): boolean {
-    return detailsField(this.details, "reason") === "unknown_endpoint";
+    return ownField(this.details, "reason") === "unknown_endpoint";
   }
 
   // The accessors below read `details` only when it is a plain JSON object,
@@ -472,7 +472,7 @@ function readCandidates(details: unknown): { kept: SnapshotCandidate[]; more: bo
     const fetchedAt = ownField(item, "fetchedAt");
     const observedFrom = ownField(item, "observedFrom");
     kept.push({
-      version,
+      version: version + 0, // -0 → 0
       fetchedAt: typeof fetchedAt === "string" ? fetchedAt : null,
       observedFrom: typeof observedFrom === "string" ? observedFrom : null,
     });
@@ -480,11 +480,17 @@ function readCandidates(details: unknown): { kept: SnapshotCandidate[]; more: bo
   return { kept, more: false };
 }
 
-/** A plain object (as `JSON.parse` makes them): not `null`, not an array, no other prototype. */
+/**
+ * An object as `JSON.parse` makes them — also one from another realm (a VM
+ * context): not `null`, not an array, tagged `[object Object]`.
+ */
 function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const proto: unknown = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
 }
 
 /** `value[key]` when `value` is a plain object that has `key` as its own property. */

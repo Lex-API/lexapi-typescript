@@ -2,7 +2,9 @@
 // (API 2.28.0), and the in-force / provenance fields (API 2.19.0–2.24.0).
 import { describe, expect, it, vi } from "vitest";
 
-import { LexAPI, NATIONAL_AS_OF_REASONS, NotFoundError, isNationalAsOfVersion } from "../src/index.js";
+import { runInNewContext } from "node:vm";
+
+import { LexAPI, LexAPIError, NATIONAL_AS_OF_REASONS, NotFoundError, isNationalAsOfVersion } from "../src/index.js";
 import { FAST_RETRY, jsonResponse } from "./helpers.js";
 import { DE_LEGISLATION_HIT } from "./fixtures/national.js";
 
@@ -475,14 +477,37 @@ describe("NotFoundError details: hostile input", () => {
 
   it("details that are not a plain object give every default", () => {
     const shaped = { reason: "boundary_unknown", trackedSince: "t", candidates: [{ version: 1 }], candidatesTruncated: true };
-    class Details {
-      reason = "boundary_unknown";
-      candidates = [{ version: 1 }];
-      candidatesTruncated = true;
-    }
-    for (const details of [null, "boundary_unknown", 42, true, [shaped], new Details(), Object.create(shaped)]) {
+    const tagged = { ...shaped, [Symbol.toStringTag]: "Details" };
+    for (const details of [null, "boundary_unknown", 42, true, [shaped], tagged, new Map(Object.entries(shaped)), Object.create(shaped)]) {
       defaults(new NotFoundError("x", 404, details));
+      expect(new NotFoundError("x", 404, details).unknownEndpoint).toBe(false);
     }
+    // Own keys of an object tagged [object Object] are read (inherited ones never are).
+    expect(new NotFoundError("x", 404, Object.create({ reason: "unknown_endpoint" })).unknownEndpoint).toBe(false);
+  });
+
+  it("reads details from another realm", () => {
+    const details: unknown = runInNewContext(
+      '({reason:"boundary_unknown",candidates:[{version:1,fetchedAt:"x",observedFrom:null}],inForceLookup:{method:"POST"}})',
+    );
+    const err = LexAPIError.fromResponse(404, { success: false, error: { code: "NOT_FOUND", message: "x", details } });
+    expect(err).toBeInstanceOf(NotFoundError);
+    const nf = err as NotFoundError;
+    expect(nf.reason).toBe("boundary_unknown");
+    expect(nf.boundaryUnknown).toBe(true);
+    expect(nf.candidates).toEqual([{ version: 1, fetchedAt: "x", observedFrom: null }]);
+    expect(nf.inForceLookup).toEqual({ method: "POST" });
+    const endpoint = LexAPIError.fromResponse(404, {
+      success: false,
+      error: { code: "NOT_FOUND", message: "x", details: runInNewContext('({reason:"unknown_endpoint"})') as unknown },
+    }) as NotFoundError;
+    expect(endpoint.unknownEndpoint).toBe(true);
+    expect(endpoint.reason).toBe("unknown_endpoint");
+  });
+
+  it("a version of -0 is returned as 0", () => {
+    const [candidate] = new NotFoundError("x", 404, { candidates: [{ version: -0 }] }).candidates;
+    expect(Object.is(candidate?.version, 0)).toBe(true);
   });
 
   it("reads own keys only: a __proto__ key never supplies a field", () => {
