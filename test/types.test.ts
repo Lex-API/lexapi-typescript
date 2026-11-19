@@ -127,7 +127,8 @@ describe("API 2.19.0–2.29.0 additions", () => {
     expectTypeOf<NationalSemanticLegislationResult["asOfVersion"]>().toEqualTypeOf<NationalAsOfVersion | undefined>();
     expectTypeOf<import("../src/index.js").SemanticLegislationResult["asOfVersion"]>().toEqualTypeOf<AsOfVersion | undefined>();
     expectTypeOf<NationalAsOfVersion["kind"]>().toEqualTypeOf<"current_unit">();
-    expectTypeOf<NationalAsOfVersion["validFrom"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<NationalAsOfVersion["validFrom"]>().toEqualTypeOf<string>();
+    expectTypeOf<NationalAsOfVersion["validTo"]>().toEqualTypeOf<string | null>();
     expectTypeOf<NationalAsOfVersion["checkedAt"]>().toEqualTypeOf<string | null>();
     // `kind` tells them apart (isNationalAsOfVersion checks `kind === "current_unit"`).
     const describeVersion = (v: AsOfVersion | NationalAsOfVersion): string => {
@@ -153,12 +154,12 @@ describe("API 2.19.0–2.29.0 additions", () => {
     expectTypeOf<"a_future_reason">().toMatchTypeOf<AsOfReason>();
   });
 
-  it("national asOf takes a string or a Date; EU legislation search takes inForce", () => {
-    expectTypeOf<import("../src/index.js").NationalSemanticLegislationOptions["asOf"]>().toEqualTypeOf<string | Date | undefined>();
+  it("national asOf takes a YYYY-MM-DD string; EU legislation search takes inForce", () => {
+    expectTypeOf<import("../src/index.js").NationalSemanticLegislationOptions["asOf"]>().toEqualTypeOf<string | undefined>();
     expectTypeOf<import("../src/index.js").NationalSemanticCaseLawOptions>().not.toHaveProperty("asOf");
     expectTypeOf<SemanticLegislationSearchOptions["inForce"]>().toEqualTypeOf<boolean | undefined>();
     expectTypeOf<import("../src/index.js").NationalSemanticLegislationResponse["asOfSummary"]>().toEqualTypeOf<
-      { liveFetches?: number; unresolved?: number } | undefined
+      { liveFetches: number; unresolved: number } | undefined
     >();
   });
 
@@ -180,7 +181,9 @@ describe("API 2.19.0–2.29.0 additions", () => {
     expectTypeOf<E["beforeTracking"]>().toEqualTypeOf<boolean>();
     expectTypeOf<E["boundaryUnknown"]>().toEqualTypeOf<boolean>();
     expectTypeOf<E["trackedSince"]>().toEqualTypeOf<string | undefined>();
-    expectTypeOf<E["candidates"]>().toEqualTypeOf<import("../src/index.js").SnapshotCandidate[] | undefined>();
+    expectTypeOf<E["candidates"]>().toEqualTypeOf<import("../src/index.js").SnapshotCandidate[]>();
+    expectTypeOf<import("../src/index.js").SnapshotCandidate["fetchedAt"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<E["inForceLookup"]>().toEqualTypeOf<import("../src/index.js").InForceLookup | undefined>();
     expectTypeOf<E["candidatesTruncated"]>().toEqualTypeOf<boolean>();
     expectTypeOf<import("../src/index.js").SnapshotCandidate["observedFrom"]>().toEqualTypeOf<string | null>();
   });

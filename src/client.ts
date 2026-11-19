@@ -365,7 +365,9 @@ export class LexAPI {
 
   /**
    * `GET /documents/{celex}/versions` — version history, newest first,
-   * current version included and flagged. 1 credit.
+   * current version included and flagged. These are LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async listDocumentVersions(
     celex: string,
@@ -385,7 +387,9 @@ export class LexAPI {
   /**
    * `GET /documents/{celex}/versions/{version}` — one immutable snapshot
    * including `parsedContent`. `corpusVersion` mirrors the
-   * `X-Corpus-Version` response header. 1 credit.
+   * `X-Corpus-Version` response header. This is one of LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async getDocumentVersion(
     celex: string,
@@ -989,7 +993,7 @@ export class LexAPI {
       method: "POST",
       path: "/search/semantic",
       shape: { lists: ["results"], required: ["results"] },
-      body: semanticWireBody(request),
+      body: semanticWireBody(request, { legislation: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -1031,7 +1035,7 @@ export class LexAPI {
       method: "POST",
       path: "/legislation/semantic",
       shape: { lists: ["results"], required: ["results"] },
-      body: semanticWireBody(request),
+      body: semanticWireBody(request, { legislation: true }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -1155,9 +1159,14 @@ export class LexAPI {
   }
 }
 
-/** Map camel-cased SDK semantic options to the wire shape (`min_score`, `include: ["text"]`). */
+/**
+ * Map camel-cased SDK semantic options to the wire shape (`min_score`,
+ * `include: ["text"]`). `asOf` and `inForce` are legislation options: never
+ * sent on case-law search, even when set on the request object.
+ */
 function semanticWireBody(
   request: SemanticCaseLawSearchOptions & SemanticLegislationSearchOptions,
+  { legislation }: { legislation: boolean },
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -1166,8 +1175,8 @@ function semanticWireBody(
   if (request.includeText) body["include"] = ["text"];
   if (request.filters !== undefined) body["filters"] = request.filters;
   if (request.hyde !== undefined) body["hyde"] = request.hyde;
-  if (request.asOf !== undefined) body["asOf"] = request.asOf;
-  if (request.inForce !== undefined) body["inForce"] = request.inForce;
+  if (legislation && request.asOf !== undefined) body["asOf"] = request.asOf;
+  if (legislation && request.inForce !== undefined) body["inForce"] = request.inForce;
   return body;
 }
 
@@ -1177,7 +1186,7 @@ function semanticWireBody(
  * exact `filters` interfaces — see `NationalSemanticCaseLawOptions`), so
  * `filters` is read as `unknown` here rather than `Record<string, unknown>`
  * to avoid the missing-index-signature assignability error. `asOf` is sent
- * only for legislation (`allowAsOf`), as `YYYY-MM-DD`.
+ * only for legislation (`allowAsOf`).
  */
 function nationalSemanticWireBody(
   request: {
@@ -1188,7 +1197,7 @@ function nationalSemanticWireBody(
     includeText?: boolean;
     filters?: unknown;
     hyde?: boolean;
-    asOf?: string | Date;
+    asOf?: string;
   },
   { allowHyde = true, allowAsOf = false }: { allowHyde?: boolean; allowAsOf?: boolean } = {},
 ): Record<string, unknown> {
@@ -1202,18 +1211,8 @@ function nationalSemanticWireBody(
   // system set one on the (typed hyde-less) request object — the server
   // validates it strictly as a boolean on this route too (400 otherwise).
   if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
-  if (allowAsOf && request.asOf !== undefined) body["asOf"] = dateParam(request.asOf);
+  if (allowAsOf && request.asOf !== undefined) body["asOf"] = request.asOf;
   return body;
-}
-
-/**
- * A `Date` is sent as its UTC calendar day (`YYYY-MM-DD`); strings pass
- * through for the server to validate. An invalid `Date` throws `RangeError`.
- */
-function dateParam(value: string | Date): string {
-  if (!(value instanceof Date)) return value;
-  if (Number.isNaN(value.getTime())) throw new RangeError("asOf is an invalid Date");
-  return value.toISOString().slice(0, 10);
 }
 
 /**

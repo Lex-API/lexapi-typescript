@@ -98,15 +98,6 @@ describe("nationalLegislationSemanticSearch asOf (API 2.29.0)", () => {
     expect(sentBody(fetchMock)).toEqual({ query: "Recht auf Auskunft über eigene Daten", limit: 2, asOf: "2020-06-01" });
   });
 
-  it("sends a Date as its UTC calendar day", async () => {
-    const fetchMock = stub(jsonResponse(200, AT_ASOF_BODY));
-    const api = client(fetchMock);
-    await api.nationalLegislationSemanticSearch("AT", { query: "Auskunft", asOf: new Date("2020-06-01T23:30:00Z") });
-    expect(sentBody(fetchMock)["asOf"]).toBe("2020-06-01");
-    await api.nationalLegislationSemanticSearch("AT", { query: "Auskunft", asOf: new Date("2020-06-01T00:30:00+02:00") });
-    expect(sentBody(fetchMock)["asOf"]).toBe("2020-05-31");
-  });
-
   it("sends no asOf when none is given", async () => {
     const fetchMock = stub(jsonResponse(200, AT_ASOF_BODY));
     await client(fetchMock).nationalLegislationSemanticSearch("AT", { query: "Auskunft", filters: { inForce: true } });
@@ -115,12 +106,10 @@ describe("nationalLegislationSemanticSearch asOf (API 2.29.0)", () => {
     expect("asOf" in body).toBe(false);
   });
 
-  it("refuses an invalid Date before any request", async () => {
+  it("passes an asOf string through unchanged, for the server to validate", async () => {
     const fetchMock = stub(jsonResponse(200, AT_ASOF_BODY));
-    await expect(
-      client(fetchMock).nationalLegislationSemanticSearch("AT", { query: "Auskunft", asOf: new Date("not a date") }),
-    ).rejects.toThrow(/asOf is an invalid Date/);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await client(fetchMock).nationalLegislationSemanticSearch("AT", { query: "Auskunft", asOf: "2020-06-01T12:00:00Z" });
+    expect(sentBody(fetchMock)["asOf"]).toBe("2020-06-01T12:00:00Z");
   });
 
   it("never sends asOf on national case-law search, even when set on the request object", async () => {
@@ -155,6 +144,9 @@ describe("nationalLegislationSemanticSearch asOf (API 2.29.0)", () => {
     expect(isNationalAsOfVersion({ kind: "consolidated", celex: "02016R0679-20160504", date: "2016-05-04" })).toBe(false);
     expect(isNationalAsOfVersion({ kind: "as_published", celex: "32016R0679", date: null })).toBe(false);
     expect(isNationalAsOfVersion({})).toBe(false);
+    for (const value of [null, undefined, "current_unit", 1, true, ["current_unit"]]) {
+      expect(isNationalAsOfVersion(value)).toBe(false);
+    }
   });
 
   it("NATIONAL_AS_OF_REASONS lists the documented reasons in spec order", () => {
@@ -398,7 +390,7 @@ describe("NotFoundError on getDocumentAtDate (API 2.28.0)", () => {
     expect(err.unknownEndpoint).toBe(false);
     expect(err.trackedSince).toBe("2026-01-10T08:00:00.000Z");
     expect(err.inForceLookup).toEqual({ method: "POST", path: "/api/v1/legislation/as-of" });
-    expect(err.candidates).toBeUndefined();
+    expect(err.candidates).toEqual([]);
     expect(err.candidatesTruncated).toBe(false);
   });
 
@@ -430,7 +422,7 @@ describe("NotFoundError on getDocumentAtDate (API 2.28.0)", () => {
     expect(err.boundaryUnknown).toBe(false);
     expect(err.trackedSince).toBeUndefined();
     expect(err.inForceLookup).toBeUndefined();
-    expect(err.candidates).toBeUndefined();
+    expect(err.candidates).toEqual([]);
     expect(err.candidatesTruncated).toBe(false);
   });
 
@@ -449,6 +441,7 @@ describe("NotFoundError on getDocumentAtDate (API 2.28.0)", () => {
     expect(err.candidatesTruncated).toBe(false);
   });
 
+
   it("unknown_endpoint keeps its flag and is the reason", async () => {
     const err = await notFound({ reason: "unknown_endpoint" });
     expect(err.unknownEndpoint).toBe(true);
@@ -466,5 +459,163 @@ describe("NotFoundError on getDocumentAtDate (API 2.28.0)", () => {
       .catch((e: unknown) => e)) as NotFoundError;
     expect(err.beforeTracking).toBe(false);
     expect(err.boundaryUnknown).toBe(false);
+  });
+});
+
+describe("NotFoundError details: hostile input", () => {
+  const defaults = (err: NotFoundError) => {
+    expect(err.reason).toBeUndefined();
+    expect(err.beforeTracking).toBe(false);
+    expect(err.boundaryUnknown).toBe(false);
+    expect(err.trackedSince).toBeUndefined();
+    expect(err.inForceLookup).toBeUndefined();
+    expect(err.candidates).toEqual([]);
+    expect(err.candidatesTruncated).toBe(false);
+  };
+
+  it("details that are not a plain object give every default", () => {
+    const shaped = { reason: "boundary_unknown", trackedSince: "t", candidates: [{ version: 1 }], candidatesTruncated: true };
+    class Details {
+      reason = "boundary_unknown";
+      candidates = [{ version: 1 }];
+      candidatesTruncated = true;
+    }
+    for (const details of [null, "boundary_unknown", 42, true, [shaped], new Details(), Object.create(shaped)]) {
+      defaults(new NotFoundError("x", 404, details));
+    }
+  });
+
+  it("reads own keys only: a __proto__ key never supplies a field", () => {
+    const details = JSON.parse(
+      '{"__proto__": {"reason": "before_tracking", "trackedSince": "t", "candidatesTruncated": true, "candidates": [{"version": 1}]}}',
+    ) as unknown;
+    defaults(new NotFoundError("x", 404, details));
+    const item = JSON.parse('{"__proto__": {"version": 1}, "fetchedAt": "t"}') as unknown;
+    expect(new NotFoundError("x", 404, { candidates: [item] }).candidates).toEqual([]);
+    const lookup = JSON.parse('{"inForceLookup": {"__proto__": {"method": "POST"}}}') as unknown;
+    expect(new NotFoundError("x", 404, lookup).inForceLookup).toEqual({});
+  });
+
+  it("ignores inherited keys, also ones added to Object.prototype", () => {
+    const keys = ["reason", "trackedSince", "candidates", "candidatesTruncated", "version"];
+    const values: Record<string, unknown> = {
+      reason: "before_tracking",
+      trackedSince: "t",
+      candidates: [{ version: 1 }],
+      candidatesTruncated: true,
+      version: 1,
+    };
+    try {
+      for (const key of keys) Object.defineProperty(Object.prototype, key, { value: values[key], configurable: true });
+      defaults(new NotFoundError("x", 404, {}));
+      expect(new NotFoundError("x", 404, { candidates: [{ fetchedAt: "t" }] }).candidates).toEqual([]);
+    } finally {
+      for (const key of keys) delete (Object.prototype as Record<string, unknown>)[key];
+    }
+  });
+
+  it("candidates that are not an array give []", () => {
+    for (const candidates of [null, "x", 1, { version: 1 }, true]) {
+      expect(new NotFoundError("x", 404, { reason: "boundary_unknown", candidates }).candidates).toEqual([]);
+    }
+  });
+
+  it("keeps only objects with an integer version; fetchedAt / observedFrom are strings or null", () => {
+    const err = new NotFoundError("x", 404, {
+      candidates: [
+        { version: "x", fetchedAt: 7 },
+        { version: 1 },
+        { version: true },
+        { version: Number.NaN },
+        { version: Number.POSITIVE_INFINITY },
+        { version: 2.9 },
+        { version: null },
+        { fetchedAt: "t" },
+        { version: 3, fetchedAt: 7, observedFrom: { at: "t" } },
+        { version: 4, fetchedAt: "2026-05-20T10:00:00.000Z", observedFrom: "2026-05-20T10:00:00.000Z", extra: 1 },
+        [5],
+        "6",
+      ],
+    });
+    expect(err.candidates).toEqual([
+      { version: 1, fetchedAt: null, observedFrom: null },
+      { version: 3, fetchedAt: null, observedFrom: null },
+      { version: 4, fetchedAt: "2026-05-20T10:00:00.000Z", observedFrom: "2026-05-20T10:00:00.000Z" },
+    ]);
+    expect(err.candidatesTruncated).toBe(false);
+  });
+
+  it("returns the first 10 kept items; more than 10 kept means truncated", () => {
+    const item = (version: number) => ({ version, fetchedAt: "t", observedFrom: null });
+    const ten = new NotFoundError("x", 404, { candidates: Array.from({ length: 10 }, (_, i) => item(i + 1)) });
+    expect(ten.candidates.map((c) => c.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(ten.candidatesTruncated).toBe(false);
+    // Ten kept plus unusable items after them: not truncated.
+    const tenAndJunk = new NotFoundError("x", 404, {
+      candidates: [...Array.from({ length: 10 }, (_, i) => item(i + 1)), { version: "11" }, null],
+    });
+    expect(tenAndJunk.candidatesTruncated).toBe(false);
+    const eleven = new NotFoundError("x", 404, {
+      candidates: [{ version: "skip" }, ...Array.from({ length: 11 }, (_, i) => item(i + 1))],
+    });
+    expect(eleven.candidates.map((c) => c.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(eleven.candidatesTruncated).toBe(true);
+    // The server's own flag counts too.
+    expect(new NotFoundError("x", 404, { candidates: [item(1)], candidatesTruncated: true }).candidatesTruncated).toBe(true);
+    expect(new NotFoundError("x", 404, { candidates: [item(1)], candidatesTruncated: 1 }).candidatesTruncated).toBe(false);
+  });
+
+  it("200,000 candidates: 10 returned, truncated", () => {
+    const candidates = Array.from({ length: 200_000 }, (_, i) => ({ version: i + 1, fetchedAt: "t", observedFrom: null }));
+    const err = new NotFoundError("x", 404, { reason: "boundary_unknown", candidates });
+    expect(err.candidates).toHaveLength(10);
+    expect(err.candidates[9]?.version).toBe(10);
+    expect(err.candidatesTruncated).toBe(true);
+  });
+
+  it("returns fresh objects, not the items of details", () => {
+    const original = { version: 1, fetchedAt: "t", observedFrom: null };
+    const err = new NotFoundError("x", 404, { candidates: [original] });
+    expect(err.candidates[0]).toEqual(original);
+    expect(err.candidates[0]).not.toBe(original);
+  });
+
+  it("reason and trackedSince: strings only", () => {
+    for (const value of [1, true, null, { reason: "x" }, ["before_tracking"]]) {
+      const err = new NotFoundError("x", 404, { reason: value, trackedSince: value });
+      expect(err.reason).toBeUndefined();
+      expect(err.trackedSince).toBeUndefined();
+      expect(err.beforeTracking).toBe(false);
+    }
+    expect(new NotFoundError("x", 404, { reason: "something_new" }).reason).toBe("something_new");
+  });
+
+  it("inForceLookup: only from a plain object; method / path kept only when strings", () => {
+    expect(new NotFoundError("x", 404, { inForceLookup: { method: 1, path: null } }).inForceLookup).toEqual({});
+    expect(new NotFoundError("x", 404, { inForceLookup: { method: "POST", path: ["/api"] } }).inForceLookup).toEqual({
+      method: "POST",
+    });
+    expect(new NotFoundError("x", 404, { inForceLookup: { path: "/api/v1/legislation/as-of", extra: 1 } }).inForceLookup).toEqual({
+      path: "/api/v1/legislation/as-of",
+    });
+    for (const inForceLookup of [null, "POST", 1, ["POST"]]) {
+      expect(new NotFoundError("x", 404, { inForceLookup }).inForceLookup).toBeUndefined();
+    }
+  });
+});
+
+describe("legislation options never reach case-law search", () => {
+  it("semanticSearch drops asOf and inForce set past the types", async () => {
+    const fetchMock = stub(jsonResponse(200, { success: true, results: [] }));
+    const bypassed = { query: "data transfers", asOf: "2020-06-01", inForce: true } as { query: string };
+    await client(fetchMock).semanticSearch(bypassed);
+    expect(sentBody(fetchMock)).toEqual({ query: "data transfers" });
+  });
+
+  it("nationalSemanticSearch drops asOf and inForce set past the types", async () => {
+    const fetchMock = stub(jsonResponse(200, { success: true, results: [] }));
+    const bypassed = { query: "Datenschutz", asOf: "2020-06-01", inForce: true } as { query: string };
+    await client(fetchMock).nationalSemanticSearch("AT", bypassed);
+    expect(sentBody(fetchMock)).toEqual({ query: "Datenschutz" });
   });
 });

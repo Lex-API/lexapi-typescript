@@ -2627,7 +2627,7 @@ export interface NationalSemanticLegislationOptions {
   filters?: NationalLegislationFilters;
   /**
    * Label each hit for this date (`YYYY-MM-DD`, from `1800-01-01` to today,
-   * UTC; API 2.29.0). A `Date` is sent as its UTC calendar day. The search
+   * UTC; API 2.29.0), a `YYYY-MM-DD` string. The search
    * runs over today's texts only: a provision repealed or replaced since that
    * date cannot be found, and the text is never swapped for an earlier one.
    * A hit is resolved (`asOfResolved: true`) only when the publisher's dates,
@@ -2638,7 +2638,7 @@ export interface NationalSemanticLegislationOptions {
    * `asof_not_available`. `in_force` and the `inForce` filter stay about
    * today. No extra cost; an invalid date is a 400 `InvalidParamsError`.
    */
-  asOf?: string | Date;
+  asOf?: string;
 }
 
 /**
@@ -2696,14 +2696,14 @@ export const NATIONAL_AS_OF_REASONS = [
 /**
  * The publisher's dates for a national hit's current wording, on a hit with
  * `asOfResolved: true` (API 2.29.0). Not the EU {@link AsOfVersion}: `kind`
- * is always `current_unit`, and the text is today's. A field is `null` when
- * not known.
+ * is always `current_unit`, and the text is today's. `validTo`, `sourceId`
+ * and `checkedAt` are `null` when not known.
  */
 export interface NationalAsOfVersion {
   kind: "current_unit";
   /** The publisher's start date of this wording (`YYYY-MM-DD`, on or before `asOf`). */
-  validFrom: string | null;
-  /** Its last day in force, when the publisher gives one; `null` when open. */
+  validFrom: string;
+  /** The publisher's end date of this wording, when given; `null` when open. */
   validTo: string | null;
   /** The publisher's id of the provision (the RIS document number in Austria, the BOE block id in Spain). */
   sourceId: string | null;
@@ -2719,10 +2719,13 @@ export interface NationalAsOfVersion {
 /**
  * Tells a national {@link NationalAsOfVersion} from an EU {@link AsOfVersion}
  * by `kind` (`current_unit`). The EU `kind` is an open union, so TypeScript
- * cannot narrow on a `kind` comparison alone; this guard does.
+ * cannot narrow on a `kind` comparison alone; this guard does. `false` for
+ * `null`, `undefined` and anything that is not an object.
  */
-export function isNationalAsOfVersion(version: AsOfVersion | NationalAsOfVersion): version is NationalAsOfVersion {
-  return version.kind === "current_unit";
+export function isNationalAsOfVersion(
+  version: AsOfVersion | NationalAsOfVersion | null | undefined | unknown,
+): version is NationalAsOfVersion {
+  return typeof version === "object" && version !== null && (version as { kind?: unknown }).kind === "current_unit";
 }
 
 /**
@@ -2841,9 +2844,9 @@ export interface NationalSemanticLegislationResponse extends CreditedResponse, W
   /** `asOf` requests only (API 2.29.0). */
   asOfSummary?: {
     /** Always `0`: national `asOf` fetches nothing. */
-    liveFetches?: number;
+    liveFetches: number;
     /** Hits returned with `asOfResolved: false`. */
-    unresolved?: number;
+    unresolved: number;
   };
   metadata?: Record<string, unknown>;
   hint?: string;
@@ -3219,7 +3222,7 @@ export interface VersionEntry {
    * the last fetch of its text, which is not when the version began.
    */
   fetchedAt: string;
-  /** When the version began; `null` when LexAPI has no record of it (API 2.28.0). */
+  /** When the version began in LexAPI's fetch history; `null` when LexAPI has no record of it (API 2.28.0). */
   observedFrom?: string | null;
   title?: string | null;
   documentType?: string | null;
@@ -3264,7 +3267,10 @@ export interface DocumentVersionResponse extends CreditedResponse, WithResponseH
   corpusVersion?: number;
 }
 
-/** Where the version of an EU act for a date is answered: `legislationAsOf`. */
+/**
+ * The request that answers which version of an EU act is listed for a date
+ * (`legislationAsOf`). A field is absent when it is not a string.
+ */
 export interface InForceLookup {
   method?: "POST" | (string & {});
   path?: "/api/v1/legislation/as-of" | (string & {});
@@ -3313,10 +3319,11 @@ export type NotFoundReason = "unknown_endpoint" | "before_tracking" | "boundary_
 /**
  * A version a `boundary_unknown` date could fall in (`NotFoundError.candidates`).
  * For these versions `fetchedAt` can be the last fetch and later than the date.
+ * `fetchedAt` and `observedFrom` are `null` when the API sent no string.
  */
 export interface SnapshotCandidate {
   version: number;
-  fetchedAt: string;
+  fetchedAt: string | null;
   observedFrom: string | null;
 }
 

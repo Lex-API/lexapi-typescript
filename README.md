@@ -306,8 +306,8 @@ replaced since the date cannot be found, and the text is never swapped. A hit is
 only when the publisher's dates, as of LexAPI's last recorded read of the act (`checkedAt`), show
 that today's wording already applied on the date. An unresolved hit keeps today's wording; it is not
 established as the text for the date (`asOfReason`, listed in `NATIONAL_AS_OF_REASONS`). LexAPI
-holds such dates for Austria and Spain; elsewhere every hit is `asof_not_available`. A `Date` is
-sent as its UTC calendar day. `isNationalAsOfVersion(v)` tells it from the EU `asOfVersion` by `kind`.
+holds such dates for Austria and Spain; elsewhere every hit is `asof_not_available`. `asOf` is a
+`YYYY-MM-DD` string. `isNationalAsOfVersion(v)` tells it from the EU `asOfVersion` by `kind`.
 
 **Incomplete national searches.** When the national index could not complete a semantic search,
 results may be incomplete: with hits left the answer carries `partial: true`,
@@ -447,16 +447,17 @@ console.log(snapshot.document.parsedContent, snapshot.corpusVersion);
 try {
   const atDate = await client.getDocumentAtDate("32016R0679", "2026-04-01");
   console.log(atDate.kind);                   // "observation_snapshot" — not the law in force on that date
-  console.log(atDate.document.observedFrom);  // when this version began (null: no record of it)
+  console.log(atDate.document.observedFrom);  // when this version began in LexAPI's fetch history (null: no record of it)
   console.log(atDate.document.observedUntil); // when the next version's text arrived (null: current version)
   if (atDate.inForceLookup) console.log("for the act on a date, use legislationAsOf");
 } catch (err) {
   if (err instanceof NotFoundError && err.beforeTracking) console.log(err.trackedSince); // tracking began later
-  if (err instanceof NotFoundError && err.boundaryUnknown) console.log(err.candidates);  // read them with getDocumentVersion
+  else if (err instanceof NotFoundError && err.boundaryUnknown) console.log(err.candidates); // read them with getDocumentVersion
+  else throw err;
 }
 ```
 
-`fetchedAt` is when a version's text arrived at LexAPI; `observedFrom` is when the version began, `null` when LexAPI has no record of it — then `fetchedAt` is the last fetch of its text, not when the version began. A future date returns the current version with `dateInFuture: true` (and `xWarning`). Each call costs 1 credit; a `boundaryUnknown` 404 is refunded. A date before the document entered the corpus rejects with `NotFoundError` (`beforeTracking`, `trackedSince`); a date next to a version stored before API 2.28.0 whose start LexAPI has no record of rejects with `boundaryUnknown` and `candidates` (`{ version, fetchedAt, observedFrom }`, at most 10, `candidatesTruncated` beyond).
+`fetchedAt` is when a version's text arrived at LexAPI; `observedFrom` is when the version began in LexAPI's fetch history, `null` when LexAPI has no record of it — then `fetchedAt` is the last fetch of its text, not when the version began. A future date returns the current version with `dateInFuture: true` (and `xWarning`). Each call costs 1 credit; a `boundaryUnknown` 404 is refunded. A date before the document entered the corpus rejects with `NotFoundError` (`beforeTracking`, `trackedSince`); a date next to a version stored before API 2.28.0 whose start LexAPI has no record of rejects with `boundaryUnknown` and `candidates` (`{ version, fetchedAt, observedFrom }`, at most 10, `candidatesTruncated` beyond; `[]` when none).
 
 ## Response headers
 

@@ -7,11 +7,21 @@ picks up `0.2.0` on its own.
 
 ## [Unreleased]
 
+Type-level changes to check when upgrading:
+
+- `NationalSemanticLegislationResult` fields it shares with the EU hit, previously typed `unknown`,
+  now have their types (`score: number`, `asOfVersion: NationalAsOfVersion`, …). Code that
+  redeclares them in an `interface … extends`, or assigns a fixture of another shape, must follow.
+- `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
+  `DocumentVersionResponse` it returned before.
+- `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
+  `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares a
+  property of the same name must rename it.
+
 ### Added
 
 - **National `asOf` labels** (API 2.29.0): `nationalLegislationSemanticSearch` takes `asOf`
-  (`YYYY-MM-DD`, or a `Date`, sent as its UTC calendar day) and sends it; before, the option did not
-  exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
+  (a `YYYY-MM-DD` string) and sends it; before, the option did not exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
   `NATIONAL_AS_OF_REASONS`) and, when resolved, `asOfVersion: NationalAsOfVersion`
   (`{ kind: "current_unit", validFrom, validTo, sourceId, checkedAt }`); the response adds `asOf`
   and `asOfSummary`. The search runs over today's texts only: a hit is resolved only when the
@@ -20,15 +30,16 @@ picks up `0.2.0` on its own.
   established as the text for the date. LexAPI holds such dates for Austria and Spain.
   `isNationalAsOfVersion(v)` tells it from the EU `AsOfVersion` by `kind`.
 - **Snapshot timing on the version endpoints** (API 2.28.0): `observedFrom` on every version
-  (`listDocumentVersions`, `getDocumentVersion`, `getDocumentAtDate`): when the version began,
-  `null` when LexAPI has no record of it. `getDocumentAtDate` now returns `DocumentAtDateResponse`
+  (`listDocumentVersions`, `getDocumentVersion`, `getDocumentAtDate`): when the version began in
+  LexAPI's fetch history, `null` when LexAPI has no record of it. `getDocumentAtDate` now returns `DocumentAtDateResponse`
   (a `DocumentVersionResponse` with `kind: "observation_snapshot"`, `document.observedUntil`,
   `inForceLookup`, `dateInFuture` and `xWarning`). These are LexAPI's fetch snapshots, not the law
   in force on a date; for the version of an EU act for a date use `legislationAsOf`.
 - **`NotFoundError` details** (API 2.28.0): `reason` (`details.reason`), `beforeTracking` (with
   `trackedSince` and `inForceLookup`) and `boundaryUnknown` (with `candidates` —
-  `{ version, fetchedAt, observedFrom }[]` — and `candidatesTruncated`) for the 404s of
-  `getDocumentAtDate`. Read from `details` only. `unknownEndpoint` is unchanged.
+  `{ version, fetchedAt, observedFrom }[]`, at most 10, `[]` when none — and
+  `candidatesTruncated`) for the 404s of `getDocumentAtDate`. Read from `details` only, when it is
+  a plain object. `unknownEndpoint` is unchanged.
 - **In-force label** (API 2.19.0): `inForce`, `notInForceReason`, `endOfValidity`,
   `entryIntoForce` (`InForceLabel`, `NotInForceReason`) on documents (`getDocument`,
   `getDocumentsBatch`, `getDocumentByUrl`), on `getDocumentMetadata`'s `metadata` and on

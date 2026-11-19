@@ -385,13 +385,16 @@ export class NotFoundError extends LexAPIError {
     return detailsField(this.details, "reason") === "unknown_endpoint";
   }
 
+  // The accessors below read `details` only when it is a plain JSON object,
+  // and only its own keys; anything else gives each accessor's default.
+
   /**
    * `details.reason` when it is a string: `unknown_endpoint`, or on
    * `getDocumentAtDate` (API 2.28.0) `before_tracking` / `boundary_unknown`.
    * `undefined` on a 404 without one (e.g. a document not in the corpus).
    */
   get reason(): NotFoundReason | undefined {
-    return readString(detailsField(this.details, "reason"));
+    return readString(ownField(this.details, "reason"));
   }
 
   /**
@@ -400,7 +403,7 @@ export class NotFoundError extends LexAPIError {
    * {@link trackedSince} says when that was.
    */
   get beforeTracking(): boolean {
-    return detailsField(this.details, "reason") === "before_tracking";
+    return ownField(this.details, "reason") === "before_tracking";
   }
 
   /**
@@ -410,34 +413,83 @@ export class NotFoundError extends LexAPIError {
    * Read the {@link candidates} with `getDocumentVersion`.
    */
   get boundaryUnknown(): boolean {
-    return detailsField(this.details, "reason") === "boundary_unknown";
+    return ownField(this.details, "reason") === "boundary_unknown";
   }
 
   /** `before_tracking` only: when the document entered the corpus (`details.trackedSince`). */
   get trackedSince(): string | undefined {
-    return readString(detailsField(this.details, "trackedSince"));
-  }
-
-  /** `before_tracking` on an EU act `legislationAsOf` resolves: where the version for a date is answered. */
-  get inForceLookup(): InForceLookup | undefined {
-    const value = detailsField(this.details, "inForceLookup");
-    return isPlainObject(value) ? (value as InForceLookup) : undefined;
+    return readString(ownField(this.details, "trackedSince"));
   }
 
   /**
-   * `boundary_unknown` only: the versions the date could fall in (at most
-   * 10; can be empty). For these versions `fetchedAt` can be the last fetch
-   * and later than the date.
+   * On `before_tracking` for an EU act: the request that answers which
+   * version is listed for a date (`legislationAsOf`).
    */
-  get candidates(): SnapshotCandidate[] | undefined {
-    const value = detailsField(this.details, "candidates");
-    return Array.isArray(value) ? (value.filter(isPlainObject) as unknown as SnapshotCandidate[]) : undefined;
+  get inForceLookup(): InForceLookup | undefined {
+    const value = ownField(this.details, "inForceLookup");
+    if (!isPlainJsonObject(value)) return undefined;
+    const lookup: InForceLookup = {};
+    const method = readString(ownField(value, "method"));
+    const path = readString(ownField(value, "path"));
+    if (method !== undefined) lookup.method = method;
+    if (path !== undefined) lookup.path = path;
+    return lookup;
   }
 
-  /** `boundary_unknown` only: `true` when more versions matched than {@link candidates} lists. */
-  get candidatesTruncated(): boolean {
-    return detailsField(this.details, "candidatesTruncated") === true;
+  /**
+   * `boundary_unknown` only: the versions the date could fall in — the
+   * first 10 items of `details.candidates`
+   * that are objects with an integer `version` (`fetchedAt` / `observedFrom`
+   * are `null` when not strings). `[]` when there are none. For these
+   * versions `fetchedAt` can be the last fetch and later than the date.
+   */
+  get candidates(): SnapshotCandidate[] {
+    return readCandidates(this.details).kept;
   }
+
+  /**
+   * `boundary_unknown` only: `true` when more versions matched than
+   * {@link candidates} lists (`details.candidatesTruncated` is `true`, or
+   * more than 10 usable candidates were sent).
+   */
+  get candidatesTruncated(): boolean {
+    return ownField(this.details, "candidatesTruncated") === true || readCandidates(this.details).more;
+  }
+}
+
+/** At most this many `NotFoundError.candidates` are returned. */
+const MAX_SNAPSHOT_CANDIDATES = 10;
+
+function readCandidates(details: unknown): { kept: SnapshotCandidate[]; more: boolean } {
+  const list = ownField(details, "candidates");
+  const kept: SnapshotCandidate[] = [];
+  if (!Array.isArray(list)) return { kept, more: false };
+  for (const item of list) {
+    // `ownField` reads nothing from an item that is not a plain object.
+    const version = ownField(item, "version");
+    if (typeof version !== "number" || !Number.isInteger(version)) continue;
+    if (kept.length === MAX_SNAPSHOT_CANDIDATES) return { kept, more: true };
+    const fetchedAt = ownField(item, "fetchedAt");
+    const observedFrom = ownField(item, "observedFrom");
+    kept.push({
+      version,
+      fetchedAt: typeof fetchedAt === "string" ? fetchedAt : null,
+      observedFrom: typeof observedFrom === "string" ? observedFrom : null,
+    });
+  }
+  return { kept, more: false };
+}
+
+/** A plain object (as `JSON.parse` makes them): not `null`, not an array, no other prototype. */
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** `value[key]` when `value` is a plain object that has `key` as its own property. */
+function ownField(value: unknown, key: string): unknown {
+  return isPlainJsonObject(value) && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
 }
 
 /** 400 — CELEX failed validation (`INVALID_CELEX`). */
@@ -1117,11 +1169,6 @@ function readNumber(value: unknown): number | undefined {
 /** `value` when it is a non-empty string; anything else counts as absent. */
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
-}
-
-/** A JSON object: not `null`, not an array. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readString(value: unknown): string | undefined {
