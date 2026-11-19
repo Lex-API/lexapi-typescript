@@ -10,6 +10,7 @@
  */
 
 import type { RateLimitInfo, ResponseHeaders } from "./headers.js";
+import { bodySeconds, normalizeRetryAfterSeconds, retryAfterHeaderSeconds } from "./retryHints.js";
 import type { InForceLookup, NotFoundReason, SnapshotCandidate } from "./types.js";
 
 /** Stable error codes from the OpenAPI `ErrorResponse.error.code` enum. */
@@ -281,8 +282,7 @@ export class LexAPIError extends Error {
       // JSON retryAfter fallback — only on a 429 or an incomplete national
       // semantic search 503, and only when the header didn't provide one.
       if (retryAfter === undefined && (status === 429 || (status === 503 && code === "NATIONAL_SEMANTIC_UNAVAILABLE"))) {
-        const jsonRetryAfter = readNumber(record["retryAfter"]) ?? readNumber(detailsField(details, "retryAfter"));
-        if (jsonRetryAfter !== undefined) retryAfter = normalizeRetryAfterSeconds(jsonRetryAfter);
+        retryAfter = bodyWait(record, details);
       }
       // resetsAt for CREDITS_EXHAUSTED: spec puts it in error.details; some
       // envelopes also carry a top-level usage.resetsAt.
@@ -1156,20 +1156,21 @@ export function isLexAPIError<T extends LexAPIError = LexAPIError>(
   return value instanceof (errorClass ?? LexAPIError);
 }
 
-/**
- * Normalize a JSON `retryAfter` body value. The field can carry
- * absolute epoch values instead of delta-seconds;
- * epoch-looking values are converted to a non-negative delta in seconds.
- */
-export function normalizeRetryAfterSeconds(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  if (value > 1e12) return Math.max(0, Math.round((value - Date.now()) / 1000)); // epoch millis
-  if (value > 1e9) return Math.max(0, Math.round(value - Date.now() / 1000)); // epoch seconds
-  return Math.max(0, value);
-}
+export { normalizeRetryAfterSeconds };
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** `details`: `error.details` on the typed envelope, else the top-level `details`. */
+function bodyDetails(body: unknown): unknown {
+  const err = detailsField(body, "error");
+  return typeof err === "object" && err !== null && !Array.isArray(err) ? detailsField(err, "details") : detailsField(body, "details");
+}
+
+/** The body's usable wait (§1.2): the top-level `retryAfter`, else the one in `details`. */
+function bodyWait(body: unknown, details: unknown): number | undefined {
+  return bodySeconds(detailsField(body, "retryAfter")) ?? bodySeconds(detailsField(details, "retryAfter"));
 }
 
 /** `value` when it is a non-empty string; anything else counts as absent. */
@@ -1194,8 +1195,9 @@ function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolea
   // Fallback for servers before API 2.4.0 (no top-level code).
   const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
   if (typeof resetsAt !== "string") return false;
-  if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;
-  return detailsField(body, "retryAfter") === undefined;
+  // A quota 429 has no usable wait (§1.2): an unusable hint does not count.
+  if (retryAfterHeaderSeconds(headers?.retryAfter) !== undefined) return false;
+  return bodyWait(body, bodyDetails(body)) === undefined;
 }
 
 function detailsOrBodyField(details: unknown, body: unknown, key: string): unknown {

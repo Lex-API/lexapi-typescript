@@ -5,9 +5,9 @@ import {
   RateLimitedError,
   RequestAbortedError,
   TimeoutError,
-  normalizeRetryAfterSeconds,
 } from "./errors.js";
 import { parseResponseHeaders } from "./headers.js";
+import { decimalSeconds, retryAfterHeaderSeconds, timerDelay } from "./retryHints.js";
 import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
@@ -405,10 +405,11 @@ export class HttpClient {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const touch = (): void => {
         if (timer !== undefined) clearTimeout(timer);
+        if (timeoutMs === Infinity) return; // no limit
         timer = setTimeout(() => {
           timedOut = true;
           controller.abort();
-        }, timeoutMs);
+        }, timerDelay(timeoutMs));
       };
       touch();
       const onAbort = (): void => controller.abort();
@@ -754,28 +755,13 @@ export async function parseErrorResponse(response: Response, touch?: () => void)
   return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response), bodyExcerpt);
 }
 
-/**
- * `Retry-After` header — delta-seconds or an HTTP-date (§1.2). Empty or
- * unparseable values count as absent; numbers go through the epoch guard.
- */
+/** `Retry-After` header (§1.2); anything outside the grammar counts as absent. */
 function headerRetryAfterSeconds(response: Response): number | undefined {
-  const raw = response.headers.get("retry-after");
-  if (raw === null) return undefined;
-  const header = raw.trim();
-  if (header === "") return undefined;
-  if (/^\d+(\.\d+)?$/.test(header)) return normalizeRetryAfterSeconds(Number(header));
-  if (/^[-+]?\d/.test(header)) return undefined;
-  const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, Math.round((date - Date.now()) / 1000));
-  return undefined;
+  return retryAfterHeaderSeconds(response.headers.get("retry-after"));
 }
 
 function resetHeaderSeconds(response: Response, name: string): number | undefined {
-  const raw = response.headers.get(name);
-  if (raw === null || raw.trim() === "") return undefined;
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return normalizeRetryAfterSeconds(seconds);
+  return decimalSeconds(response.headers.get(name));
 }
 
 /** Full-jitter exponential backoff: `random() * min(cap, base * 2^attempt)`. */
@@ -785,6 +771,7 @@ function fullJitterBackoff(attempt: number, baseDelayMs: number, maxDelayMs: num
 
 /** Sleep that a caller's `AbortSignal` interrupts (rejecting with `RequestAbortedError`). */
 function sleep(ms: number, signal: AbortSignal | undefined, method: string, path: string): Promise<void> {
+  ms = timerDelay(ms);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason));

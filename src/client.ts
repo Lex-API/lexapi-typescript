@@ -7,6 +7,7 @@ import {
 } from "./http.js";
 import { createExportStream, type ExportParams, type ExportStream } from "./export.js";
 import { parseResponseHeaders } from "./headers.js";
+import { REPEATS_BEFORE_THROW, compactForm, count, stalled, startingPosition } from "./paging.js";
 import { WebhooksAPI } from "./webhooks.js";
 import type {
   CitationEdgeParams,
@@ -18,6 +19,8 @@ import type {
   CitationPathResponse,
   CitationStatsParams,
   CitationStatsResponse,
+  CitedDocumentGroup,
+  CitingDocumentGroup,
   CitedByResponse,
   CitesParams,
   CitesResponse,
@@ -526,17 +529,22 @@ export class LexAPI {
    * missed. A target's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages — merge by
    * `celexNumber` if you need one group per document.
+   * The walk also ends once the offset reaches `totalEdges`, when that is a
+   * non-negative integer. It throws `InvalidResponseError` when a page echoes
+   * an `offset` other than the one requested, or, when the answers carry
+   * neither `totalEdges` nor `offset`, after three pages in a row that each
+   * repeat the one before (comparing the list only; a page with either
+   * signal ends a run). When a walk throws, the pages already yielded stay
+   * valid; the page that showed the stall is not yielded and is on the
+   * error's `body`. A starting `offset` or `limit` that is not a non-negative
+   * (positive) integer is a `RangeError` before any request.
    */
   async *paginateCites(
     celexNumber: string,
     params: CitesParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitesResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCites(celexNumber, p, options),
-      (page) => page.cites.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCites(celexNumber, p, options), (page) => page.cites, params);
   }
 
   /**
@@ -544,17 +552,22 @@ export class LexAPI {
    * empty page (SDK contract §1.4). Each page is a billed call (1 credit);
    * edges may repeat or be missed if extractions happen during the walk. A source's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages.
+   * The walk also ends once the offset reaches `totalEdges`, when that is a
+   * non-negative integer. It throws `InvalidResponseError` when a page echoes
+   * an `offset` other than the one requested, or, when the answers carry
+   * neither `totalEdges` nor `offset`, after three pages in a row that each
+   * repeat the one before (comparing the list only; a page with either
+   * signal ends a run). When a walk throws, the pages already yielded stay
+   * valid; the page that showed the stall is not yielded and is on the
+   * error's `body`. A starting `offset` or `limit` that is not a non-negative
+   * (positive) integer is a `RangeError` before any request.
    */
   async *paginateCitedBy(
     celexNumber: string,
     params: CitationEdgeParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitedByResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCitedBy(celexNumber, p, options),
-      (page) => page.citedBy.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCitedBy(celexNumber, p, options), (page) => page.citedBy, params);
   }
 
   /**
@@ -869,8 +882,12 @@ export class LexAPI {
   /**
    * Walk every page of `listNationalDocuments` via `cursor` (works past the
    * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
-   * a separate billed call. Stops after a page with `hasMore: false` (or an
-   * empty page). Any `params.page` is ignored and never sent — pass
+   * a separate billed call. Stops after a page whose `hasMore` is not `true`,
+   * whose `nextCursor` is absent, `null` or empty, or that is empty. A
+   * `nextCursor` the walk already sent, or one that is not a string, throws
+   * `InvalidResponseError`; the pages already yielded stay valid, and the
+   * page that showed the stall is not yielded and is on the error's `body`.
+   * Any `params.page` is ignored and never sent — pass
    * `params.cursor` only to resume a walk you saved partway through;
    * `page` together with `cursor` is a 400 ("Use either cursor or page,
    * not both"), so this strips `page` at runtime, not just in the type
@@ -884,15 +901,26 @@ export class LexAPI {
   ): AsyncGenerator<NationalDocumentListResponse, void> {
     const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
     let cursor = rest.cursor;
+    const sent = new Set<string>();
     for (;;) {
+      if (typeof cursor === "string") sent.add(cursor);
       const page = await this.listNationalDocuments(
         jurisdiction,
         cursor !== undefined ? { ...rest, cursor } : { ...rest },
         options,
       );
+      const results: unknown = page.results;
+      const next: unknown = page.nextCursor;
+      const ends =
+        page.hasMore !== true || next === undefined || next === null || next === "" || !Array.isArray(results) || results.length === 0;
+      if (!ends) {
+        // The page that shows the stall is not yielded; it is on the error's `body`.
+        if (typeof next !== "string") throw stalled("the server sent a page cursor that is not a string", page);
+        if (sent.has(next)) throw stalled("the server repeated a page cursor", page);
+      }
       yield page;
-      if (!page.hasMore || !page.nextCursor || page.results.length === 0) return;
-      cursor = page.nextCursor;
+      if (ends) return;
+      cursor = next as string;
     }
   }
 
@@ -1268,24 +1296,57 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
   return typeof value === "string" ? value : value.join(",");
 }
 
-async function* paginateEdges<T extends { limit?: number }, P extends CitationEdgeParams>(
+type EdgeGroup = CitedDocumentGroup | CitingDocumentGroup;
+
+/** A group's edge rows: its `citationCount` when that is a count, else the length of its edge list. */
+function edgeRows(group: EdgeGroup): number {
+  return count(group.citationCount) ?? (Array.isArray(group.citations) ? group.citations.length : 0);
+}
+
+async function* paginateEdges<
+  T extends { limit?: number; offset?: number; totalEdges?: number },
+  P extends CitationEdgeParams,
+>(
   fetchPage: (params: P) => Promise<T>,
-  rawRowsIn: (page: T) => number,
+  groupsIn: (page: T) => readonly EdgeGroup[] | undefined,
   params: P,
 ): AsyncGenerator<T, void> {
-  const limit = params.limit ?? 100;
-  let offset = params.offset ?? 0;
+  const start = startingPosition(params.offset, params.limit, 100);
+  const limit = start.limit;
+  let offset = start.offset;
+  let previous: string | undefined;
+  let repeats = 0;
   for (;;) {
     const page = await fetchPage({ ...params, limit, offset });
+    const listed: unknown = groupsIn(page);
+    const groups: readonly EdgeGroup[] = Array.isArray(listed) ? listed : [];
+    const echoed = count(page.offset);
+    const totalEdges = count(page.totalEdges);
+    // The page that shows a stall is not yielded; it is on the error's `body`.
+    if (echoed !== undefined && echoed !== offset) throw stalled("the server did not advance", page);
+    if (echoed === undefined && totalEdges === undefined) {
+      // No position signal: only the same list, page after page, is a stall.
+      const form = compactForm(groups);
+      repeats = form === previous ? repeats + 1 : 0;
+      previous = form;
+      if (repeats >= REPEATS_BEFORE_THROW) throw stalled("the server repeated the same page", page);
+    } else {
+      // A page with a position signal ends any run of repeats.
+      repeats = 0;
+      previous = undefined;
+    }
     yield page;
     // SDK contract §1.4: offsets count edge rows; advance by the sum of the
     // page's citationCounts and stop at the first page shorter than the page
-    // size. (`totalCitations` counts distinct document pairs — raw rows can
-    // outnumber it — so it never ends the walk.)
-    const pageLimit = page.limit && page.limit > 0 ? page.limit : limit;
-    const rows = rawRowsIn(page);
+    // size, or once the offset reaches `totalEdges`. (`totalCitations` counts
+    // distinct document pairs — raw rows can outnumber it — so it never ends
+    // the walk.)
+    const echoedLimit = count(page.limit);
+    const pageLimit = echoedLimit !== undefined && echoedLimit > 0 ? echoedLimit : limit;
+    const rows = groups.reduce((n, g) => n + edgeRows(g), 0);
     offset += rows;
     if (rows === 0 || rows < pageLimit) return;
+    if (totalEdges !== undefined && offset >= totalEdges) return;
   }
 }
 
