@@ -124,6 +124,27 @@ Type-level changes to check when upgrading:
   after the client is created is the one used.
 - A runtime with no global `fetch` and no `fetch` option now fails at construction with a clear
   error. Previously a `globalThis.fetch` set to `undefined` constructed and failed at the first call.
+- A negative `retryAfter` in an error body is absent, so the retry uses the normal back-off and
+  `err.retryAfter` is `undefined`. Before, it read as `0`.
+- A `Retry-After` header of digits too large for a number, or of text that is not an HTTP-date in
+  one of the three RFC 9110 forms (`junk 1` read as a date in 2001), is absent. Before, both read as
+  `0`, a retry at once. An asctime date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
+- A `RateLimit-Reset` header that is not unsigned decimal seconds (`-0`, `0x10`, `1e3`) is absent.
+- A retry wait or timeout is never handed to a timer above 2^31−1 ms; a longer timer fires at once
+  in Node and Bun, so a huge server wait with `maxDelayMs: Infinity` retried immediately.
+- Integer headers (`result.headers`, for example `rateLimit.remaining`) too large for a number read
+  as absent instead of `Infinity`. `X-Export-Total` / `X-Export-Streaming` that are not a
+  non-negative integer read as absent instead of `NaN`, `Infinity`, a negative number or `0`.
+- `getCreditUsage` reads a `credits` or `usage` figure that is not a finite number as absent:
+  `unitsCharged` is `0` and `creditsRemaining` falls back as when the field is missing. Before, it
+  returned `Infinity` or the string as sent.
+- `paginateCites`, `paginateCitedBy`, `paginateNationalDocuments` and
+  `webhooks.paginateDeliveries` stop at a page that brings nothing they have not yielded already, so
+  a server that repeats a page no longer makes them loop for ever. A page without its list ends the
+  walk instead of throwing a `TypeError`, and a `citationCount` that is not a count falls back to the
+  length of the group's edge list.
+- An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
+  the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
 
 ### Security
 

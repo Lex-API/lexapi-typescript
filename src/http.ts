@@ -408,7 +408,7 @@ export class HttpClient {
         timer = setTimeout(() => {
           timedOut = true;
           controller.abort();
-        }, timeoutMs);
+        }, timerDelay(timeoutMs));
       };
       touch();
       const onAbort = (): void => controller.abort();
@@ -754,6 +754,32 @@ export async function parseErrorResponse(response: Response, touch?: () => void)
   return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response), bodyExcerpt);
 }
 
+/** Unsigned decimal seconds; a value too large for a finite number counts as absent. */
+function decimalSeconds(value: string): number | undefined {
+  if (!/^\d+(\.\d+)?$/.test(value)) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? normalizeRetryAfterSeconds(seconds) : undefined;
+}
+
+const DAY = "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)";
+const LONG_DAY = "(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)";
+const MONTH = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+const TIME = "\\d{2}:\\d{2}:\\d{2}";
+/** The three HTTP-date forms (RFC 9110 §5.6.7); asctime carries no zone and is UTC. */
+const IMF_FIXDATE = new RegExp(`^${DAY}, \\d{2} ${MONTH} \\d{4} ${TIME} GMT$`, "i");
+const RFC850_DATE = new RegExp(`^${LONG_DAY}, \\d{2}-${MONTH}-\\d{2} ${TIME} GMT$`, "i");
+const ASCTIME_DATE = new RegExp(`^${DAY} ${MONTH} (?: \\d|\\d{2}) ${TIME} \\d{4}$`, "i");
+
+/** An HTTP-date as epoch milliseconds, or `undefined` for anything else. */
+function httpDateMs(value: string): number | undefined {
+  let text: string;
+  if (IMF_FIXDATE.test(value) || RFC850_DATE.test(value)) text = value;
+  else if (ASCTIME_DATE.test(value)) text = `${value} GMT`;
+  else return undefined;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 /**
  * `Retry-After` header — delta-seconds or an HTTP-date (§1.2). Empty or
  * unparseable values count as absent; numbers go through the epoch guard.
@@ -763,19 +789,15 @@ function headerRetryAfterSeconds(response: Response): number | undefined {
   if (raw === null) return undefined;
   const header = raw.trim();
   if (header === "") return undefined;
-  if (/^\d+(\.\d+)?$/.test(header)) return normalizeRetryAfterSeconds(Number(header));
-  if (/^[-+]?\d/.test(header)) return undefined;
-  const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, Math.round((date - Date.now()) / 1000));
+  if (/^\d/.test(header)) return decimalSeconds(header);
+  const date = httpDateMs(header);
+  if (date !== undefined) return Math.max(0, Math.round((date - Date.now()) / 1000));
   return undefined;
 }
 
 function resetHeaderSeconds(response: Response, name: string): number | undefined {
   const raw = response.headers.get(name);
-  if (raw === null || raw.trim() === "") return undefined;
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return normalizeRetryAfterSeconds(seconds);
+  return raw === null ? undefined : decimalSeconds(raw.trim());
 }
 
 /** Full-jitter exponential backoff: `random() * min(cap, base * 2^attempt)`. */
@@ -783,8 +805,18 @@ function fullJitterBackoff(attempt: number, baseDelayMs: number, maxDelayMs: num
   return Math.random() * Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
 }
 
+/** The longest delay a timer keeps: a longer one fires at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** A delay a timer honours: within 0 … `MAX_TIMER_MS`, 0 for a value that is not a number. */
+export function timerDelay(ms: number): number {
+  if (Number.isNaN(ms)) return 0;
+  return Math.min(Math.max(ms, 0), MAX_TIMER_MS);
+}
+
 /** Sleep that a caller's `AbortSignal` interrupts (rejecting with `RequestAbortedError`). */
 function sleep(ms: number, signal: AbortSignal | undefined, method: string, path: string): Promise<void> {
+  ms = timerDelay(ms);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason));

@@ -18,6 +18,8 @@ import type {
   CitationPathResponse,
   CitationStatsParams,
   CitationStatsResponse,
+  CitedDocumentGroup,
+  CitingDocumentGroup,
   CitedByResponse,
   CitesParams,
   CitesResponse,
@@ -525,36 +527,30 @@ export class LexAPI {
    * same instant or during the walk can shift: an edge may repeat or be
    * missed. A target's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages — merge by
-   * `celexNumber` if you need one group per document.
+   * `celexNumber` if you need one group per document. A page that brings no
+   * edge the walk has not yielded yet ends it (and is not yielded).
    */
   async *paginateCites(
     celexNumber: string,
     params: CitesParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitesResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCites(celexNumber, p, options),
-      (page) => page.cites.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCites(celexNumber, p, options), (page) => page.cites, params);
   }
 
   /**
    * Walk every page of `getCitedBy` (offset in edge rows) until a short or
    * empty page (SDK contract §1.4). Each page is a billed call (1 credit);
    * edges may repeat or be missed if extractions happen during the walk. A source's edges can straddle a page boundary, so the same
-   * `celexNumber` may appear in two consecutive pages.
+   * `celexNumber` may appear in two consecutive pages. A page that brings no
+   * edge the walk has not yielded yet ends it (and is not yielded).
    */
   async *paginateCitedBy(
     celexNumber: string,
     params: CitationEdgeParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitedByResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCitedBy(celexNumber, p, options),
-      (page) => page.citedBy.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCitedBy(celexNumber, p, options), (page) => page.citedBy, params);
   }
 
   /**
@@ -870,7 +866,8 @@ export class LexAPI {
    * Walk every page of `listNationalDocuments` via `cursor` (works past the
    * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
    * a separate billed call. Stops after a page with `hasMore: false` (or an
-   * empty page). Any `params.page` is ignored and never sent — pass
+   * empty page), and at a page whose documents were all yielded already
+   * (that page is not yielded). Any `params.page` is ignored and never sent — pass
    * `params.cursor` only to resume a walk you saved partway through;
    * `page` together with `cursor` is a 400 ("Use either cursor or page,
    * not both"), so this strips `page` at runtime, not just in the type
@@ -884,14 +881,25 @@ export class LexAPI {
   ): AsyncGenerator<NationalDocumentListResponse, void> {
     const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
     let cursor = rest.cursor;
+    const seen = new Set<string>();
     for (;;) {
       const page = await this.listNationalDocuments(
         jurisdiction,
         cursor !== undefined ? { ...rest, cursor } : { ...rest },
         options,
       );
+      const results = page.results ?? [];
+      let newIds = 0;
+      for (const doc of results) {
+        if (typeof doc.id === "string" && !seen.has(doc.id)) {
+          seen.add(doc.id);
+          newIds++;
+        }
+      }
+      // A page of documents already yielded: the server did not move on.
+      if (results.length > 0 && newIds === 0) return;
       yield page;
-      if (!page.hasMore || !page.nextCursor || page.results.length === 0) return;
+      if (!page.hasMore || typeof page.nextCursor !== "string" || page.nextCursor === "" || results.length === 0) return;
       cursor = page.nextCursor;
     }
   }
@@ -1268,22 +1276,76 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
   return typeof value === "string" ? value : value.join(",");
 }
 
-async function* paginateEdges<T extends { limit?: number }, P extends CitationEdgeParams>(
+type EdgeGroup = CitedDocumentGroup | CitingDocumentGroup;
+
+/** A group's edge rows: its `citationCount` when that is a count, else the length of its edge list. */
+function edgeRows(group: EdgeGroup): number {
+  const count = group.citationCount;
+  if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) return count;
+  return Array.isArray(group.citations) ? group.citations.length : 0;
+}
+
+/** The string fields that tell one edge from another (anything else is ignored). */
+const EDGE_FIELDS = ["citationType", "provenance", "resolution", "extractedAt", "contextSnippet"] as const;
+
+function stringField(value: unknown, key: string): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" ? field : null;
+}
+
+/**
+ * Keys for a page's edges, to tell a new page from one already seen: each
+ * listed edge by its group and string fields (repeats within the page
+ * numbered), a group without an edge list by its group, row count and the
+ * page's offset.
+ */
+function edgeKeys(groups: readonly EdgeGroup[], pageOffset: unknown): string[] {
+  const keys: string[] = [];
+  const counts = new Map<string, number>();
+  for (const group of groups) {
+    const celex = JSON.stringify(stringField(group, "celexNumber"));
+    const edges = Array.isArray(group.citations) && group.citations.length > 0 ? group.citations : undefined;
+    const offset = typeof pageOffset === "number" ? pageOffset : null;
+    const raw = edges === undefined
+      ? [`${celex}|rows:${edgeRows(group)}|offset:${offset}`]
+      : edges.map((edge: unknown) => `${celex}|${JSON.stringify(EDGE_FIELDS.map((key) => stringField(edge, key)))}`);
+    for (const key of raw) {
+      const n = (counts.get(key) ?? 0) + 1;
+      counts.set(key, n);
+      keys.push(`${key}#${n}`);
+    }
+  }
+  return keys;
+}
+
+async function* paginateEdges<T extends { limit?: number; offset?: number }, P extends CitationEdgeParams>(
   fetchPage: (params: P) => Promise<T>,
-  rawRowsIn: (page: T) => number,
+  groupsIn: (page: T) => readonly EdgeGroup[] | undefined,
   params: P,
 ): AsyncGenerator<T, void> {
   const limit = params.limit ?? 100;
   let offset = params.offset ?? 0;
+  const seen = new Set<string>();
   for (;;) {
     const page = await fetchPage({ ...params, limit, offset });
+    const groups = groupsIn(page) ?? [];
+    let fresh = 0;
+    for (const key of edgeKeys(groups, page.offset)) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        fresh++;
+      }
+    }
+    // A page of edges already yielded: the server did not move on.
+    if (groups.length > 0 && fresh === 0) return;
     yield page;
     // SDK contract §1.4: offsets count edge rows; advance by the sum of the
     // page's citationCounts and stop at the first page shorter than the page
     // size. (`totalCitations` counts distinct document pairs — raw rows can
     // outnumber it — so it never ends the walk.)
-    const pageLimit = page.limit && page.limit > 0 ? page.limit : limit;
-    const rows = rawRowsIn(page);
+    const pageLimit = typeof page.limit === "number" && Number.isFinite(page.limit) && page.limit > 0 ? page.limit : limit;
+    const rows = groups.reduce((n, g) => n + edgeRows(g), 0);
     offset += rows;
     if (rows === 0 || rows < pageLimit) return;
   }

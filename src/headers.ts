@@ -121,7 +121,7 @@ function int(headers: HeaderGetter, name: string): number | undefined {
   const value = headers.get(name);
   if (value === null) return undefined;
   const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? undefined : parsed;
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /** Drop `undefined` keys so the object only shows headers that were present. */

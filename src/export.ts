@@ -5,6 +5,7 @@ import {
   IncompleteExportError,
   TimeoutError,
 } from "./errors.js";
+import { timerDelay } from "./http.js";
 import type { Language } from "./types.js";
 
 // ── GET /export (NDJSON stream, BUSINESS / SCALE / ENTERPRISE) ───────
@@ -350,7 +351,7 @@ class NdjsonReader {
           reject(
             new TimeoutError(`Export stream received no data for ${idleTimeoutMs}ms (after ${this.rows} rows)`, 0),
           );
-        }, idleTimeoutMs);
+        }, timerDelay(idleTimeoutMs));
       }
       if (signal) {
         onAbort = () => reject(new RequestAbortedError("Export stream was aborted", signal.reason));
@@ -406,6 +407,15 @@ function liftEnvelope<T>(parsed: Record<string, unknown>, key: "_meta" | "_done"
   return parsed as T;
 }
 
+/** `String(value)`, or the value's kind when that fails (an array nested too deep to join). */
+function text(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return Array.isArray(value) ? "array" : typeof value;
+  }
+}
+
 /** A line whose only key is `_error`: a server failure signal, never a row. */
 function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | undefined {
   const keys = Object.keys(parsed);
@@ -413,7 +423,7 @@ function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | u
   const value = parsed._error;
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : { message: String(value) };
+    : { message: text(value) };
 }
 
 /** Parse one NDJSON line; `undefined` when it is not a JSON object. */
@@ -453,7 +463,7 @@ class ExportStreamImpl implements ExportStream {
 
   private failureReason(): string {
     if (this.error !== undefined) {
-      return `the server reported an error mid-stream (${String(this.error.code ?? "UNKNOWN")}: ${String(this.error.message ?? "")})`;
+      return `the server reported an error mid-stream (${text(this.error.code ?? "UNKNOWN")}: ${text(this.error.message ?? "")})`;
     }
     return "its _done trailer says complete: false";
   }
@@ -568,6 +578,14 @@ class ExportStreamImpl implements ExportStream {
   }
 }
 
+/** A row-count header: a non-negative integer, else absent. */
+function countHeader(value: string | null): number | undefined {
+  const text = value?.trim() ?? "";
+  if (!/^\d+$/.test(text)) return undefined;
+  const count = Number(text);
+  return Number.isFinite(count) ? count : undefined;
+}
+
 /** Build an `ExportStream` from a raw `/export` fetch response. */
 export async function createExportStream(
   response: Response,
@@ -580,8 +598,8 @@ export async function createExportStream(
   const streamingHeader = response.headers.get("x-export-streaming");
   const truncatedHeader = response.headers.get("x-export-truncated");
   const stream = new ExportStreamImpl(new NdjsonReader(response.body, options), {
-    total: totalHeader !== null ? Number(totalHeader) : undefined,
-    streaming: streamingHeader !== null ? Number(streamingHeader) : undefined,
+    total: countHeader(totalHeader),
+    streaming: countHeader(streamingHeader),
     truncated: truncatedHeader !== null ? truncatedHeader === "1" : undefined,
   });
   await stream.init();

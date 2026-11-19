@@ -157,8 +157,9 @@ export class WebhooksAPI {
    * Walk the whole delivery history page by page (`limit` per page, default
    * 50), starting at `offset`, newest first (SDK contract §1.4). Each
    * delivery is yielded at most once (deduplicated on `id`): a delivery
-   * created during the walk shifts later pages by one. Stops on an empty page
-   * or when the offset reaches `total`. Pages are free (0 credits).
+   * created during the walk shifts later pages by one. Stops on an empty page,
+   * when the offset reaches `total`, or at a page whose deliveries were all
+   * yielded already (that page is not yielded). Pages are free (0 credits).
    *
    * ```ts
    * for await (const page of client.webhooks.paginateDeliveries(id)) {
@@ -176,16 +177,21 @@ export class WebhooksAPI {
     const seen = new Set<string>();
     for (;;) {
       const page = await this.deliveries(id, { limit, offset }, options);
-      const count = page.deliveries.length;
-      const fresh = page.deliveries.filter((d) => {
+      const deliveries = page.deliveries ?? [];
+      const count = deliveries.length;
+      let newIds = 0;
+      const fresh = deliveries.filter((d) => {
         if (typeof d.id !== "string") return true;
         if (seen.has(d.id)) return false;
         seen.add(d.id);
+        newIds++;
         return true;
       });
+      // A page of deliveries already yielded: the server did not move on.
+      if (count > 0 && newIds === 0) return;
       yield { ...page, deliveries: fresh };
       offset += count;
-      if (count === 0 || (page.total !== undefined && offset >= page.total)) return;
+      if (count === 0 || (typeof page.total === "number" && offset >= page.total)) return;
     }
   }
 }

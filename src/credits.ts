@@ -3,7 +3,8 @@ import type { CreditedResponse } from "./types.js";
 /**
  * Normalized credit visibility for one response (SDK contract §1.5).
  * All fields tolerate the `usage`/`credits` blocks being absent
- * (legacy daily-call accounts omit `credits`).
+ * (legacy daily-call accounts omit `credits`); a figure that is not a finite
+ * number counts as absent.
  */
 export interface CreditUsage {
   /**
@@ -18,6 +19,11 @@ export interface CreditUsage {
   resetsAt: string | null | undefined;
 }
 
+/** A finite number, else absent. */
+function figure(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 /**
  * Read the credit state off any LexAPI response. The raw `usage`/`credits`
  * blocks stay accessible on the response itself, loss-free.
@@ -29,8 +35,8 @@ export interface CreditUsage {
  */
 export function getCreditUsage(response: CreditedResponse): CreditUsage {
   return {
-    unitsCharged: response.credits?.operation_weight ?? 0,
-    creditsRemaining: response.credits?.remaining ?? response.usage?.remaining,
+    unitsCharged: figure(response.credits?.operation_weight) ?? 0,
+    creditsRemaining: figure(response.credits?.remaining) ?? figure(response.usage?.remaining),
     resetsAt: response.credits?.resetsAt ?? response.usage?.resetsAt,
   };
 }

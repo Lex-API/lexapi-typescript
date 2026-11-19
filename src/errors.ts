@@ -281,7 +281,8 @@ export class LexAPIError extends Error {
       // JSON retryAfter fallback — only on a 429 or an incomplete national
       // semantic search 503, and only when the header didn't provide one.
       if (retryAfter === undefined && (status === 429 || (status === 503 && code === "NATIONAL_SEMANTIC_UNAVAILABLE"))) {
-        const jsonRetryAfter = readNumber(record["retryAfter"]) ?? readNumber(detailsField(details, "retryAfter"));
+        // A negative value is absent, like one that is not a finite number.
+        const jsonRetryAfter = readWait(record["retryAfter"]) ?? readWait(detailsField(details, "retryAfter"));
         if (jsonRetryAfter !== undefined) retryAfter = normalizeRetryAfterSeconds(jsonRetryAfter);
       }
       // resetsAt for CREDITS_EXHAUSTED: spec puts it in error.details; some
@@ -1170,6 +1171,11 @@ export function normalizeRetryAfterSeconds(value: number): number {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readWait(value: unknown): number | undefined {
+  const seconds = readNumber(value);
+  return seconds !== undefined && seconds >= 0 ? seconds : undefined;
 }
 
 /** `value` when it is a non-empty string; anything else counts as absent. */
