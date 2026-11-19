@@ -105,8 +105,9 @@ Type-level changes to check when upgrading:
   from the status and the message `HTTP <status>`.
 
 - Retry hints are read strictly (SDK contract §1.2): `Retry-After` and `RateLimit-Reset` as decimal
-  seconds or, for `Retry-After`, an RFC 9110 HTTP-date ending in `GMT`, `UTC` or `+0000` (dates with
-  other zone names, impossible dates and other text are ignored); a body `retryAfter` only as a
+  seconds or, for `Retry-After`, an RFC 9110 HTTP-date (IMF-fixdate or RFC 850 ending in `GMT`,
+  `UTC` or `+0000`; asctime has no zone and is read as UTC). Dates with other zone names,
+  impossible dates and other text are ignored; a body `retryAfter` only as a
   number ≥ 0. An unusable hint counts as none: the retry uses the normal back-off, a legacy 429 with
   `usage.resetsAt` and no usable hint is a quota 429, and a national 503 whose only hint is unusable
   is not retried.
@@ -114,9 +115,11 @@ Type-level changes to check when upgrading:
   counts) accept only digits up to 2^53−1, and `getCreditUsage` ignores a figure that is not a finite
   number or a `resetsAt` that is not a string.
 - The iterators throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page
-  echoing another `offset`, a national `nextCursor` already sent, or, without `totalEdges`/`offset`
-  (or a deliveries `total`), three pages in a row that repeat the one before. Cites/cited-by walks
-  also end once the offset reaches `totalEdges`.
+  echoing another `offset`, a national `nextCursor` already sent or not a string, or, without
+  `totalEdges`/`offset` (or a deliveries `total`), three pages in a row that repeat the one before.
+  The page that shows the stall is not yielded and is on `err.body`. Cites/cited-by walks also end
+  once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
+  A starting `offset`/`limit` that is not a non-negative (positive) integer is a `RangeError`.
 
 ### Fixed
 
@@ -142,9 +145,8 @@ Type-level changes to check when upgrading:
   wait with `maxDelayMs: Infinity`, or a `timeoutMs` above the limit, is clamped to it.
   `timeoutMs: Infinity` sets no limit.
 - An asctime `Retry-After` date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
-- A page without its list (`paginateCites`, `paginateCitedBy`, `paginateNationalDocuments`,
-  `webhooks.paginateDeliveries`) ends the walk, and a `citationCount` that is not a count counts the
-  group's edge list. Before, both threw a `TypeError`.
+- A page without its list ended the walk with a `TypeError`; a `citationCount` that is not a count
+  mis-stepped the offset (a walk could end early or re-request rows). Both are handled now.
 - An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
   the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
 - `verifyWebhook` on a correctly signed body that is JSON `null` throws

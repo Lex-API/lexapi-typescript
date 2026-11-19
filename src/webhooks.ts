@@ -1,7 +1,7 @@
 import type { CallOptions } from "./client.js";
 import { parseResponseHeaders } from "./headers.js";
 import type { HttpClient, RequestOptions } from "./http.js";
-import { REPEATS_BEFORE_THROW, count, stalled } from "./paging.js";
+import { REPEATS_BEFORE_THROW, count, startingPosition, stalled } from "./paging.js";
 import type {
   WebhookCreateRequest,
   WebhookCreateResponse,
@@ -161,8 +161,12 @@ export class WebhooksAPI {
    * delivery is yielded at most once (deduplicated on `id`): a delivery
    * created during the walk shifts later pages by one. Stops on an empty page
    * or when the offset reaches `total`. Without a usable `total`, three pages
-   * in a row that bring no unseen `id` throw `InvalidResponseError`. Pages
-   * are free (0 credits).
+   * in a row that bring no unseen `id` throw `InvalidResponseError` (a page
+   * with a usable `total` ends a run). When a walk throws, the pages already
+   * yielded stay valid; the page that showed the stall is not yielded and is
+   * on the error's `body`. A starting `offset` or `limit` that is not a
+   * non-negative (positive) integer is a `RangeError` before any request.
+   * Pages are free (0 credits).
    *
    * ```ts
    * for await (const page of client.webhooks.paginateDeliveries(id)) {
@@ -175,8 +179,9 @@ export class WebhooksAPI {
     params: WebhookDeliveriesParams = {},
     options?: CallOptions,
   ): AsyncGenerator<WebhookDeliveriesResponse, void> {
-    const limit = params.limit ?? 50;
-    let offset = params.offset ?? 0;
+    const start = startingPosition(params.offset, params.limit, 50);
+    const limit = start.limit;
+    let offset = start.offset;
     const seen = new Set<string>();
     let repeats = 0;
     for (;;) {
@@ -197,8 +202,11 @@ export class WebhooksAPI {
       const total = count(page.total);
       if (total === undefined) {
         // No usable total: only pages of already-yielded ids, again and again, are a stall.
+        // The page that shows it is not yielded; it is on the error's `body`.
         repeats = readable > 0 && unseen === 0 ? repeats + 1 : 0;
         if (repeats >= REPEATS_BEFORE_THROW) throw stalled("the server repeated the same deliveries", page);
+      } else {
+        repeats = 0; // a page with a usable total ends any run of repeats
       }
       yield { ...page, deliveries: fresh };
       offset += rows;

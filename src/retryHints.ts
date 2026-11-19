@@ -50,10 +50,23 @@ const RFC850_DATE = new RegExp(`^(?:${LONG_DAYS}), ([0-9]{2})-(${MONTH})-([0-9]{
 /** asctime: `Sun Nov  6 08:49:37 1994` (no zone: UTC). */
 const ASCTIME_DATE = new RegExp(`^(?:${DAYS}) (${MONTH}) ([0-9]{2}| [0-9]) ${TIME} ([0-9]{4})$`, "i");
 
-/** RFC 9110 §5.6.7: a two-digit year more than 50 years in the future is in the past century. */
-function fullYear(twoDigits: number, now: number): number {
-  const latest = new Date(now).getUTCFullYear() + 50;
-  return latest - ((((latest - twoDigits) % 100) + 100) % 100);
+/** A sortable key for a calendar date and time (no validation). */
+function dateKey(year: number, month: number, day: number, h: number, m: number, s: number): number {
+  return ((((year * 12 + month) * 31 + day) * 24 + h) * 60 + m) * 60 + s;
+}
+
+/**
+ * RFC 9110 §5.6.7, per timestamp: a two-digit year is the year with those
+ * last two digits that puts the timestamp latest without being more than 50
+ * years after now (the same UTC date and time 50 years on).
+ */
+function fullYear(twoDigits: number, month: string, day: number, h: number, m: number, s: number, now: number): number {
+  const at = new Date(now);
+  const limit = dateKey(at.getUTCFullYear() + 50, at.getUTCMonth(), at.getUTCDate(), at.getUTCHours(), at.getUTCMinutes(), at.getUTCSeconds());
+  const monthIndex = MONTHS.indexOf(month.toLowerCase());
+  let year = Math.floor(at.getUTCFullYear() / 100) * 100 + 100 + twoDigits;
+  while (dateKey(year, monthIndex, day, h, m, s) > limit) year -= 100;
+  return year;
 }
 
 function utcMs(year: number, month: string, day: number, h: number, m: number, s: number): number | undefined {
@@ -78,7 +91,8 @@ export function httpDateMs(value: string, now = Date.now()): number | undefined 
   match = RFC850_DATE.exec(value);
   if (match) {
     const [, day, month, year, h, m, s] = match as unknown as string[];
-    return utcMs(fullYear(Number(year), now), month!, Number(day), Number(h), Number(m), Number(s));
+    const [d, hh, mm, ss] = [Number(day), Number(h), Number(m), Number(s)];
+    return utcMs(fullYear(Number(year), month!, d, hh, mm, ss, now), month!, d, hh, mm, ss);
   }
   match = ASCTIME_DATE.exec(value);
   if (match) {

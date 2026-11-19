@@ -342,14 +342,40 @@ describe("paginateNationalDocuments", () => {
     expect(pages.flatMap((p) => p.results.map((r) => r.id))).toEqual(Array.from({ length: 10_000 }, (_, i) => `AT-${i}`));
   });
 
-  it("a cursor already sent throws after the page that returned it", async () => {
+  it("a cursor already sent throws; the page that returned it is not yielded and is on err.body", async () => {
     const { client, requests } = server(() => ({ jurisdiction: "AT", hasMore: true, nextCursor: "c1", results: [{ id: "AT-1" }] }));
     const { pages, error } = await walk(client.paginateNationalDocuments("AT"));
     expect(error).toBeInstanceOf(InvalidResponseError);
-    expect((error as Error).message).toContain("the server repeated a page cursor");
+    expect((error as InvalidResponseError).message).toContain("the server repeated a page cursor");
+    expect((error as InvalidResponseError).status).toBe(200);
+    expect((error as InvalidResponseError).code).toBe("INVALID_RESPONSE");
+    expect(((error as InvalidResponseError).body as { nextCursor: string }).nextCursor).toBe("c1");
     expect(requests()).toBe(2);
-    expect(pages).toHaveLength(2);
+    expect(pages).toHaveLength(1);
   });
+
+  it.each([["a number", 5], ["an object", { c: 1 }], ["true", true], ["false", false]])(
+    "a nextCursor that is %s throws while hasMore is true",
+    async (_label, nextCursor) => {
+      const { client, requests } = server(() => ({ jurisdiction: "AT", hasMore: true, nextCursor, results: [{ id: "AT-1" }] }));
+      const { pages, error } = await walk(client.paginateNationalDocuments("AT"));
+      expect(error).toBeInstanceOf(InvalidResponseError);
+      expect((error as Error).message).toContain("not a string");
+      expect(requests()).toBe(1);
+      expect(pages).toHaveLength(0);
+    },
+  );
+
+  it.each([["false", false], ["absent", undefined], ["1", 1], ['"true"', "true"], ["null", null]])(
+    "hasMore %s (not true) ends the walk",
+    async (_label, hasMore) => {
+      const { client, requests } = server(() => ({ jurisdiction: "AT", hasMore, nextCursor: "c1", results: [{ id: "AT-1" }] }));
+      const { pages, error } = await walk(client.paginateNationalDocuments("AT"));
+      expect(error).toBeUndefined();
+      expect(requests()).toBe(1);
+      expect(pages).toHaveLength(1);
+    },
+  );
 
   it("the resumed cursor counts as sent", async () => {
     const { client, requests } = server(() => ({ jurisdiction: "AT", hasMore: true, nextCursor: "start", results: [{ id: "AT-1" }] }));
@@ -368,7 +394,7 @@ describe("paginateNationalDocuments", () => {
     expect(pages).toHaveLength(5);
   });
 
-  it.each([["an empty string", ""], ["null", null], ["a number", 5]])("a nextCursor that is %s ends the walk", async (_label, nextCursor) => {
+  it.each([["an empty string", ""], ["null", null], ["absent", undefined]])("a nextCursor that is %s ends the walk", async (_label, nextCursor) => {
     const { client, requests } = server(() => ({ jurisdiction: "AT", hasMore: true, nextCursor, results: [{ id: "AT-1" }] }));
     const { pages, error } = await walk(client.paginateNationalDocuments("AT"));
     expect(error).toBeUndefined();
@@ -381,5 +407,106 @@ describe("paginateNationalDocuments", () => {
     const { pages, error } = await walk(client.paginateNationalDocuments("AT"));
     expect(error).toBeUndefined();
     expect(pages).toHaveLength(1);
+  });
+});
+
+describe("stall checks, finer points", () => {
+  it("every stall error is INVALID_RESPONSE with status 200 and the stalled page on body", async () => {
+    const page = { success: true, targetDocument: "X", limit: 2, offset: 0, citedBy: [{ celexNumber: "A", citationCount: 2 }] };
+    const { client } = server(() => page);
+    const { pages, error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(pages).toHaveLength(1);
+    const e = error as InvalidResponseError;
+    expect(e.code).toBe("INVALID_RESPONSE");
+    expect(e.status).toBe(200);
+    expect((e.body as { offset: number }).offset).toBe(0);
+    const d = server(() => ({ success: true, deliveries: [{ id: "a" }] }));
+    const de = (await walk(d.client.webhooks.paginateDeliveries("w", { limit: 1 }))).error as InvalidResponseError;
+    expect([de.code, de.status]).toEqual(["INVALID_RESPONSE", 200]);
+    expect(de.body).toEqual({ success: true, deliveries: [{ id: "a" }], headers: expect.anything() });
+  });
+
+  it("a page with a position signal resets a run of repeated pages (cited-by)", async () => {
+    const group = [{ celexNumber: "A", citationCount: 2 }];
+    // Two repeats, then a page with totalEdges, then two repeats: never three in a row.
+    const signal = [false, false, false, true, false, false, false];
+    const { client, requests } = server((_, call) => ({
+      success: true, targetDocument: "X", limit: 2, ...(signal[call] ? { totalEdges: 1000 } : {}),
+      citedBy: call < 7 ? group : [{ celexNumber: "A", citationCount: 1 }],
+    }));
+    const { pages, error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(error).toBeUndefined();
+    expect(requests()).toBe(8);
+    expect(pages).toHaveLength(8);
+  });
+
+  it("a page with a usable total resets a run of repeated deliveries", async () => {
+    const withTotal = [false, false, false, true, false, false];
+    const { client, requests } = server((_, call) => ({
+      success: true, ...(withTotal[call] ? { total: 1e6 } : {}), deliveries: call < 6 ? [{ id: "a" }] : [],
+    }));
+    const { error } = await walk(client.webhooks.paginateDeliveries("w", { limit: 1 }));
+    expect(error).toBeUndefined();
+    expect(requests()).toBe(7);
+  });
+
+  it("repeats compare the list only, whatever the key order", async () => {
+    const { client, requests } = server((_, call) => ({
+      success: true, targetDocument: "X", limit: 2, requestId: `r${call}`,
+      citedBy: call % 2 ? [{ citationCount: 2, celexNumber: "A" }] : [{ celexNumber: "A", citationCount: 2 }],
+    }));
+    const { error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(error).toBeInstanceOf(InvalidResponseError);
+    expect(requests()).toBe(4);
+  });
+
+  it("an echoed offset or limit that is not a non-negative integer is not a signal", async () => {
+    const { client, requests } = server((url) => ({
+      success: true, targetDocument: "X", offset: "0", limit: 2.5,
+      citedBy: url.searchParams.get("offset") === "4" ? [{ celexNumber: "C", citationCount: 1 }] : [{ celexNumber: `B${url.searchParams.get("offset")}`, citationCount: 2 }],
+    }));
+    const { error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(error).toBeUndefined();
+    expect(requests()).toBe(3);
+  });
+
+  it.each([2.5, -1, 1e400])("an echoed numeric offset of %s is not a signal (no throw)", async (echoed) => {
+    const { client, requests } = server((url) => ({
+      success: true, targetDocument: "X", limit: 2, offset: echoed, totalEdges: 3,
+      citedBy: [{ celexNumber: `B${url.searchParams.get("offset")}`, citationCount: 2 }],
+    }));
+    const { error } = await walk(client.paginateCitedBy("X", { limit: 2 }));
+    expect(error).toBeUndefined();
+    expect(requests()).toBe(2); // ends by totalEdges
+  });
+
+  it("an echoed offset of 3e1 or 30.0 is the integer 30", async () => {
+    const body = '{"success":true,"targetDocument":"X","limit":2,"offset":3e1,"citedBy":[{"celexNumber":"A","citationCount":1}]}';
+    const fetchFn = vi.fn(async () => new Response(body, { status: 200 }));
+    const client = new LexAPI({ apiKey: "k", baseUrl: BASE, fetch: fetchFn, retry: { maxRetries: 0 } });
+    const { error } = await walk(client.paginateCitedBy("X", { limit: 2, offset: 30 }));
+    expect(error).toBeUndefined();
+  });
+});
+
+describe("starting offset and limit", () => {
+  const never = () => {
+    throw new Error("no request expected");
+  };
+  it.each([
+    ["offset", { offset: "250" }],
+    ["offset", { offset: 2.5 }],
+    ["offset", { offset: -1 }],
+    ["limit", { limit: 0 }],
+    ["limit", { limit: "100" }],
+    ["limit", { limit: 1.5 }],
+  ])("a %s of %j is a RangeError before any request", async (_name, params) => {
+    const { client, fetchFn } = server(never);
+    const walks: AsyncIterable<unknown>[] = [client.paginateCites("X", params as never), client.paginateCitedBy("X", params as never), client.webhooks.paginateDeliveries("w", params as never)];
+    for (const it of walks) {
+      const { error } = await walk(it);
+      expect(error).toBeInstanceOf(RangeError);
+    }
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });

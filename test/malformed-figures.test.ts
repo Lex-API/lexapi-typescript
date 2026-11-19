@@ -532,3 +532,51 @@ describe("trimming (a fetch Headers object trims on its own; a custom one may no
     expect(headers.cacheAge).toBeUndefined();
   });
 });
+
+describe("the retry-hint grammar, boundaries", () => {
+  const NOW = Date.UTC(2026, 10, 19, 12, 0, 0);
+
+  it("RFC 850 years follow RFC 9110 per timestamp: up to 50 years ahead stays, a second more is the past century", async () => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs("Thursday, 19-Nov-76 12:00:00 GMT", NOW)).toBe(Date.UTC(2076, 10, 19, 12, 0, 0));
+    expect(httpDateMs("Thursday, 19-Nov-76 12:00:01 GMT", NOW)).toBe(Date.UTC(1976, 10, 19, 12, 0, 1));
+    expect(httpDateMs("Tuesday, 29-Feb-00 00:00:00 GMT", NOW)).toBe(Date.UTC(2000, 1, 29));
+    const late = Date.UTC(2099, 0, 1);
+    expect(httpDateMs("Sunday, 01-Jan-01 00:00:00 GMT", late)).toBe(Date.UTC(2101, 0, 1));
+  });
+
+  it("the Gregorian century rule: 29 Feb 2100 is not a date, 29 Feb 2000 is", async () => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs("Mon, 29 Feb 2100 00:00:00 GMT", NOW)).toBeUndefined();
+    expect(httpDateMs("Tue, 29 Feb 2000 00:00:00 GMT", NOW)).toBe(Date.UTC(2000, 1, 29));
+  });
+
+  it.each(["Z", "z", "GMT+0", "UT", "-0000", "+00:00"])("zone %j is not accepted", async (zone) => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs(`Sun, 06 Nov 1994 08:49:37 ${zone}`, NOW)).toBeUndefined();
+  });
+
+  it("the epoch thresholds: up to 1e9 is seconds, above is epoch seconds, above 1e12 epoch milliseconds", async () => {
+    const { normalizeRetryAfterSeconds } = await import("../src/retryHints.js");
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    expect(normalizeRetryAfterSeconds(1e9)).toBe(1e9);
+    expect(normalizeRetryAfterSeconds(1e9 + 1)).toBe(0); // 2001, in the past
+    expect(normalizeRetryAfterSeconds(NOW / 1000 + 30)).toBe(30);
+    expect(normalizeRetryAfterSeconds(1e12)).toBe(1e12 - NOW / 1000);
+    expect(normalizeRetryAfterSeconds(1e12 + 1)).toBe(0); // 2001 in milliseconds
+    expect(normalizeRetryAfterSeconds(NOW + 30_000)).toBe(30);
+  });
+
+  it("a wait from a date is rounded to the nearest second, halves up", async () => {
+    const { retryAfterHeaderSeconds } = await import("../src/retryHints.js");
+    vi.spyOn(Date, "now").mockReturnValue(NOW + 500);
+    expect(retryAfterHeaderSeconds("Thu, 19 Nov 2026 12:00:10 GMT")).toBe(10); // 9.5 s → 10
+    vi.spyOn(Date, "now").mockReturnValue(NOW + 501);
+    expect(retryAfterHeaderSeconds("Thu, 19 Nov 2026 12:00:10 GMT")).toBe(9);
+  });
+
+  it("the weekday name is not checked against the date", async () => {
+    const { httpDateMs } = await import("../src/retryHints.js");
+    expect(httpDateMs("Mon, 06 Nov 1994 08:49:37 GMT", NOW)).toBe(Date.UTC(1994, 10, 6, 8, 49, 37));
+  });
+});
