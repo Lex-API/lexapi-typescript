@@ -148,6 +148,31 @@ describe("export: chunk boundaries", () => {
     expect(body.locked).toBe(false);
   });
 
+  it("a chunk that is not bytes before the first line ends export() with an SDK error and cancels the body", async () => {
+    const { body, cancelled } = source(["{}", bytes('{"_meta":{}}\n')]); // still open when the bad chunk is read
+    const error = await exportClient(body).export().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NetworkError);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the cancel reaches the source
+    expect(cancelled()).toBe(true);
+    expect(body.locked).toBe(false);
+  });
+
+  it("a character split over short chunks, then a chunk with an invalid line, reads the same", async () => {
+    const at = TRANSCRIPT.indexOf(0xf0); // the 4-byte character in row A
+    for (const sizes of [[1, 1], [1, 2], [2, 1], [1, 1, 1]]) {
+      const chunks = [TRANSCRIPT.slice(0, at)];
+      let pos = at;
+      for (const n of sizes) {
+        chunks.push(TRANSCRIPT.slice(pos, pos + n));
+        pos += n;
+      }
+      chunks.push(TRANSCRIPT.slice(pos)); // holds the rest of the character and the invalid line
+      const { rows, invalidLines } = await readAll(source(chunks).body);
+      expect(rows, String(sizes)).toEqual(EXPECTED.rows);
+      expect(invalidLines).toBe(1);
+    }
+  });
+
   it("a source that reuses one buffer between reads does not corrupt a line split across reads", async () => {
     const all = bytes('{"_meta":{}}\n{"celex":"A","t":"', "x".repeat(40), "€", "y".repeat(40), '"}\n{"_done":{"complete":true}}\n');
     const size = 16;
@@ -373,6 +398,16 @@ describe("webhooks: order of checks", () => {
 });
 
 describe("webhooks: the timestamp form", () => {
+  const LENIENT: Record<string, number> = {
+    "2026-13-19T12:00:00Z": Date.UTC(2027, 0, 19, 12),
+    "2026-02-30T12:00:00Z": Date.UTC(2026, 2, 2, 12),
+    "2026-11-19T24:00:00Z": Date.UTC(2026, 10, 20, 0),
+    "2026-11-19T12:60:00Z": Date.UTC(2026, 10, 19, 13),
+    "2026-11-19T12:00:60Z": Date.UTC(2026, 10, 19, 12, 1),
+    "2026-11-19T12:00:00+24:00": Date.UTC(2026, 10, 18, 12),
+    "2026-11-19T12:00:00+00:60": Date.UTC(2026, 10, 19, 11),
+  };
+
   it.each([
     "2026-11-19T12:00:00Z",
     "2026-11-19T12:00:00.5Z",
@@ -400,6 +435,8 @@ describe("webhooks: the timestamp form", () => {
     ["RFC 2822 text", "Thu, 19 Nov 2026 12:00:00 GMT"],
     ["a date only", "2026-11-19"],
     ["surrounding spaces", " 2026-11-19T12:00:00Z "],
+    // Each of these, read leniently, is the instant in LENIENT below: the
+    // check refuses the form, not the distance from now.
     ["month 13", "2026-13-19T12:00:00Z"],
     ["30 February", "2026-02-30T12:00:00Z"],
     ["hour 24", "2026-11-19T24:00:00Z"],
@@ -413,7 +450,8 @@ describe("webhooks: the timestamp form", () => {
     ["null", null],
   ])("%s fails the replay check", async (_label, timestamp) => {
     const body = event(timestamp);
-    expect(await reason(verifyWebhook(body, sign(body), SECRET, { now: NOW }))).toBe("stale_timestamp");
+    const now = LENIENT[String(timestamp)] ?? NOW;
+    expect(await reason(verifyWebhook(body, sign(body), SECRET, { now }))).toBe("stale_timestamp");
     expect(await reason(verifyWebhook(body, sign(body), SECRET, { toleranceMs: 0 }))).toBe("ok");
   });
 
@@ -468,9 +506,10 @@ describe("quota 429: the shape test applies only to RATE_LIMITED", () => {
   });
 
   it("on another status the shape does not make a quota error", () => {
-    const error = LexAPIError.fromResponse(503, { success: false, error: { code: "RATE_LIMITED", message: "x" }, ...USAGE }) as RateLimitedError;
+    const error = LexAPIError.fromResponse(503, { success: false, error: { code: "RATE_LIMITED", message: "x" }, ...USAGE }, 5) as RateLimitedError;
     expect(error).toBeInstanceOf(RateLimitedError);
     expect(error.quotaExhausted).toBe(false);
+    expect(error.retryAfter).toBe(5); // a quota error would carry none
   });
 
   it("on any status the flag is set when the code is QUOTA_EXHAUSTED", () => {
