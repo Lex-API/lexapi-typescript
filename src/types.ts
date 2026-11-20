@@ -1637,6 +1637,9 @@ export interface SemanticLegislationSearchOptions extends SemanticSearchOptions 
  *   separately charged read).
  * - `unknown` — LexAPI could not check its copy for this request; retrying
  *   the search may return the text.
+ *
+ * Open: later API versions may add values, so do not switch on it
+ * exhaustively.
  */
 export type SemanticHitTextUnavailableReason = "not_in_corpus" | "unknown" | (string & {});
 
@@ -1644,6 +1647,7 @@ export type SemanticHitTextUnavailableReason = "not_in_corpus" | "unknown" | (st
  * Whether a semantic case-law hit carries `text`, and if not, why
  * (`semanticSearch` with `includeText: true`, API 2.30.0). Not the
  * document {@link TextAvailability}: same name on the wire, other reasons.
+ * Absent on `nationalSemanticSearch` hits.
  */
 export interface SemanticHitTextAvailability {
   /**
@@ -1651,7 +1655,7 @@ export interface SemanticHitTextAvailability {
    * the head of the machine-written `summary`, not court text.
    */
   available: boolean;
-  /** Absent when `available` is true. */
+  /** Absent when `available` is true. An open string: future values are possible. */
   reason?: SemanticHitTextUnavailableReason;
 }
 
@@ -1677,8 +1681,10 @@ export interface SemanticCaseLawResult {
    */
   snippet?: string;
   /**
-   * With `includeText: true` only (API 2.30.0), on every hit: whether it
-   * carries `text`, and if not, why. Absent without `includeText`.
+   * With `includeText: true` only (API 2.30.0), on every `semanticSearch`
+   * hit: whether it carries `text`, and if not, why (`reason` is open — do
+   * not switch on it exhaustively). Absent without `includeText`, and absent
+   * on `nationalSemanticSearch` hits.
    */
   textAvailability?: SemanticHitTextAvailability;
   case_name?: string | null;

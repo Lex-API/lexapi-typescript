@@ -62,7 +62,7 @@ describe("SemanticHitTextAvailability (types)", () => {
     >();
     expectTypeOf<SemanticHitTextAvailability>().not.toEqualTypeOf<TextAvailability>();
     expectTypeOf<SemanticHitTextUnavailableReason>().not.toEqualTypeOf<TextUnavailableReason>();
-    // A national hit has the EU hit's shape, so the field is inherited.
+    // Inherited at the type level; the national route does not send it.
     expectTypeOf<NationalSemanticCaseLawResult["textAvailability"]>().toEqualTypeOf<
       SemanticHitTextAvailability | undefined
     >();

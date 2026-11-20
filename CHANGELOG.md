@@ -9,31 +9,62 @@ picks up `0.2.0` on its own.
 
 ## [0.5.0] — 2026-11-22
 
-Targets LexAPI API 3.0.0; each item names the API version it needs. Type-level changes to check
-when upgrading:
+Targets LexAPI API 3.0.0. API 2.19.0–2.30.0 were not released on their own; they are all part of
+3.0.0, and items that need a newer API name the version that introduced the feature. Works against
+API 2.18.1 as well: features of later versions are then absent (`legislationAsOf`, API 2.26.0,
+answers 404 there).
 
-- `NationalSemanticLegislationResult` fields it shares with the EU hit, previously typed `unknown`,
-  now have their types (`score?: number`, `asOfVersion?: NationalAsOfVersion`, …). Code that
-  redeclares them in an `interface … extends`, or assigns a fixture of another shape, must follow.
-- An `interface … extends` or subclass that redeclares a newly added optional member (for example
-  `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
-- `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
-  `DocumentVersionResponse` it returned before.
-- `ExportStream.truncated` is typed `boolean` (was `boolean | undefined`).
-- `PaymentPastDueError` is a subclass of `TierForbiddenError`. Where a value's type is a union
-  that includes `PaymentPastDueError`, the `false` branch of `instanceof TierForbiddenError` no
-  longer includes it. At run time, a `TierForbiddenError` branch placed before a
-  `PaymentPastDueError` branch takes failed payments too.
-- `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
-  `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares a
-  property of the same name must rename it.
+### Upgrading from 0.4.0
+
+- **Malformed 2xx answers throw.** A 2xx that is empty, not UTF-8 JSON, not an object,
+  `success: false`, or lacks `results` / `document` (or carries them in the wrong shape) throws
+  `InvalidResponseError` (before: could read as an empty result). A `success: false` that carries
+  an API error throws that error instead. Catch it; the call may have been charged.
+- **Failed payments.** A 403 `PAYMENT_PAST_DUE` (API 2.27.0) throws `PaymentPastDueError` (0.4.0:
+  base `LexAPIError`). It extends `TierForbiddenError`: an `instanceof TierForbiddenError` branch
+  now catches it (also when narrowing a union type: its `false` branch no longer includes
+  `PaymentPastDueError`), so test `PaymentPastDueError` first. Never retried.
+- **Iterators can throw.** `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` and
+  `paginateNationalDocuments` throw `InvalidResponseError` when the server stops advancing (an
+  echoed `offset` other than the one requested, a `nextCursor` already sent or not a string, or,
+  without totals, three pages in a row that repeat the one before), and `RangeError` for an
+  `offset`/`limit` that is not a valid integer, before any request. Pages already yielded stay
+  valid.
+- **Webhook verification.** The body must be a UTF-8 JSON object (`malformed_body`) and
+  `timestamp` an ISO date-time with `Z` or `±HH:MM` (`stale_timestamp`). `toleranceMs: NaN` is a
+  `RangeError` and a negative value rejects every delivery (use `0` to switch the window off).
+  LexAPI's deliveries verify as before.
+- **Export.** Lines end at `\n` and must be UTF-8, else they count in `invalidLines` (before: bad
+  bytes replaced, row yielded). `stream.truncated` is `false`, not `undefined`, when nothing says.
+- **Retries.** A `Retry-After` / `RateLimit-Reset` / `retryAfter` that is not in a documented form
+  counts as absent (normal back-off). A 429 whose top-level `code` or `error.code` is
+  `QUOTA_EXHAUSTED` is never retried, whatever other code the body carries.
+- **Redirects.** Followed only within the origin of `baseUrl` (or to the same host over HTTPS on
+  the default ports), at most five; any other throws `NetworkError`. Affects a custom `baseUrl`, a
+  proxy, or a custom `fetch` (it must honour `redirect: "manual"`).
+- **Error text.** Messages for non-JSON bodies changed, and `InvalidResponseError.body` no longer
+  holds response text (see `bodyExcerpt`). Match on `code`, not on messages.
+- **Types.**
+  - `NationalSemanticLegislationResult` typed the fields it shares with the EU hit (`id`, `score`,
+    `text`, `snippet`, `chapter`, `exact_match_law_id`, `metadata`) as `unknown`; they now have
+    their types (`score?: number`, `asOfVersion?: NationalAsOfVersion`, …). Other keys are still
+    readable as `unknown`. Code that redeclares them in an `interface … extends`, or assigns a
+    fixture of another shape, must follow.
+  - An `interface … extends` or subclass that redeclares a newly added optional member (for example
+    `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
+  - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
+    `DocumentVersionResponse` it returned before.
+  - `ExportStream.truncated` is typed `boolean` (was `boolean | undefined`).
+  - `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
+    `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares
+    a property of the same name must rename it.
 
 ### Added
 
 - **Text availability on case-law hits** (API 2.30.0): with `includeText: true`, every
   `semanticSearch` hit carries `textAvailability` (`SemanticHitTextAvailability`): `{ available: true }`
   when it carries `text`, otherwise `{ available: false, reason }` (`SemanticHitTextUnavailableReason`:
-  `not_in_corpus` or `unknown`) and the hit keeps its `snippet`. Absent without `includeText`. Not the
+  `not_in_corpus` or `unknown`; the reason is an open string) and the hit keeps its `snippet`. Absent without `includeText`. Not the
   document `TextAvailability`: the reasons differ. The SDK passes the field through as received.
 - **National `asOf` labels** (API 2.29.0): `nationalLegislationSemanticSearch` takes `asOf`
   (a `YYYY-MM-DD` string) and sends it; before, the option did not exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
@@ -79,11 +110,12 @@ when upgrading:
   `AS_OF_LOOKUP_REASONS`.
 - **`PaymentPastDueError`** (403, code `PAYMENT_PAST_DUE`, API 2.27.0): a subscription payment failed
   and was not completed in time; API requests are refused until the payment succeeds. Never
-  retried. `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
+  retried, on any status (a 429 included). `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
   the API says so. It extends `TierForbiddenError`. Before API 2.27.0 a failed
   payment was refused at once with a 403 without a code, raised as `TierForbiddenError`.
   `"PAYMENT_PAST_DUE"` is added to `ErrorCode`. Earlier SDK versions raise the base `LexAPIError`
-  for this code.
+  for this code. `TierForbiddenError`'s constructor takes an optional sixth parameter, the code
+  (`"TIER_FORBIDDEN"` by default).
 - **`NotFoundError.unknownEndpoint`**: `true` when the API (2.27.0 or later) has no such endpoint: a
   mistyped path, a method newer than the API, or a national route for a country that is not
   available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API
@@ -96,27 +128,24 @@ when upgrading:
 
 ### Changed
 
-- A `2xx` answer that is not the documented shape now throws `InvalidResponseError`; before, it
-  could be read as an empty result. This covers an empty body (also a `204`, except for
-  `webhooks.delete`), JSON that is not an object, `success: false` (when the body carries the API's
-  error envelope, that error is thrown instead; `webhooks.test` still resolves with
+- **2xx bodies are checked** (`InvalidResponseError`). A `2xx` answer that is not the documented
+  shape now throws instead of possibly being read as an empty result: an empty body (also a `204`,
+  except for `webhooks.delete`), a body of only whitespace (it returned an empty object), a body
+  that is not valid UTF-8 (before, the invalid bytes were replaced and the body was parsed), JSON
+  that is not an object, `success: false` (when the body carries the API's error envelope, that
+  error is thrown instead, keeping the `2xx` status; `webhooks.test` still resolves with
   `success: false`), and a list field that is not a list or holds items that are not objects.
   `results` is required on `search`, `semanticSearch`, `semanticLegislationSearch` and the national
   semantic searches; `document` must be an object on `getDocument`, `getDocumentByUrl`,
   `getDocumentVersion`, `getDocumentAtDate` and `getNationalDocument` (and `document.content`, when
   present, an object whose `articles` is a list of objects); on `legislationAsOf`, `document` must
-  be a non-empty string, `asOfResolved` a boolean, and `act` and `provenance` objects. Unknown extra fields are still accepted. To tell a malformed answer from an
-  empty result, catch `InvalidResponseError`; an API error carried by a `2xx` answer keeps that
-  status.
-- The message for a `2xx` body that is not JSON changed: it was, for example, `Expected a JSON body
-  (HTTP 200, content-type text/html; charset=utf-8)` and is now `Expected JSON, got text/html that
-  does not parse as JSON (1213 bytes)`. Do not match on error message text; use `code`.
-- A `2xx` body of only whitespace now throws `InvalidResponseError`; it returned an empty object.
-- A `2xx` JSON body that is not valid UTF-8 now throws `InvalidResponseError`; before, the invalid
-  bytes were replaced and the body was parsed.
-- An error body that is not valid UTF-8 is treated as not JSON: the error carries the code derived
-  from the status and the message `HTTP <status>`.
-
+  be a non-empty string, `asOfResolved` a boolean, and `act` and `provenance` objects. Unknown
+  extra fields are still accepted. To tell a malformed answer from an empty result, catch
+  `InvalidResponseError`. The message for a `2xx` body that is not JSON changed: it was, for
+  example, `Expected a JSON body (HTTP 200, content-type text/html; charset=utf-8)` and is now
+  `Expected JSON, got text/html that does not parse as JSON (1213 bytes)`; do not match on error
+  message text, use `code`. An error body that is not valid UTF-8 is treated as not JSON: the error
+  carries the code derived from the status and the message `HTTP <status>`.
 - Retry hints are read strictly (SDK contract §1.2): `Retry-After` and `RateLimit-Reset` as decimal
   seconds or, for `Retry-After`, an RFC 9110 HTTP-date (IMF-fixdate or RFC 850 ending in `GMT`,
   `UTC` or `+0000`; asctime has no zone and is read as UTC). Dates with other zone names,
@@ -134,63 +163,56 @@ when upgrading:
   once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
   A starting `offset` that is not an integer from 0, or a `limit` that is not an integer from 1, up
   to 2^53 − 1, is a `RangeError` before any request.
-- `PaymentPastDueError` extends `TierForbiddenError`: an `instanceof TierForbiddenError` check also
-  catches a failed payment, as it did for the 403 without a code that APIs before 2.27.0 send.
-  Check `PaymentPastDueError` first to tell the two apart. `TierForbiddenError`'s constructor takes
-  an optional sixth parameter, the code (`"TIER_FORBIDDEN"` by default).
-- `verifyWebhook` decodes the body as strict UTF-8 before parsing it: a body that is not valid
-  UTF-8 (an invalid or truncated sequence, an encoded surrogate, an overlong form, latin-1 text) is
-  `WebhookSignatureError("malformed_body")`, like a body that is not JSON. Before, invalid bytes
-  were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
-  at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
-  covers). The signature check is unchanged.
-- A string webhook body with a lone surrogate (it has no UTF-8 encoding) fails verification:
-  `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
-  and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, such a string
-  was signed as U+FFFD; `verifyWebhook` parsed the string with the surrogate in it.
-- `verifyWebhook` reports the first failing check, in this order: `missing_secret`,
-  `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`,
-  `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
-  `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
-- The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
-  offset, naming a date and time that exist, in years 0001–9999; anything else is
-  `stale_timestamp`. Before, any text `Date.parse` accepted was read (a lower-case `z`, RFC 2822
-  dates). The distance from now is compared in whole microseconds (fraction digits past the sixth
-  are cut), and a delivery exactly at the edge of the window passes.
-- `toleranceMs: NaN` is a `RangeError`, and a negative `toleranceMs` rejects every delivery as
-  `stale_timestamp`. Before, both turned the replay check off. `0` still turns it off.
-- A webhook secret with a lone surrogate (it has no UTF-8 encoding) is
-  `WebhookSignatureError("missing_secret")` in every helper. Before, it was used with each surrogate
-  replaced by U+FFFD.
-- The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order mark,
-  a no-break space) fails. Hex digits in either case are accepted, as before.
-- Export lines end at a line feed byte only and are decoded as strict UTF-8, whatever charset the
-  response names: a line that is not UTF-8 is counted in `invalidLines` and the next line is read
-  intact. Before, invalid bytes were replaced with U+FFFD and the line was parsed. Lines are trimmed
-  of spaces, tabs and CR only (before: all Unicode whitespace); one byte order mark at the very start
-  of the stream is ignored, and one anywhere else makes its line invalid.
-- Export: `meta` is set only from the very first line of the stream; a `_meta` line after it is
-  skipped and not counted, also when it carries `_done` or `_error` (before, such a line was read as
-  the trailer). When `_meta` or `_done` holds an object, the fields are read from that object only
-  (before, keys beside it on the line were read too and won); the flat `{"_meta": true, ...}` form is
-  still read from the line. `X-Export-Truncated` counts only as `1` or `0`; any other value is
-  absent and `_meta.truncated` decides (before, it read as `false`). `stream.truncated` is `false` when neither the trailer, the header nor
-  `_meta` says (before: `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read
-  like `Uint8Array`; a chunk that is not bytes ends the stream with `NetworkError` and releases the
-  connection.
+- **Webhook verification** (`verifyWebhook`, `verifySignature`, `computeSignature`):
+  - The body is decoded as strict UTF-8 before parsing: a body that is not valid UTF-8 (an invalid
+    or truncated sequence, an encoded surrogate, an overlong form, latin-1 text) is
+    `WebhookSignatureError("malformed_body")`, like a body that is not JSON. Before, invalid bytes
+    were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
+    at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
+    covers). The signature check is unchanged.
+  - A string body with a lone surrogate (it has no UTF-8 encoding) fails verification:
+    `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
+    and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, such a string
+    was signed as U+FFFD; `verifyWebhook` parsed the string with the surrogate in it.
+  - `verifyWebhook` reports the first failing check, in this order: `missing_secret`,
+    `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`,
+    `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
+    `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
+  - The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
+    offset, naming a date and time that exist, in years 0001–9999; anything else is
+    `stale_timestamp`. Before, any text `Date.parse` accepted was read (a lower-case `z`, RFC 2822
+    dates). The distance from now is compared in whole microseconds (fraction digits past the sixth
+    are cut), and a delivery exactly at the edge of the window passes.
+  - `toleranceMs: NaN` is a `RangeError`, and a negative `toleranceMs` rejects every delivery as
+    `stale_timestamp`. Before, both turned the replay check off. `0` still turns it off.
+  - A secret with a lone surrogate (it has no UTF-8 encoding) is
+    `WebhookSignatureError("missing_secret")` in every helper. Before, it was used with each
+    surrogate replaced by U+FFFD.
+  - The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order
+    mark, a no-break space) fails. Hex digits in either case are accepted, as before.
+- **Export lines and envelope.** Lines end at a line feed byte only and are decoded as strict
+  UTF-8, whatever charset the response names: a line that is not UTF-8 is counted in
+  `invalidLines` and the next line is read intact. Before, invalid bytes were replaced with U+FFFD
+  and the line was parsed. Lines are trimmed of spaces, tabs and CR only (before: all Unicode
+  whitespace); one byte order mark at the very start of the stream is ignored, and one anywhere else
+  makes its line invalid. `meta` is set only from the very first line of the stream; a `_meta` line
+  after it is skipped and not counted, also when it carries `_done` or `_error` (before, such a line
+  was read as the trailer). When `_meta` or `_done` holds an object, the fields are read from that
+  object only (before, keys beside it on the line were read too and won); the flat
+  `{"_meta": true, ...}` form is still read from the line. `X-Export-Truncated` counts only as `1`
+  or `0`; any other value is absent and `_meta.truncated` decides (before, it read as `false`).
+  `stream.truncated` is `false` when neither the trailer, the header nor `_meta` says (before:
+  `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read like `Uint8Array`; a
+  chunk that is not bytes ends the stream with `NetworkError` and releases the connection.
 - A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
   (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries. The
   shape test for servers before API 2.4.0 (`usage.resetsAt`, no wait) applies only to a 429 whose
   code is `RATE_LIMITED`; a 429 with another code is retried as before. Off a 429, the code
   `QUOTA_EXHAUSTED` no longer drops a `Retry-After` wait: `retryAfter` keeps it and the retry waits
   it.
-- A `PAYMENT_PAST_DUE` answer is never retried, on any status (a 429 included).
 
 ### Fixed
 
-- `NationalSemanticLegislationResult` typed the fields it shares with the EU hit (`id`, `score`,
-  `text`, `snippet`, `chapter`, `exact_match_law_id`, `metadata`) as `unknown`; they now have their
-  types. Other keys are still readable as `unknown`.
 - `InvalidResponseError` no longer carries the response text on `body`, where `console.log(err)`
   and `JSON.stringify(err)` printed it. The excerpt is on `bodyExcerpt`; for JSON of the wrong shape
   the parsed value is on `body`, read through a getter and not an own property of the error. The
@@ -615,5 +637,4 @@ search and document endpoints, citations, semantic search (incl. HyDE), webhooks
 point-in-time versions.
 
 [0.5.0]: https://www.npmjs.com/package/@lexapi/client/v/0.5.0
-[0.2.0]: https://github.com/Lex-API/lexapi-typescript/compare/583b501...v0.2.0
 [0.1.0]: https://www.npmjs.com/package/@lexapi/client/v/0.1.0

@@ -60,7 +60,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:dist": "node scripts/smoke-dist.mjs && node scripts/smoke-dist.cjs",
-    "prepublishOnly": "npm run lint && npm test && npm run build && npm run smoke:dist"
+    "check:readme": "node scripts/check-readme-types.mjs",
+    "prepublishOnly": "npm run lint && npm test && npm run build && npm run smoke:dist && npm run check:readme"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
