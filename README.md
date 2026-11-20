@@ -10,7 +10,7 @@ Official TypeScript SDK for [LexAPI](https://lex-api.com/?ref=npm-sdk) — Europ
 npm install @lexapi/client
 ```
 
-Node ≥ 18 (native `fetch`); the built package is also smoke-tested on Bun and Deno in CI. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
+Version 0.5.0 targets LexAPI API 3.0.0. Node ≥ 18 (native `fetch`); the built package is also smoke-tested on Bun and Deno in CI. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
 
 ## Quickstart
 
@@ -115,6 +115,14 @@ const cases = await client.semanticSearch({
   includeText: true,  // full text per hit instead of the default ~600-char `snippet`
 });
 if (cases.hint) console.warn(cases.hint); // present only on low-confidence result sets
+for (const hit of cases.results) {
+  // With includeText (API 2.30.0): { available: true } or { available: false, reason }
+  const celex = hit.metadata?.celex_id;
+  if (hit.textAvailability?.available === false && celex) {
+    console.log(hit.textAvailability.reason, hit.snippet); // the snippet is not court text
+    const { document } = await client.getDocument({ celexNumber: celex }); // read the document itself
+  }
+}
 
 // HyDE query rewriting — 15 credits instead of 5, ~1-3 s extra latency.
 // Best-effort: on LLM failure the response reports hyde: false and the premium is refunded.
@@ -134,6 +142,8 @@ for (const hit of articles.results) {
 ```
 
 Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
+
+With `includeText: true`, every case-law hit carries `textAvailability` (API 2.30.0). A hit whose text LexAPI does not hold carries `{ available: false, reason: "not_in_corpus" }` (or `"unknown"` when LexAPI could not check; a retry may return the text) and keeps its `snippet`; `getDocument` with `metadata.celex_id` reads the document. A case-law `snippet` is cut from the machine-written `summary` when the hit has one, with or without `includeText`: it is not court text. The reason is an open string (do not switch on it exhaustively), and these reasons are not the ones a document's `textAvailability` uses. National hits do not carry `textAvailability`.
 
 EU legislation hits, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl` and `getDocumentMetadata` carry the in-force label of the act when its status is known (API 2.19.0): `inForce` (today, UTC), with `notInForceReason`, `endOfValidity` or `entryIntoForce`; all absent when unknown. `semanticLegislationSearch({ inForce: true })` keeps only hits known to be in force today and reports what it removed in `inForceFilter`. Documents, snapshots and EU semantic hits also carry `provenance` and `fieldProvenance` (API 2.20.0).
 
@@ -380,7 +390,7 @@ for await (const page of client.webhooks.paginateDeliveries(created.webhook.id))
 await client.webhooks.delete(created.webhook.id);
 ```
 
-Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are never retried on 5xx.
+Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are retried only on a 429 that is neither an exhausted quota nor a failed payment, or when the request never reached the API (connect failure, Cloudflare 521/522/523).
 
 ### Receiving deliveries
 
@@ -424,7 +434,7 @@ const stream = await client.export({ documentTypeCode: "regulation", dateFrom: "
 console.log(stream.meta?.totalMatching, stream.headers.total); // leading _meta envelope / X-Export-Total
 
 for await (const row of stream) {
-  process(row.celex, row.documentTypeCode, row.parsedContent);
+  handleRow(row.celex, row.documentTypeCode, row.parsedContent);
 }
 
 console.log(stream.done?.written, stream.done?.skippedStubs);
@@ -481,6 +491,8 @@ On the four national document/semantic endpoints, `headers.nationalAllowance` (`
 ## Configuration
 
 ```ts
+import { LexAPI } from "@lexapi/client";
+
 const client = new LexAPI({
   apiKey: "lex_...",                     // or LEXAPI_API_KEY env var
   baseUrl: "https://lex-api.com/api/v1", // default
@@ -595,6 +607,7 @@ npm run lint        # tsc --noEmit (strict)
 npm test            # vitest (Node ≥ 20)
 npm run build       # tsup -> dist/ (ESM + CJS + d.ts / d.cts)
 npm run smoke:dist  # framework-free check of the built bundles (runs on Node 18+)
+npm run check:readme # type-check this README's TypeScript examples against dist/
 ```
 
 See [docs/sdk-contract.md](https://github.com/Lex-API/lexapi-typescript/blob/main/docs/sdk-contract.md) for the SDK contract. Docs: <https://lex-api.com/docs?ref=npm-sdk>

@@ -1627,6 +1627,38 @@ export interface SemanticLegislationSearchOptions extends SemanticSearchOptions 
   inForce?: boolean;
 }
 
+/**
+ * Why a semantic case-law hit carries no `text` (API 2.30.0). Not the
+ * document reasons ({@link TextUnavailableReason}): a hit never carries
+ * those, and a document never carries `not_in_corpus`.
+ *
+ * - `not_in_corpus` — LexAPI does not hold the text of this document in the
+ *   hit's language. `getDocument` with `metadata.celex_id` reads it (a
+ *   separately charged read).
+ * - `unknown` — LexAPI could not check its copy for this request; retrying
+ *   the search may return the text.
+ *
+ * Open: later API versions may add values, so do not switch on it
+ * exhaustively.
+ */
+export type SemanticHitTextUnavailableReason = "not_in_corpus" | "unknown" | (string & {});
+
+/**
+ * Whether a semantic case-law hit carries `text`, and if not, why
+ * (`semanticSearch` with `includeText: true`, API 2.30.0). Not the
+ * document {@link TextAvailability}: same name on the wire, other reasons.
+ * Absent on `nationalSemanticSearch` hits.
+ */
+export interface SemanticHitTextAvailability {
+  /**
+   * `true`: the hit carries `text`. `false`: it carries `snippet` instead —
+   * the head of the machine-written `summary`, not court text.
+   */
+  available: boolean;
+  /** Absent when `available` is true. An open string: future values are possible. */
+  reason?: SemanticHitTextUnavailableReason;
+}
+
 /** Single case-law match from `/search/semantic`. */
 export interface SemanticCaseLawResult {
   /**
@@ -1637,10 +1669,24 @@ export interface SemanticCaseLawResult {
   case_id?: string | null;
   /** Cosine similarity, 0–1. */
   score?: number;
-  /** Full matched-document text — present ONLY with `includeText: true`. */
+  /**
+   * Full matched-document text — present ONLY with `includeText: true`, on
+   * hits that have it (`textAvailability.available: true`). A blank `text`
+   * from the index is passed through and counts as no text.
+   */
   text?: string;
-  /** ~600-character preview — present by default (replaced by `text` with `includeText`). */
+  /**
+   * ~600-character preview — present by default. With `includeText: true`,
+   * present only on hits without text (API 2.30.0).
+   */
   snippet?: string;
+  /**
+   * With `includeText: true` only (API 2.30.0), on every `semanticSearch`
+   * hit: whether it carries `text`, and if not, why (`reason` is open — do
+   * not switch on it exhaustively). Absent without `includeText`, and absent
+   * on `nationalSemanticSearch` hits.
+   */
+  textAvailability?: SemanticHitTextAvailability;
   case_name?: string | null;
   case_number?: string | null;
   ecli?: string | null;

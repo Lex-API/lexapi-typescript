@@ -175,6 +175,8 @@ export type {
   SemanticCaseLawSearchOptions,
   SemanticLegislationSearchOptions,
   SemanticCaseLawResult,
+  SemanticHitTextAvailability,
+  SemanticHitTextUnavailableReason,
   SemanticUsageInfo,
   SemanticCaseLawSearchResponse,
   AsOfReason,
