@@ -18,18 +18,20 @@ answers 404 there).
 
 - **Malformed 2xx answers throw.** A 2xx that is empty, not UTF-8 JSON, not an object,
   `success: false`, or lacks `results` / `document` (or carries them in the wrong shape) throws
-  `InvalidResponseError` (before: could read as an empty result). A `success: false` that carries
+  `InvalidResponseError` (before: could read as an empty result), except an empty `webhooks.delete`
+  answer and `webhooks.test`'s `success: false`, which still resolve. A `success: false` that carries
   an API error throws that error instead. Catch it; the call may have been charged.
 - **Failed payments.** A 403 `PAYMENT_PAST_DUE` (API 2.27.0) throws `PaymentPastDueError` (0.4.0:
   base `LexAPIError`). It extends `TierForbiddenError`: an `instanceof TierForbiddenError` branch
   now catches it (also when narrowing a union type: its `false` branch no longer includes
   `PaymentPastDueError`), so test `PaymentPastDueError` first. Never retried.
-- **Iterators can throw.** `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` and
-  `paginateNationalDocuments` throw `InvalidResponseError` when the server stops advancing (an
-  echoed `offset` other than the one requested, a `nextCursor` already sent or not a string, or,
-  without totals, three pages in a row that repeat the one before), and `RangeError` for an
-  `offset`/`limit` that is not a valid integer, before any request. Pages already yielded stay
-  valid.
+- **Iterators can throw** `InvalidResponseError` when the server stops advancing:
+  `paginateCites` / `paginateCitedBy` on a page echoing an `offset` other than the one requested,
+  or, when the answers carry neither `totalEdges` nor `offset`, three pages in a row with the same
+  list; `webhooks.paginateDeliveries`, when the answers carry no `total`, after three pages in a
+  row with no unseen delivery `id`; `paginateNationalDocuments` on a `nextCursor` already sent, or
+  not a string. Every iterator throws `RangeError` for an `offset` that is not an integer ≥ 0 or a
+  `limit` that is not an integer ≥ 1, before any request. Pages already yielded stay valid.
 - **Webhook verification.** The body must be a UTF-8 JSON object (`malformed_body`) and
   `timestamp` an ISO date-time with `Z` or `±HH:MM` (`stale_timestamp`). `toleranceMs: NaN` is a
   `RangeError` and a negative value rejects every delivery (use `0` to switch the window off).

@@ -390,7 +390,7 @@ for await (const page of client.webhooks.paginateDeliveries(created.webhook.id))
 await client.webhooks.delete(created.webhook.id);
 ```
 
-Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are retried only on a 429 that is not an exhausted quota, or when the request never reached the API (connect failure, Cloudflare 521/522/523).
+Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are retried only on a 429 that is neither an exhausted quota nor a failed payment, or when the request never reached the API (connect failure, Cloudflare 521/522/523).
 
 ### Receiving deliveries
 
@@ -491,6 +491,8 @@ On the four national document/semantic endpoints, `headers.nationalAllowance` (`
 ## Configuration
 
 ```ts
+import { LexAPI } from "@lexapi/client";
+
 const client = new LexAPI({
   apiKey: "lex_...",                     // or LEXAPI_API_KEY env var
   baseUrl: "https://lex-api.com/api/v1", // default
