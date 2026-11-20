@@ -115,6 +115,10 @@ const cases = await client.semanticSearch({
   includeText: true,  // full text per hit instead of the default ~600-char `snippet`
 });
 if (cases.hint) console.warn(cases.hint); // present only on low-confidence result sets
+for (const hit of cases.results) {
+  // With includeText (API 2.30.0): { available: true } or { available: false, reason }
+  if (hit.textAvailability?.available === false) console.log(hit.textAvailability.reason, hit.snippet);
+}
 
 // HyDE query rewriting — 15 credits instead of 5, ~1-3 s extra latency.
 // Best-effort: on LLM failure the response reports hyde: false and the premium is refunded.
@@ -134,6 +138,8 @@ for (const hit of articles.results) {
 ```
 
 Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
+
+With `includeText: true`, every case-law hit carries `textAvailability` (API 2.30.0). A hit whose text LexAPI does not hold carries `{ available: false, reason: "not_in_corpus" }` (or `"unknown"` when LexAPI could not check; a retry may return the text) and keeps its `snippet`, which is then the head of the machine-written `summary`, not court text; `getDocument({ celexNumber: hit.metadata.celex_id })` reads the document. These reasons are not the ones a document's `textAvailability` uses.
 
 EU legislation hits, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl` and `getDocumentMetadata` carry the in-force label of the act when its status is known (API 2.19.0): `inForce` (today, UTC), with `notInForceReason`, `endOfValidity` or `entryIntoForce`; all absent when unknown. `semanticLegislationSearch({ inForce: true })` keeps only hits known to be in force today and reports what it removed in `inForceFilter`. Documents, snapshots and EU semantic hits also carry `provenance` and `fieldProvenance` (API 2.20.0).
 

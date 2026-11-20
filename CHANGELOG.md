@@ -7,7 +7,10 @@ picks up `0.2.0` on its own.
 
 ## [Unreleased]
 
-Type-level changes to check when upgrading:
+## [0.5.0] — 2026-11-22
+
+Targets LexAPI API 3.0.0; each item names the API version it needs. Type-level changes to check
+when upgrading:
 
 - `NationalSemanticLegislationResult` fields it shares with the EU hit, previously typed `unknown`,
   now have their types (`score?: number`, `asOfVersion?: NationalAsOfVersion`, …). Code that
@@ -27,6 +30,11 @@ Type-level changes to check when upgrading:
 
 ### Added
 
+- **Text availability on case-law hits** (API 2.30.0): with `includeText: true`, every
+  `semanticSearch` hit carries `textAvailability` (`SemanticHitTextAvailability`): `{ available: true }`
+  when it carries `text`, otherwise `{ available: false, reason }` (`SemanticHitTextUnavailableReason`:
+  `not_in_corpus` or `unknown`) and the hit keeps its `snippet`. Absent without `includeText`. Not the
+  document `TextAvailability`: the reasons differ. The SDK passes the field through as received.
 - **National `asOf` labels** (API 2.29.0): `nationalLegislationSemanticSearch` takes `asOf`
   (a `YYYY-MM-DD` string) and sends it; before, the option did not exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
   `NATIONAL_AS_OF_REASONS`) and, when resolved, `asOfVersion: NationalAsOfVersion`
@@ -606,5 +614,6 @@ Initial release: request core (auth, retries with `Retry-After`, typed errors, c
 search and document endpoints, citations, semantic search (incl. HyDE), webhooks, NDJSON export,
 point-in-time versions.
 
+[0.5.0]: https://www.npmjs.com/package/@lexapi/client/v/0.5.0
 [0.2.0]: https://github.com/Lex-API/lexapi-typescript/compare/583b501...v0.2.0
 [0.1.0]: https://www.npmjs.com/package/@lexapi/client/v/0.1.0
