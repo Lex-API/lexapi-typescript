@@ -1,5 +1,7 @@
 import { describe, expectTypeOf, it } from "vitest";
 
+import { isNationalAsOfVersion } from "../src/index.js";
+
 import type {
   AsOfReason,
   Document,
@@ -51,7 +53,7 @@ describe("public types", () => {
   });
 });
 
-describe("review S7", () => {
+describe("getRecentDocuments documentType", () => {
   it("getRecentDocuments takes a single documentType (the endpoint has no multi-type fan-out)", () => {
     expectTypeOf<import("../src/index.js").RecentDocumentsParams["documentType"]>().toEqualTypeOf<
       import("../src/index.js").DocumentType | undefined
@@ -59,7 +61,7 @@ describe("review S7", () => {
   });
 });
 
-describe("round 2 — R1", () => {
+describe("getRecentDocuments subdomain", () => {
   it("getRecentDocuments takes a single subdomain (EUR-Lex reads only the first DTS_SUBDOM)", () => {
     expectTypeOf<import("../src/index.js").RecentDocumentsParams["subdomain"]>().toEqualTypeOf<
       import("../src/index.js").Subdomain | undefined
@@ -111,5 +113,88 @@ describe("citation graph types (API 2.10.0–2.13.0)", () => {
   it("national content carries textSource / ocr (API 2.9.0)", () => {
     expectTypeOf<NationalDocumentContent["ocr"]>().toEqualTypeOf<import("../src/index.js").NationalOcrInfo | null>();
     expectTypeOf<"pdf-text">().toMatchTypeOf<NonNullable<NationalDocumentContent["textSource"]>>();
+  });
+});
+
+describe("API 2.19.0–2.29.0 additions", () => {
+  type T = typeof import("../src/index.js");
+  type I = import("../src/index.js").InForceLabel;
+  type AsOfVersion = import("../src/index.js").AsOfVersion;
+  type NationalAsOfVersion = import("../src/index.js").NationalAsOfVersion;
+  type NationalAsOfReason = import("../src/index.js").NationalAsOfReason;
+
+  it("national hits carry the national asOfVersion, EU hits the EU one", () => {
+    expectTypeOf<NationalSemanticLegislationResult["asOfVersion"]>().toEqualTypeOf<NationalAsOfVersion | undefined>();
+    expectTypeOf<import("../src/index.js").SemanticLegislationResult["asOfVersion"]>().toEqualTypeOf<AsOfVersion | undefined>();
+    expectTypeOf<NationalAsOfVersion["kind"]>().toEqualTypeOf<"current_unit">();
+    expectTypeOf<NationalAsOfVersion["validFrom"]>().toEqualTypeOf<string>();
+    expectTypeOf<NationalAsOfVersion["validTo"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<NationalAsOfVersion["checkedAt"]>().toEqualTypeOf<string | null>();
+    // `kind` tells them apart (isNationalAsOfVersion checks `kind === "current_unit"`).
+    const describeVersion = (v: AsOfVersion | NationalAsOfVersion): string => {
+      if (isNationalAsOfVersion(v)) {
+        expectTypeOf(v).toEqualTypeOf<NationalAsOfVersion>();
+        return v.validFrom ?? "";
+      }
+      expectTypeOf(v).toEqualTypeOf<AsOfVersion>();
+      return v.celex ?? "";
+    };
+    expectTypeOf(describeVersion).returns.toBeString();
+  });
+
+  it("the national reason union is open and has a runtime list", () => {
+    expectTypeOf<NationalSemanticLegislationResult["asOfReason"]>().toEqualTypeOf<NationalAsOfReason | undefined>();
+    expectTypeOf<"provision_amended_since">().toMatchTypeOf<NationalAsOfReason>();
+    expectTypeOf<"asof_not_available">().toMatchTypeOf<NationalAsOfReason>();
+    // A value a later API adds still type-checks.
+    expectTypeOf<"a_future_reason">().toMatchTypeOf<NationalAsOfReason>();
+    expectTypeOf<T["NATIONAL_AS_OF_REASONS"][number]>().toMatchTypeOf<NationalAsOfReason>();
+    expectTypeOf<T["AS_OF_REASONS"][number]>().toMatchTypeOf<AsOfReason>();
+    expectTypeOf<"amendment_not_consolidated">().toMatchTypeOf<T["AS_OF_REASONS"][number]>();
+    expectTypeOf<"a_future_reason">().toMatchTypeOf<AsOfReason>();
+  });
+
+  it("national asOf takes a YYYY-MM-DD string; EU legislation search takes inForce", () => {
+    expectTypeOf<import("../src/index.js").NationalSemanticLegislationOptions["asOf"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<import("../src/index.js").NationalSemanticCaseLawOptions>().not.toHaveProperty("asOf");
+    expectTypeOf<SemanticLegislationSearchOptions["inForce"]>().toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<import("../src/index.js").NationalSemanticLegislationResponse["asOfSummary"]>().toEqualTypeOf<
+      { liveFetches: number; unresolved: number } | undefined
+    >();
+  });
+
+  it("models the snapshot timing fields", () => {
+    type At = import("../src/index.js").DocumentAtDateResponse;
+    expectTypeOf<import("../src/index.js").VersionEntry["observedFrom"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<At["document"]["observedUntil"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<At["document"]["observedFrom"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<"observation_snapshot">().toMatchTypeOf<NonNullable<At["kind"]>>();
+    expectTypeOf<At["dateInFuture"]>().toEqualTypeOf<boolean | undefined>();
+    expectTypeOf<ReturnType<LexAPI["getDocumentAtDate"]>>().toEqualTypeOf<Promise<At>>();
+    // Still a DocumentVersionResponse for code written against 0.4.0.
+    expectTypeOf<At>().toMatchTypeOf<import("../src/index.js").DocumentVersionResponse>();
+  });
+
+  it("types the not-found details", () => {
+    type E = import("../src/index.js").NotFoundError;
+    expectTypeOf<E["reason"]>().toEqualTypeOf<import("../src/index.js").NotFoundReason | undefined>();
+    expectTypeOf<E["beforeTracking"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<E["boundaryUnknown"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<E["trackedSince"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<E["candidates"]>().toEqualTypeOf<import("../src/index.js").SnapshotCandidate[]>();
+    expectTypeOf<import("../src/index.js").SnapshotCandidate["fetchedAt"]>().toEqualTypeOf<string | null>();
+    expectTypeOf<E["inForceLookup"]>().toEqualTypeOf<import("../src/index.js").InForceLookup | undefined>();
+    expectTypeOf<E["candidatesTruncated"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<import("../src/index.js").SnapshotCandidate["observedFrom"]>().toEqualTypeOf<string | null>();
+  });
+
+  it("in-force label and provenance on documents and EU legislation hits", () => {
+    type Hit = import("../src/index.js").SemanticLegislationSearchResponse["results"][number];
+    expectTypeOf<Document>().toMatchTypeOf<I>();
+    expectTypeOf<Hit>().toMatchTypeOf<I>();
+    expectTypeOf<Hit>().toMatchTypeOf<import("../src/index.js").SemanticLegislationResult>();
+    expectTypeOf<Document["provenance"]>().toEqualTypeOf<import("../src/index.js").Provenance | undefined>();
+    expectTypeOf<"not_yet_in_force">().toMatchTypeOf<NonNullable<I["notInForceReason"]>>();
+    expectTypeOf<NationalSemanticLegislationResult["score"]>().toEqualTypeOf<number | undefined>();
   });
 });

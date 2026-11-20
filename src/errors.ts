@@ -10,6 +10,8 @@
  */
 
 import type { RateLimitInfo, ResponseHeaders } from "./headers.js";
+import { bodySeconds, normalizeRetryAfterSeconds, retryAfterHeaderSeconds } from "./retryHints.js";
+import type { InForceLookup, NotFoundReason, SnapshotCandidate } from "./types.js";
 
 /** Stable error codes from the OpenAPI `ErrorResponse.error.code` enum. */
 export type ErrorCode =
@@ -18,16 +20,20 @@ export type ErrorCode =
   | "INVALID_URL"
   | "INVALID_PARAMS"
   | "RATE_LIMITED"
-  // 429 on a legacy daily-call plan: the quota is used up (lex-api #304).
+  // 429 on a legacy daily-call plan: the quota is used up (API 2.4.0).
   | "QUOTA_EXHAUSTED"
   | "TIER_FORBIDDEN"
+  // 403 — a subscription payment failed and was not completed in time
+  // (API 2.27.0; legacy shape, top-level `accessEndedAt` / `billingUrl`) —
+  // `PaymentPastDueError`.
+  | "PAYMENT_PAST_DUE"
   | "CREDITS_EXHAUSTED"
   | "UPSTREAM_ERROR"
   | "TIMEOUT"
   | "INTERNAL"
   // Derived (not in the envelope enum): 401 has no typed code in the spec.
   | "UNAUTHORIZED"
-  // Derived: 503 (deploy drain / temporary unavailability) has no typed code.
+  // Derived: 503 (temporary unavailability) has no typed code.
   | "SERVICE_UNAVAILABLE"
   // SDK-side (SDK contract §1.3): transport failure — `NetworkError`.
   | "CONNECTION_ERROR"
@@ -36,7 +42,7 @@ export type ErrorCode =
   | "REQUEST_TIMEOUT"
   // SDK-side: the caller's AbortSignal fired — `RequestAbortedError`.
   | "ABORTED"
-  // SDK-side: a 2xx whose non-empty body is not JSON — `InvalidResponseError`.
+  // SDK-side: a 2xx that is not the documented shape — `InvalidResponseError`.
   | "INVALID_RESPONSE"
   // SDK-side: an export ended without its `_done` trailer — `IncompleteExportError`.
   | "INCOMPLETE_EXPORT"
@@ -91,6 +97,12 @@ export interface LexAPIErrorContext {
   body?: unknown;
   /** Parsed response headers (rate limits, source, …). */
   headers?: ResponseHeaders;
+  /**
+   * For a body that is not JSON, its first 200 characters (code points). Raw
+   * response text; may contain document text; do not show to a model or log
+   * by default.
+   */
+  bodyExcerpt?: string;
 }
 
 /**
@@ -99,6 +111,18 @@ export interface LexAPIErrorContext {
  * Holds the error's class kinds, most specific first.
  */
 const ERROR_KINDS = Symbol.for("@lexapi/client.errorKinds");
+
+/**
+ * Response text kept off the error objects themselves: an error's
+ * `bodyExcerpt`, and the parsed `body` of an `InvalidResponseError`. Read and
+ * written through prototype accessors, so neither is an own property of the
+ * error: `console.log` (also with `%o`), `util.inspect` with `showHidden` or
+ * with `getters`, `JSON.stringify`, spread and `structuredClone` leave them
+ * out. `util.inspect` with `showHidden` and `getters` together does call the
+ * getters and shows them.
+ */
+const EXCERPTS = new WeakMap<object, string>();
+const INVALID_BODIES = new WeakMap<object, unknown>();
 
 function collectKinds(ctor: unknown): string[] {
   const kinds: string[] = [];
@@ -146,8 +170,8 @@ export class LexAPIError extends Error {
    * Seconds to wait before retrying, when the server said so (429; also the
    * 503 of an incomplete national semantic search).
    * Sourced from the `Retry-After` response HEADER first; the JSON
-   * `retryAfter` body field is only a fallback because it historically
-   * carried buggy epoch-seconds values (epoch-looking values are
+   * `retryAfter` body field is only a fallback because it can carry
+   * epoch-seconds values (epoch-looking values are
    * normalized to a delta).
    */
   readonly retryAfter: number | undefined;
@@ -176,18 +200,40 @@ export class LexAPIError extends Error {
     this.retryAfter = retryAfter;
     this.body = context?.body;
     this.headers = context?.headers;
+    if (context?.bodyExcerpt !== undefined) EXCERPTS.set(this, context.bodyExcerpt);
     Object.defineProperty(this, ERROR_KINDS, { value: collectKinds(new.target), enumerable: false });
+  }
+
+  /**
+   * For a response body that is not JSON, its first 200 characters (code
+   * points); `undefined` otherwise. Raw response text; may contain document
+   * text; do not show to a model or log by default. Not an own property of
+   * the error, so `console.log` (also with `%o`), `util.inspect` with
+   * `showHidden` or with `getters`, `JSON.stringify`, spread and
+   * `structuredClone` leave it out (`util.inspect` with `showHidden` and
+   * `getters` together shows it); never part of `message`. Assigning to it
+   * replaces it (`undefined` clears it).
+   */
+  get bodyExcerpt(): string | undefined {
+    return EXCERPTS.get(this);
+  }
+
+  set bodyExcerpt(value: string | undefined) {
+    if (value === undefined) EXCERPTS.delete(this);
+    else EXCERPTS.set(this, value);
   }
 
   /**
    * Build the most specific error subclass for a non-2xx response.
    * Accepts both the typed envelope and the legacy bare `{error, message}` shape.
+   * `code` and `message` are read only when they are non-empty strings.
    */
   static fromResponse(
     status: number,
     body: unknown,
     headerRetryAfter?: number,
     headers?: ResponseHeaders,
+    bodyExcerpt?: string,
   ): LexAPIError {
     // SDK contract §1.3: unmapped statuses are INTERNAL.
     const statusCode = STATUS_TO_CODE[status];
@@ -201,43 +247,42 @@ export class LexAPIError extends Error {
     if (typeof body === "object" && body !== null) {
       const record = body as Record<string, unknown>;
       const err = record["error"];
-      if (typeof err === "object" && err !== null) {
+      const topCode = nonEmptyString(record["code"]);
+      const topMessage = nonEmptyString(record["message"]);
+      if (typeof err === "object" && err !== null && !Array.isArray(err)) {
         // Typed envelope: {success: false, error: {code, message, details}}
         const e = err as Record<string, unknown>;
-        if (typeof e["code"] === "string") {
-          code = e["code"];
+        const typed = nonEmptyString(e["code"]);
+        if (typed !== undefined) {
+          code = typed;
           typedCode = true;
         }
-        if (typeof e["message"] === "string") message = e["message"];
+        message = nonEmptyString(e["message"]) ?? message;
         details = e["details"];
-      } else if (typeof err === "string") {
+      } else if (typeof err === "string" && err !== "") {
         // Legacy bare {error: "<text>", message?, details?}: the string is
         // HUMAN TEXT, never a code (even when it looks like a slug). The code
-        // is the top-level string `code` when present (lex-api #304), else
+        // is the top-level string `code` when present (API 2.4.0), else
         // the status. `details` (validation lists) is kept.
-        if (typeof record["code"] === "string" && record["code"] !== "") {
-          code = record["code"];
+        if (topCode !== undefined) {
+          code = topCode;
           typedCode = true;
         }
-        message =
-          typeof record["message"] === "string" && record["message"] !== err
-            ? `${err}: ${record["message"]}`
-            : err;
+        message = topMessage !== undefined && topMessage !== err ? `${err}: ${topMessage}` : err;
         details = record["details"];
       } else {
         // No `error` member ({message, details}): keep both when present.
-        if (typeof record["code"] === "string" && record["code"] !== "") {
-          code = record["code"];
+        if (topCode !== undefined) {
+          code = topCode;
           typedCode = true;
         }
-        if (typeof record["message"] === "string") message = record["message"];
+        message = topMessage ?? message;
         details = record["details"];
       }
       // JSON retryAfter fallback — only on a 429 or an incomplete national
       // semantic search 503, and only when the header didn't provide one.
       if (retryAfter === undefined && (status === 429 || (status === 503 && code === "NATIONAL_SEMANTIC_UNAVAILABLE"))) {
-        const jsonRetryAfter = readNumber(record["retryAfter"]) ?? readNumber(detailsField(details, "retryAfter"));
-        if (jsonRetryAfter !== undefined) retryAfter = normalizeRetryAfterSeconds(jsonRetryAfter);
+        retryAfter = bodyWait(record, details);
       }
       // resetsAt for CREDITS_EXHAUSTED: spec puts it in error.details; some
       // envelopes also carry a top-level usage.resetsAt.
@@ -246,21 +291,32 @@ export class LexAPIError extends Error {
         readString(usageField(record, "resetsAt"));
     }
 
-    const context: LexAPIErrorContext = { body, ...(headers ? { headers } : {}) };
+    const context: LexAPIErrorContext = {
+      body,
+      ...(headers ? { headers } : {}),
+      ...(bodyExcerpt !== undefined ? { bodyExcerpt } : {}),
+    };
     // An unmapped client status (409, 413, …) keeps code INTERNAL per the
     // contract but is not presented as a server failure: base class.
     if (!typedCode && statusCode === undefined && status < 500) {
       return new LexAPIError(code, message, status, details, retryAfter, context);
     }
-    // §1.2: a quota-exhausted 429 exposes no retry-after value.
-    if (code === "QUOTA_EXHAUSTED" || (code === "RATE_LIMITED" && isQuota429(body, headers))) {
+    // §1.2: a quota 429 exposes no retry-after value. On a 429 the code
+    // QUOTA_EXHAUSTED, top-level or in the typed envelope, wins over any
+    // other code the body carries. Off a 429 the code changes neither the
+    // wait nor the retry-after value.
+    if (
+      code === "QUOTA_EXHAUSTED" ||
+      (status === 429 && hasQuotaCode(body)) ||
+      (status === 429 && code === "RATE_LIMITED" && isQuota429(body, headers))
+    ) {
       return new RateLimitedError(
         message,
         status,
         details,
-        undefined,
+        status === 429 ? undefined : retryAfter,
         context,
-        code === "QUOTA_EXHAUSTED" ? "QUOTA_EXHAUSTED" : "RATE_LIMITED",
+        code === "RATE_LIMITED" ? "RATE_LIMITED" : "QUOTA_EXHAUSTED",
       );
     }
     switch (code) {
@@ -276,6 +332,8 @@ export class LexAPIError extends Error {
         return new RateLimitedError(message, status, details, retryAfter, context);
       case "TIER_FORBIDDEN":
         return new TierForbiddenError(message, status, details, retryAfter, context);
+      case "PAYMENT_PAST_DUE":
+        return new PaymentPastDueError(message, status, details, retryAfter, context);
       case "CREDITS_EXHAUSTED":
         return new CreditsExhaustedError(message, status, details, retryAfter, resetsAt, context);
       case "NATIONAL_ALLOWANCE_EXHAUSTED":
@@ -305,7 +363,10 @@ export class LexAPIError extends Error {
   }
 }
 
-/** 404 — document or resource missing (`NOT_FOUND`). */
+/**
+ * 404 — document or resource missing (`NOT_FOUND`), or an endpoint the API
+ * does not have (see {@link NotFoundError.unknownEndpoint}).
+ */
 export class NotFoundError extends LexAPIError {
   static override readonly kind: string = "NotFoundError";
   constructor(
@@ -318,6 +379,130 @@ export class NotFoundError extends LexAPIError {
     super("NOT_FOUND", message, status, details, retryAfter, context);
     this.name = "NotFoundError";
   }
+
+  /**
+   * `true` when the API (2.27.0 or later) has no such endpoint
+   * (`details.reason` is `"unknown_endpoint"`): a mistyped path, a method
+   * newer than the API, or a national route for a country that is not
+   * available. Always `false` on APIs before 2.27.0; there the message
+   * contains "Unknown API endpoint". Read from `details` only, never from
+   * the message.
+   */
+  get unknownEndpoint(): boolean {
+    return ownField(this.details, "reason") === "unknown_endpoint";
+  }
+
+  // The accessors below read `details` only when it is a plain JSON object,
+  // and only its own keys; anything else gives each accessor's default.
+
+  /**
+   * `details.reason` when it is a string: `unknown_endpoint`, or on
+   * `getDocumentAtDate` (API 2.28.0) `before_tracking` / `boundary_unknown`.
+   * `undefined` on a 404 without one (e.g. a document not in the corpus).
+   */
+  get reason(): NotFoundReason | undefined {
+    return readString(ownField(this.details, "reason"));
+  }
+
+  /**
+   * `true` when `getDocumentAtDate` was asked about a date before the
+   * document entered the corpus (`details.reason` is `"before_tracking"`);
+   * {@link trackedSince} says when that was.
+   */
+  get beforeTracking(): boolean {
+    return ownField(this.details, "reason") === "before_tracking";
+  }
+
+  /**
+   * `true` when LexAPI has no record of when a version stored before API
+   * 2.28.0 began, so it cannot say which snapshot it held on the date and
+   * does not guess (`details.reason` is `"boundary_unknown"`). Refunded.
+   * Read the {@link candidates} with `getDocumentVersion`.
+   */
+  get boundaryUnknown(): boolean {
+    return ownField(this.details, "reason") === "boundary_unknown";
+  }
+
+  /** `before_tracking` only: when the document entered the corpus (`details.trackedSince`). */
+  get trackedSince(): string | undefined {
+    return readString(ownField(this.details, "trackedSince"));
+  }
+
+  /**
+   * On `before_tracking` for an EU act: the request that answers which
+   * version is listed for a date (`legislationAsOf`).
+   */
+  get inForceLookup(): InForceLookup | undefined {
+    const value = ownField(this.details, "inForceLookup");
+    if (!isPlainJsonObject(value)) return undefined;
+    const lookup: InForceLookup = {};
+    const method = readString(ownField(value, "method"));
+    const path = readString(ownField(value, "path"));
+    if (method !== undefined) lookup.method = method;
+    if (path !== undefined) lookup.path = path;
+    return lookup;
+  }
+
+  /**
+   * `boundary_unknown` only: the versions the date could fall in — the
+   * first 10 items of `details.candidates`
+   * that are objects with an integer `version` (`fetchedAt` / `observedFrom`
+   * are `null` when not strings). `[]` when there are none. For these
+   * versions `fetchedAt` can be the last fetch and later than the date.
+   */
+  get candidates(): SnapshotCandidate[] {
+    return readCandidates(this.details).kept;
+  }
+
+  /**
+   * `boundary_unknown` only: `true` when more versions matched than
+   * {@link candidates} lists (`details.candidatesTruncated` is `true`, or
+   * more than 10 usable candidates were sent).
+   */
+  get candidatesTruncated(): boolean {
+    return ownField(this.details, "candidatesTruncated") === true || readCandidates(this.details).more;
+  }
+}
+
+/** At most this many `NotFoundError.candidates` are returned. */
+const MAX_SNAPSHOT_CANDIDATES = 10;
+
+function readCandidates(details: unknown): { kept: SnapshotCandidate[]; more: boolean } {
+  const list = ownField(details, "candidates");
+  const kept: SnapshotCandidate[] = [];
+  if (!Array.isArray(list)) return { kept, more: false };
+  for (const item of list) {
+    // `ownField` reads nothing from an item that is not a plain object.
+    const version = ownField(item, "version");
+    if (typeof version !== "number" || !Number.isInteger(version)) continue;
+    if (kept.length === MAX_SNAPSHOT_CANDIDATES) return { kept, more: true };
+    const fetchedAt = ownField(item, "fetchedAt");
+    const observedFrom = ownField(item, "observedFrom");
+    kept.push({
+      version: version + 0, // -0 → 0
+      fetchedAt: typeof fetchedAt === "string" ? fetchedAt : null,
+      observedFrom: typeof observedFrom === "string" ? observedFrom : null,
+    });
+  }
+  return { kept, more: false };
+}
+
+/**
+ * An object as `JSON.parse` makes them — also one from another realm (a VM
+ * context): not `null`, not an array, tagged `[object Object]`.
+ */
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+
+/** `value[key]` when `value` is a plain object that has `key` as its own property. */
+function ownField(value: unknown, key: string): unknown {
+  return isPlainJsonObject(value) && Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
 }
 
 /** 400 — CELEX failed validation (`INVALID_CELEX`). */
@@ -410,7 +595,7 @@ export class AuthenticationError extends LexAPIError {
  * 429 — per-minute rate limit (`RATE_LIMITED`), or, on legacy daily plans,
  * the used-up daily / monthly-semantic quota (`QUOTA_EXHAUSTED`; `code`
  * tells them apart). 429s use the legacy `{error, message, retryAfter}` body
- * (with a top-level `code` from lex-api #304 on); the `Retry-After` header is
+ * (with a top-level `code` from API 2.4.0 on); the `Retry-After` header is
  * authoritative and is what `retryAfter` reads first.
  */
 export class RateLimitedError extends LexAPIError {
@@ -435,14 +620,16 @@ export class RateLimitedError extends LexAPIError {
   /**
    * `true` for a legacy-plan quota 429 (daily call quota, or the monthly
    * semantic quota) rather than the per-minute limiter (SDK contract §1.2):
-   * `code` is `QUOTA_EXHAUSTED`, or — servers before lex-api #304, which
+   * `code` is `QUOTA_EXHAUSTED`, or — servers before API 2.4.0, which
    * send no code — the body carries `usage.resetsAt` with neither a
    * `Retry-After` header nor a `retryAfter` body field. It cannot succeed
    * before `resetsAt`, so the SDK does not retry it and `retryAfter` is
    * `undefined`.
    */
   get quotaExhausted(): boolean {
-    return this.code === "QUOTA_EXHAUSTED" || isQuota429(this.body, this.headers);
+    // §1.2: on any status when the code is QUOTA_EXHAUSTED; the body (code or
+    // shape) counts only on a 429 whose code is RATE_LIMITED.
+    return this.code === "QUOTA_EXHAUSTED" || (this.status === 429 && this.code === "RATE_LIMITED" && isQuota429(this.body, this.headers));
   }
 
   /** When a legacy quota resets: the body's `resetsAt`, else `usage.resetsAt`. */
@@ -454,7 +641,11 @@ export class RateLimitedError extends LexAPIError {
   }
 }
 
-/** 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade the plan. */
+/**
+ * 403 — tier-gated endpoint (`TIER_FORBIDDEN`). Retrying cannot help; upgrade
+ * the plan. A failed payment (`PAYMENT_PAST_DUE`) is the subclass
+ * {@link PaymentPastDueError}: check for it first to tell the two apart.
+ */
 export class TierForbiddenError extends LexAPIError {
   static override readonly kind: string = "TierForbiddenError";
   constructor(
@@ -463,9 +654,47 @@ export class TierForbiddenError extends LexAPIError {
     details?: unknown,
     retryAfter?: number,
     context?: LexAPIErrorContext,
+    code: "TIER_FORBIDDEN" | "PAYMENT_PAST_DUE" = "TIER_FORBIDDEN",
   ) {
-    super("TIER_FORBIDDEN", message, status, details, retryAfter, context);
+    super(code, message, status, details, retryAfter, context);
     this.name = "TierForbiddenError";
+  }
+}
+
+/**
+ * 403 — a subscription payment failed and was not completed in time
+ * (`PAYMENT_PAST_DUE`, API 2.27.0). API requests are refused until the
+ * payment succeeds, so it is never retried: pay the open invoice in the
+ * dashboard ({@link PaymentPastDueError.billingUrl}). Extends
+ * `TierForbiddenError`, so a handler for that class also catches it; its
+ * `code` is `PAYMENT_PAST_DUE`. Before API 2.27.0 a failed payment was
+ * refused at once with a 403 without a code, raised as `TierForbiddenError`.
+ * Legacy-shape body
+ * (`{code, error, message, accessEndedAt?, billingUrl}`): the getters read
+ * `details` first, then the top level of the raw `body`.
+ */
+export class PaymentPastDueError extends TierForbiddenError {
+  static override readonly kind: string = "PaymentPastDueError";
+
+  constructor(
+    message: string,
+    status = 403,
+    details?: unknown,
+    retryAfter?: number,
+    context?: LexAPIErrorContext,
+  ) {
+    super(message, status, details, retryAfter, context, "PAYMENT_PAST_DUE");
+    this.name = "PaymentPastDueError";
+  }
+
+  /** When API access ended (ISO date-time); `undefined` when the server does not say. */
+  get accessEndedAt(): string | undefined {
+    return readString(detailsOrBodyField(this.details, this.body, "accessEndedAt"));
+  }
+
+  /** Where to pay the open invoice (absolute URL of the dashboard's billing page). */
+  get billingUrl(): string | undefined {
+    return readString(detailsOrBodyField(this.details, this.body, "billingUrl"));
   }
 }
 
@@ -644,7 +873,7 @@ export class TimeoutError extends LexAPIError {
 }
 
 /**
- * 503 — service temporarily unavailable (e.g. a deploy's drain window).
+ * 503 — service temporarily unavailable (e.g. while the service restarts).
  * Derived from the status (no typed code). Retried like 502/504.
  */
 export class ServiceUnavailableError extends LexAPIError {
@@ -793,7 +1022,7 @@ export interface DocumentWithdrawnDetails {
  * charges anything (the credits/allowance refund rule already returns
  * every non-404 4xx-or-5xx). If you hold a cached copy of this document,
  * drop it — the source withdrew it for a reason that may include a legal
- * takedown or a pseudonymisation fix (see docs §7, no re-identification).
+ * takedown or a pseudonymisation fix (see Terms §7, no re-identification).
  */
 export class DocumentWithdrawnError extends LexAPIError {
   static override readonly kind: string = "DocumentWithdrawnError";
@@ -871,20 +1100,43 @@ export class RequestAbortedError extends LexAPIError {
 }
 
 /**
- * A 2xx response whose body was not the JSON LexAPI sends (e.g. an HTML page
- * from a proxy). `body` holds the first 500 characters of the raw text.
+ * A 2xx response that is not the documented shape: no body, a body that is
+ * not JSON (e.g. an HTML page from a proxy), JSON that is not an object,
+ * `success: false` without an error, or a list field that is missing, not a
+ * list, or holds items that are not objects. Thrown instead of returning an
+ * empty, "successful" result.
+ *
+ * The message names what was expected and what arrived and never quotes the
+ * body. For JSON of the wrong shape, `body` holds the parsed value; for a
+ * body that is not JSON, `bodyExcerpt` holds its first 200 characters (code
+ * points). Both are raw response content that may contain document text: do
+ * not show them to a model or log them by default. Neither is an own
+ * property of the error, so default logging does not print them.
  */
 export class InvalidResponseError extends LexAPIError {
   static override readonly kind: string = "InvalidResponseError";
 
-  constructor(message: string, status: number, rawText?: string, context?: LexAPIErrorContext) {
-    super("INVALID_RESPONSE", message, status, undefined, undefined, {
-      ...context,
-      body: rawText === undefined ? undefined : rawText.slice(0, 500),
-    });
+  constructor(message: string, status: number, body?: unknown, context?: LexAPIErrorContext) {
+    super("INVALID_RESPONSE", message, status, undefined, undefined, context);
+    // `body` is read through the prototype getter below, not stored on the error.
+    delete (this as { body?: unknown }).body;
+    if (body !== undefined) INVALID_BODIES.set(this, body);
     this.name = "InvalidResponseError";
   }
 }
+
+Object.defineProperty(InvalidResponseError.prototype, "body", {
+  get(this: object): unknown {
+    return INVALID_BODIES.get(this);
+  },
+  // Assigning replaces the stored value (`undefined` clears it), as on 0.4.0.
+  set(this: object, value: unknown): void {
+    if (value === undefined) INVALID_BODIES.delete(this);
+    else INVALID_BODIES.set(this, value);
+  },
+  enumerable: false,
+  configurable: true,
+});
 
 /**
  * An export stream ended (cleanly, at EOF) without its trailing `_done` line —
@@ -919,20 +1171,26 @@ export function isLexAPIError<T extends LexAPIError = LexAPIError>(
   return value instanceof (errorClass ?? LexAPIError);
 }
 
-/**
- * Normalize a JSON `retryAfter` body value. The field historically carried
- * buggy absolute epoch values instead of delta-seconds (pending server fix);
- * epoch-looking values are converted to a non-negative delta in seconds.
- */
-export function normalizeRetryAfterSeconds(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  if (value > 1e12) return Math.max(0, Math.round((value - Date.now()) / 1000)); // epoch millis
-  if (value > 1e9) return Math.max(0, Math.round(value - Date.now() / 1000)); // epoch seconds
-  return Math.max(0, value);
-}
+export { normalizeRetryAfterSeconds };
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** `details`: `error.details` on the typed envelope, else the top-level `details`. */
+function bodyDetails(body: unknown): unknown {
+  const err = detailsField(body, "error");
+  return typeof err === "object" && err !== null && !Array.isArray(err) ? detailsField(err, "details") : detailsField(body, "details");
+}
+
+/** The body's usable wait (§1.2): the top-level `retryAfter`, else the one in `details`. */
+function bodyWait(body: unknown, details: unknown): number | undefined {
+  return bodySeconds(detailsField(body, "retryAfter")) ?? bodySeconds(detailsField(details, "retryAfter"));
+}
+
+/** `value` when it is a non-empty string; anything else counts as absent. */
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 function readString(value: unknown): string | undefined {
@@ -946,14 +1204,20 @@ function detailsField(details: unknown, key: string): unknown {
   return undefined;
 }
 
+/** `QUOTA_EXHAUSTED` as the top-level `code` or as `error.code` of the typed envelope. */
+function hasQuotaCode(body: unknown): boolean {
+  return detailsField(body, "code") === "QUOTA_EXHAUSTED" || detailsField(bodyField(body, "error"), "code") === "QUOTA_EXHAUSTED";
+}
+
 /** SDK contract §1.2 quota-429 test. */
 function isQuota429(body: unknown, headers: ResponseHeaders | undefined): boolean {
-  if (detailsField(body, "code") === "QUOTA_EXHAUSTED") return true;
-  // Fallback for servers before lex-api #304 (no top-level code).
+  if (hasQuotaCode(body)) return true;
+  // Fallback for servers before API 2.4.0 (no top-level code).
   const resetsAt = detailsField(detailsField(body, "usage"), "resetsAt");
   if (typeof resetsAt !== "string") return false;
-  if (headers?.retryAfter !== undefined && headers.retryAfter.trim() !== "") return false;
-  return detailsField(body, "retryAfter") === undefined;
+  // A quota 429 has no usable wait (§1.2): an unusable hint does not count.
+  if (retryAfterHeaderSeconds(headers?.retryAfter) !== undefined) return false;
+  return bodyWait(body, bodyDetails(body)) === undefined;
 }
 
 function detailsOrBodyField(details: unknown, body: unknown, key: string): unknown {

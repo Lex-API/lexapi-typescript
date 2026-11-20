@@ -10,7 +10,7 @@ Official TypeScript SDK for [LexAPI](https://lex-api.com/?ref=npm-sdk) — Europ
 npm install @lexapi/client
 ```
 
-Node ≥ 18 (native `fetch`); the built package is also smoke-tested on Bun and Deno in CI. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
+Version 0.5.0 targets LexAPI API 3.0.0. Node ≥ 18 (native `fetch`); the built package is also smoke-tested on Bun and Deno in CI. Zero runtime dependencies, ESM + CommonJS, strict hand-curated types. **Server-side only** — API keys are secrets and must never ship in client-side code (the SDK also skips the `User-Agent` header on browser runtimes, where setting it is forbidden).
 
 ## Quickstart
 
@@ -36,6 +36,7 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 5 → 4 → 1 | `getDocument`, `getDocumentsBatch` (per item), `getDocumentByUrl`, `getDocumentMetadata` — 5 for a live browser fetch, settled to **4** when the Publications Office Cellar API answered, to **1** from the LexAPI corpus (`result.headers.source`); a text-unavailable answer settles at 1 |
 | 5 → 1 | `extractCitations` — refunded to 1 when the document was `alreadyExtracted` |
 | 5 | `semanticSearch`, `semanticLegislationSearch` (+ per live `asOf` fetch, see below) |
+| 1 → 4 / 5 | `legislationAsOf` — 1 for the version alone or a provision read from the LexAPI corpus; 4 when the text is fetched (5 live from EUR-Lex), whatever the answer; 1 if the fetch fails |
 | 5 | `getTransposition` — every plan |
 | 15 | `semanticSearch({ hyde: true })` — refunded to 5 if HyDE falls back |
 | 20 | `getCitationNetwork`, `getCitationPath`, `getRelatedDocuments`, `getCitationStats` |
@@ -43,7 +44,7 @@ LexAPI bills a monthly credit pool ([plans](https://lex-api.com/pricing?ref=npm-
 | 0 | `getNationalCoverage` (public) |
 | 1 | `getNationalDocument` — every national read is a corpus read, so the 5-credit reservation always settles to 1 (an unknown id too) |
 | 3 per call | `listNationalDocuments` — flat; pagination does not multiply the price |
-| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law |
+| 5 | `nationalSemanticSearch`, `nationalLegislationSemanticSearch` — `hyde` never raises this for national case law; `asOf` adds nothing |
 
 Failed requests refund automatically (400/403 and 5xx in full; a 404 settles at 1). Refunds land just after the response, so a response's `credits` block can still show the upfront charge. The national-law call allowance follows the same rule: a failed call (other than a 404) gives its call back too.
 
@@ -114,6 +115,14 @@ const cases = await client.semanticSearch({
   includeText: true,  // full text per hit instead of the default ~600-char `snippet`
 });
 if (cases.hint) console.warn(cases.hint); // present only on low-confidence result sets
+for (const hit of cases.results) {
+  // With includeText (API 2.30.0): { available: true } or { available: false, reason }
+  const celex = hit.metadata?.celex_id;
+  if (hit.textAvailability?.available === false && celex) {
+    console.log(hit.textAvailability.reason, hit.snippet); // the snippet is not court text
+    const { document } = await client.getDocument({ celexNumber: celex }); // read the document itself
+  }
+}
 
 // HyDE query rewriting — 15 credits instead of 5, ~1-3 s extra latency.
 // Best-effort: on LLM failure the response reports hyde: false and the premium is refunded.
@@ -134,6 +143,10 @@ for (const hit of articles.results) {
 
 Persistent identity for case-law hits is `(metadata.celex_id, metadata.document_type)` — `case_id` is snapshot-scoped and does not survive index rebuilds.
 
+With `includeText: true`, every case-law hit carries `textAvailability` (API 2.30.0). A hit whose text LexAPI does not hold carries `{ available: false, reason: "not_in_corpus" }` (or `"unknown"` when LexAPI could not check; a retry may return the text) and keeps its `snippet`; `getDocument` with `metadata.celex_id` reads the document. A case-law `snippet` is cut from the machine-written `summary` when the hit has one, with or without `includeText`: it is not court text. The reason is an open string (do not switch on it exhaustively), and these reasons are not the ones a document's `textAvailability` uses. National hits do not carry `textAvailability`.
+
+EU legislation hits, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl` and `getDocumentMetadata` carry the in-force label of the act when its status is known (API 2.19.0): `inForce` (today, UTC), with `notInForceReason`, `endOfValidity` or `entryIntoForce`; all absent when unknown. `semanticLegislationSearch({ inForce: true })` keeps only hits known to be in force today and reports what it removed in `inForceFilter`. Documents, snapshots and EU semantic hits also carry `provenance` and `fieldProvenance` (API 2.20.0).
+
 ### The text in force on a date (`asOf`)
 
 ```ts
@@ -151,6 +164,27 @@ for (const hit of asOf.results) {
 ```
 
 The act must be in force on that date; the version is the act as published before its first consolidation, otherwise the consolidated version in force (later versions never count). `asOf` accepts `1952-01-01` … today (UTC); an invalid date is a 400 `InvalidParamsError`, refunded in full. **Cost:** 5 for the search; each live fetch of a version the corpus doesn't hold reserves 5 and settles by outcome (Cellar 4, browser 5, no text 1, failed 0), at most 3 per request by default. A fetch your pool can't cover is skipped (`asOfReason: "insufficient_credits"`) — never a 402. `AS_OF_REASONS` lists every documented reason.
+
+### An act on a date (`legislationAsOf`)
+
+```ts
+// POST /legislation/as-of — needs LexAPI API 2.26.0
+const answer = await client.legislationAsOf({
+  document: "32016R0679",
+  asOf: "2019-06-01",
+  provision: "art_17", // optional: an article, an annex ("anx_III") or recitals ("rct_26-28")
+});
+
+if (answer.asOfResolved) {
+  console.log(answer.asOfVersion);    // { celex: "02016R0679-20160504", kind: "consolidated", date: "2016-05-04" }
+  console.log(answer.provision?.text);
+  if (answer.consolidated) console.log(answer.baseCelex, answer.consolidatedNote); // cite the authentic act
+} else {
+  console.log(answer.asOfReason);     // e.g. "not_yet_in_force" — a normal answer, not an error
+}
+```
+
+For an act you already know; `semanticLegislationSearch` with `asOf` (above) is the search by meaning. The answer is the newest consolidated version dated on or before `asOf`, or the act as published in the Official Journal when none is. An answer that cannot be established is returned, not thrown: `asOfResolved: false` with an `asOfReason` and no `provision` — use a text only when `asOfResolved` is `true`. Unresolved answers are not thrown, so a `try`/`catch` never sees them: `fetch_*`, `request_deadline`, `version_list_unavailable` and `version_lookup_cap` are worth asking again; the other reasons are final for that date. Consolidated versions have no legal force; only the act as published in the Official Journal (`baseCelex`) is authentic. `document` is always the act itself; `asOfVersion.celex` (and `date`) name the version the text comes from. `asOfVersion.validUntil`, when present, is the last day that version is the answer. The answer does not say whether an individual provision applied on that date, and `act.inForceToday` is about today, not `asOf`. An unknown act is a 404 `NotFoundError`; invalid input is a 400 (`InvalidCelexError` / `InvalidParamsError`). An API older than 2.26.0 has no such endpoint and also answers 404 (`NotFoundError`). `err.unknownEndpoint` is `false` there (the API sends it from 2.27.0): check `err.message.includes("Unknown API endpoint")`. **Cost:** 1 credit when no text is fetched; when the provision's text has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever the answer, and 1 if the fetch fails or finds no text. A fetch reserves up to 5 credits: a pool holding fewer gets `asOfReason: "insufficient_credits"`. `AS_OF_LOOKUP_REASONS` lists every documented reason.
 
 ## Citations
 
@@ -267,7 +301,23 @@ const hits = await client.nationalSemanticSearch("AT", { query: "Datenschutz bei
 for (const h of hits.results) console.log(h.document.documentKind, h.document.ecli, h.document.dateOfDocument);
 const articles = await client.nationalLegislationSemanticSearch("DE", { query: "Kündigungsfrist" }); // 5 credits
 if (articles.partial) console.warn(articles.hint); // SEARCH_INCOMPLETE: results may be missing better matches
+
+// asOf labels each hit for a date (API 2.29.0); the texts searched and returned are today's
+const dated = await client.nationalLegislationSemanticSearch("AT", { query: "Recht auf Auskunft", asOf: "2020-06-01" });
+for (const h of dated.results) {
+  if (h.asOfResolved) console.log(h.article_ref, h.asOfVersion?.validFrom, h.asOfVersion?.checkedAt);
+  else console.log(h.article_ref, h.asOfReason); // e.g. "provision_amended_since" — today's wording, not established for the date
+}
 ```
+
+**National `asOf` (API 2.29.0).** The search runs over today's texts only: a provision repealed or
+replaced since the date cannot be found, and the text is never swapped. A hit is resolved
+(`asOfResolved: true`, `asOfVersion: { kind: "current_unit", validFrom, validTo, sourceId, checkedAt }`)
+only when the publisher's dates, as of LexAPI's last recorded read of the act (`checkedAt`), show
+that today's wording already applied on the date. An unresolved hit keeps today's wording; it is not
+established as the text for the date (`asOfReason`, listed in `NATIONAL_AS_OF_REASONS`). LexAPI
+holds such dates for Austria and Spain; elsewhere every hit is `asof_not_available`. `asOf` is a
+`YYYY-MM-DD` string. `isNationalAsOfVersion(v)` tells it from the EU `asOfVersion` by `kind`.
 
 **Incomplete national searches.** When the national index could not complete a semantic search,
 results may be incomplete: with hits left the answer carries `partial: true`,
@@ -340,7 +390,7 @@ for await (const page of client.webhooks.paginateDeliveries(created.webhook.id))
 await client.webhooks.delete(created.webhook.id);
 ```
 
-Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are never retried on 5xx.
+Webhooks per account: FREE 0 · STARTER 2 · PROFESSIONAL 10 · BUSINESS 50 · SCALE 100 · ENTERPRISE 100. Unsupported criteria are refused with a 400 `InvalidParamsError` whose `details` names each problem. Write calls are retried only on a 429 that is neither an exhausted quota nor a failed payment, or when the request never reached the API (connect failure, Cloudflare 521/522/523).
 
 ### Receiving deliveries
 
@@ -364,6 +414,8 @@ app.post("/webhooks/lexapi", express.raw({ type: "application/json" }), async (r
 });
 ```
 
+`verifyWebhook` decodes the body as strict UTF-8 (one leading byte order mark is ignored) and parses it from the same bytes the signature covers; a body that is not valid UTF-8, or not one strict JSON object (no `NaN` or `Infinity`), throws `WebhookSignatureError("malformed_body")`. The error's `reason` is the first check that fails: `missing_secret`, `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`, `stale_timestamp` (a `timestamp` that is not `YYYY-MM-DDTHH:MM:SS[.fraction]` with `Z` or `±HH:MM` naming a real date and time in years 0001–9999, or further than `toleranceMs` from now; the edge passes). `toleranceMs: 0` turns the window off, a negative value rejects every delivery, and `NaN` is a `RangeError`. A secret with a lone surrogate is `missing_secret`. The header is trimmed of spaces, tabs, CR and LF only. Pass the raw bytes (`Buffer`, `Uint8Array`, `ArrayBuffer`); a string stands for its UTF-8 encoding, and a string with a lone surrogate, which has none, fails verification (`verifySignature` returns `false`, `verifyWebhook` throws `invalid_signature`, `computeSignature` throws `malformed_body`).
+
 `verifySignature(rawBody, signature, secret)` is the signature-only check. Both use Web Crypto (constant-time comparison); an empty `secret` throws `WebhookSignatureError("missing_secret")` (a configuration error, not a bad delivery).
 
 ## Corpus export (BUSINESS, SCALE, ENTERPRISE)
@@ -382,31 +434,42 @@ const stream = await client.export({ documentTypeCode: "regulation", dateFrom: "
 console.log(stream.meta?.totalMatching, stream.headers.total); // leading _meta envelope / X-Export-Total
 
 for await (const row of stream) {
-  process(row.celex, row.documentTypeCode, row.parsedContent);
+  handleRow(row.celex, row.documentTypeCode, row.parsedContent);
 }
 
 console.log(stream.done?.written, stream.done?.skippedStubs);
 if (stream.truncated) console.warn(`rows not reached (${stream.done?.truncatedBy}) — narrow filters or resume via changedSince`);
 ```
 
-The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass (re-iterating a fully read stream yields nothing; iterating one you ended early raises `IncompleteExportError` — call `export()` again to re-read). Breaking out of the loop (or `stream.cancel()`, or the call's `signal`) releases the connection. **A stream that ends without its `_done` trailer throws `IncompleteExportError`** (so does a `_done` with `complete: false`, or an `_error` line, which is never yielded as a row) after yielding the rows that did arrive — the server stopped mid-export and they are not the whole set (`stream.complete` stays `false`; `stream.rowsRead` counts them). A dropped connection throws `NetworkError`, a stall longer than `timeoutMs` throws `TimeoutError`. Lines that are not JSON objects are counted in `stream.invalidLines`. For "did matching rows remain that this export did not reach?" read `stream.truncated` — after iterating it is the server's authoritative `_done.truncated` (`stream.done?.truncatedBy`: `limit`, `max_rows`, `credits` or `recovered`); before that, a hint from the up-front count. Metadata-only rows are skipped unless `includeStubs: true`.
+The `_meta`/`_done` envelope lines are never yielded as rows; the stream is single-pass (re-iterating a fully read stream yields nothing; iterating one you ended early raises `IncompleteExportError` — call `export()` again to re-read). Breaking out of the loop (or `stream.cancel()`, or the call's `signal`) releases the connection. **A stream that ends without its `_done` trailer throws `IncompleteExportError`** (so does a `_done` with `complete: false`, or an `_error` line, which is never yielded as a row) after yielding the rows that did arrive — the server stopped mid-export and they are not the whole set (`stream.complete` stays `false`; `stream.rowsRead` counts them). A dropped connection throws `NetworkError`, a stall longer than `timeoutMs` throws `TimeoutError`. A line ends at a line feed byte; lines are read as strict UTF-8 whatever charset the response names (one byte order mark at the very start of the stream is ignored) and trimmed of spaces, tabs and CR; lines that are not UTF-8, or not one JSON object, are counted in `stream.invalidLines`, and blank lines are skipped. `stream.meta` comes only from the very first line. For "did matching rows remain that this export did not reach?" read `stream.truncated` — after iterating it is the server's authoritative `_done.truncated` (`stream.done?.truncatedBy`: `limit`, `max_rows`, `credits` or `recovered`); before that, a hint from the up-front count, and `false` when nothing says. Metadata-only rows are skipped unless `includeStubs: true`.
 
 ## Point-in-time versions
 
-Versions are LexAPI *observation snapshots* — the document as fetched — not legal in-force reconstructions; history begins at first ingestion. (For the text in force on a date, use a consolidated CELEX or `semanticLegislationSearch({ asOf })`.)
+Versions are LexAPI's fetch snapshots — the document as LexAPI fetched it — not the law in force on a date; history begins at first ingestion. (For the version of an EU act for a date, use `legislationAsOf`.)
 
 ```ts
+import { NotFoundError } from "@lexapi/client";
+
 const history = await client.listDocumentVersions("32016R0679");
 console.log(history.currentVersion, history.trackedSince);
 
 const snapshot = await client.getDocumentVersion("32016R0679", 2);
 console.log(snapshot.document.parsedContent, snapshot.corpusVersion);
 
-const atDate = await client.getDocumentAtDate("32016R0679", "2026-03-20");
-console.log(atDate.asOf, atDate.document.version);
+try {
+  const atDate = await client.getDocumentAtDate("32016R0679", "2026-04-01");
+  console.log(atDate.kind);                   // "observation_snapshot" — not the law in force on that date
+  console.log(atDate.document.observedFrom);  // when this version began in LexAPI's fetch history (null: no record of it)
+  console.log(atDate.document.observedUntil); // when the next version's text arrived (null: current version)
+  if (atDate.inForceLookup) console.log("for the act on a date, use legislationAsOf");
+} catch (err) {
+  if (err instanceof NotFoundError && err.beforeTracking) console.log(err.trackedSince); // tracking began later
+  else if (err instanceof NotFoundError && err.boundaryUnknown) console.log(err.candidates); // read them with getDocumentVersion
+  else throw err;
+}
 ```
 
-Each call costs 1 credit. Dates before the document entered the corpus reject with `NotFoundError` carrying the tracking start date.
+`fetchedAt` is when a version's text arrived at LexAPI; `observedFrom` is when the version began in LexAPI's fetch history, `null` when LexAPI has no record of it — then `fetchedAt` is the last fetch of its text, not when the version began. A future date returns the current version with `dateInFuture: true` (and `xWarning`). Each call costs 1 credit; a `boundaryUnknown` 404 is refunded. A date before the document entered the corpus rejects with `NotFoundError` (`beforeTracking`, `trackedSince`); a date next to a version stored before API 2.28.0 whose start LexAPI has no record of rejects with `boundaryUnknown` and `candidates` (`{ version, fetchedAt, observedFrom }`, at most 10, `candidatesTruncated` beyond; `[]` when none).
 
 ## Response headers
 
@@ -428,6 +491,8 @@ On the four national document/semantic endpoints, `headers.nationalAllowance` (`
 ## Configuration
 
 ```ts
+import { LexAPI } from "@lexapi/client";
+
 const client = new LexAPI({
   apiKey: "lex_...",                     // or LEXAPI_API_KEY env var
   baseUrl: "https://lex-api.com/api/v1", // default
@@ -438,9 +503,11 @@ const client = new LexAPI({
 });
 ```
 
+Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the default ports), at most five per attempt; any other redirect is refused with a `NetworkError`, so the API key is never sent to another origin. A custom `fetch` must honour `redirect: "manual"` for this to hold.
+
 ## Retries, timeouts and cancellation
 
-The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [PLAN.md §1.2](PLAN.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):
+The SDK retries automatically **only when a retry cannot charge you twice** (the shared SDK contract, [§1.2](https://github.com/Lex-API/lexapi-typescript/blob/main/docs/sdk-contract.md)). Up to 3 retries (`retry.maxRetries`), exponential backoff with full jitter (base 0.5 s, cap 30 s):
 
 | Failure | GET, billed | GET, free (`getInfo`, webhook reads) | Read-only POST | Mutating call |
 |---|---|---|---|---|
@@ -452,11 +519,13 @@ The SDK retries automatically **only when a retry cannot charge you twice** (the
 | Any other transport error (reset, connection closed — `fetch` cannot tell before-response from mid-response — read error, `REQUEST_TIMEOUT`) | no | retry | no | no |
 | 400 / 401 / 402 / 403 / 404 / 500 and anything else | no | no | no | no |
 
-- **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
+- **Read-only POSTs** are `search`, `getDocument`, `getDocumentsBatch`, `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`, `semanticLegislationSearch`, `legislationAsOf`, `nationalSemanticSearch`, `nationalLegislationSemanticSearch`. **Mutating calls** are the webhook writes and `extractCitations` (it persists edges).
 - **App-origin** = the response carries a non-empty `X-LexAPI-Version` header or a `RateLimit-Limit` header (the API's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone is not enough. Anything else is treated as a proxy answer: the API may have charged the call and not refunded it, so a billed call is not retried.
-- **Wait:** `Retry-After` on any status (an empty or unparseable value counts as absent); on a 429 only, then `RateLimit-Reset` and the JSON `retryAfter` field; on a 503 `NATIONAL_SEMANTIC_UNAVAILABLE` (an incomplete national search), the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap (`retry.maxDelayMs`; a cap below the server's requested wait shortens it); numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`.
+- **Wait:** `Retry-After` on any status (decimal seconds such as `5` or `2.5`, or an HTTP-date in one of the three RFC 9110 forms with `GMT`, `UTC` or `+0000`; anything else counts as absent); on a 429 only, then `RateLimit-Reset` (decimal seconds) and the JSON `retryAfter` field (a number ≥ 0, else absent; the top-level field first, then the one in `details`); on a 503 `NATIONAL_SEMANTIC_UNAVAILABLE` (an incomplete national search), the JSON `retryAfter` field. `X-RateLimit-*` is not read. Every hint is clamped to the 30 s cap (`retry.maxDelayMs`; a cap below the server's requested wait shortens it); numbers above 1e12 / 1e9 are read as epoch ms / s. A quota 429 has `retryAfter: undefined`. An incomplete national search whose only hint is unusable is not retried. No wait is longer than 2^31−1 ms (about 24.8 days), whatever `maxDelayMs` says: a longer timer would fire at once.
 
-**Timeout:** `timeoutMs` (default 95 s) is an *inactivity* limit per attempt: the longest the SDK waits for the next bytes — until the response head, then between body chunks (the timer restarts on every chunk), for JSON bodies and export streams alike. It is not a deadline for the whole call. On expiry you get `TimeoutError` with `code: "REQUEST_TIMEOUT"` (status 0). `fetch` cannot time the connect phase separately, so it counts inside the first window. 95 s lets the API's own 90 s limit on one live EUR-Lex fetch reach you as a typed, refunded 504; a request needing several upstream fetches can still exceed it.
+**Timeout:** `timeoutMs` (default 95 s) is an *inactivity* limit per attempt: the longest the SDK waits for the next bytes — until the response head, then between body chunks (the timer restarts on every chunk), for JSON bodies and export streams alike. It is not a deadline for the whole call. On expiry you get `TimeoutError` with `code: "REQUEST_TIMEOUT"` (status 0). `fetch` cannot time the connect phase separately, so it counts inside the first window. The 95 s default sits above the API's 90 s deadline on document reads, so that timeout comes back as a typed, refunded 504; the CDN ends any wait at 100 s. `timeoutMs: Infinity` sets no limit, and `0` times out at once (on an export stream's body reads, `0` sets no idle limit); a value above 2^31−1 ms is clamped to that.
+
+**Iterators:** `paginateCites`, `paginateCitedBy`, `webhooks.paginateDeliveries` and `paginateNationalDocuments` yield each page as it arrives and end by the documented stop conditions (a short or empty page, `totalEdges` / `total` reached, no `nextCursor`, `hasMore` not `true`, a page without its list). They throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page echoing an `offset` other than the one requested; a `nextCursor` already sent in the walk; and, only when the answers carry no usable `totalEdges`/`offset` (cites, cited-by) or `total` (deliveries), three pages in a row that repeat the one before (cites, cited-by: the same list; deliveries: no unseen `id`); a page with such a signal ends a run (on cites/cited-by its list is still the one the next page is compared with). A national `nextCursor` that is not a string throws too. When a walk throws, the pages already yielded stay valid; the page that showed the stall is not yielded and is on `err.body`. A starting `offset` that is not an integer ≥ 0, or a `limit` that is not an integer ≥ 1 (each at most 2^53 − 1), is a `RangeError` before any request (every iterator, `paginateNationalDocuments` included). Cites/cited-by advance by each group's `citationCount`; a group whose count is 0 but whose edge list is not empty counts its list.
 
 **Cancellation:** every method takes `{ signal }`. Aborting cancels the in-flight request, any retry wait and an export stream (the connection is released), and rejects with `RequestAbortedError` (`code: "ABORTED"`, `cause` = the signal's reason).
 
@@ -471,7 +540,7 @@ await client.semanticSearch({ query: "gdpr" }, { signal: controller.signal });
 Every non-2xx response maps to a typed error carrying `code`, `status`, `message`, `details`, `retryAfter`, the raw `body` and parsed `headers`:
 
 ```ts
-import { CreditsExhaustedError, NotFoundError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
+import { CreditsExhaustedError, NotFoundError, PaymentPastDueError, RateLimitedError, TierForbiddenError } from "@lexapi/client";
 
 try {
   await client.semanticSearch({ query: "gdpr" });
@@ -479,15 +548,16 @@ try {
   if (err instanceof RateLimitedError && err.quotaExhausted) console.log(`legacy quota resets ${err.resetsAt}`);
   else if (err instanceof RateLimitedError) console.log(`retry in ${err.retryAfter}s`, err.rateLimit);
   else if (err instanceof CreditsExhaustedError) console.log(`need ${err.weight}, have ${err.available}; resets ${err.resetsAt}`);
+  else if (err instanceof PaymentPastDueError) console.log(`pay the open invoice: ${err.billingUrl ?? "in the dashboard"}`); // before TierForbiddenError: it extends it
   else if (err instanceof TierForbiddenError) console.log((err.body as { upgradeUrl?: string })?.upgradeUrl);
-  else if (err instanceof NotFoundError) console.log("no such document");
+  else if (err instanceof NotFoundError) console.log(err.unknownEndpoint || err.message.includes("Unknown API endpoint") ? "no such endpoint" : "no such document");
   else throw err;
 }
 ```
 
 | Class | `code` | HTTP |
 | --- | --- | --- |
-| `NotFoundError` | `NOT_FOUND` | 404 |
+| `NotFoundError` | `NOT_FOUND` | 404 — `.unknownEndpoint` is `true` when the API (2.27.0 or later) has no such endpoint: a mistyped path, a method newer than the API, or a national route for a country that is not available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API endpoint". `.reason` is `details.reason`; on `getDocumentAtDate` (API 2.28.0) `.beforeTracking` (with `.trackedSince`, `.inForceLookup`) or `.boundaryUnknown` (with `.candidates`, `.candidatesTruncated`). |
 | `DocumentWithdrawnError` | `DOCUMENT_WITHDRAWN` | 410 — a national document its source withdrew; nothing of it is served; `.id`/`.jurisdiction`/`.withdrawnAt`; not retryable, drop any copy you hold |
 | `InvalidCelexError` / `InvalidUrlError` / `InvalidParamsError` | `INVALID_CELEX` / `INVALID_URL` / `INVALID_PARAMS` | 400 — `InvalidParamsError.param` / `.value` / `.allowed` name a refused filter, the value sent and the allowed values |
 | `AuthenticationError` | `UNAUTHORIZED` (derived) | 401 |
@@ -495,6 +565,7 @@ try {
 | `NationalAllowanceExhaustedError` | `NATIONAL_ALLOWANCE_EXHAUSTED` | 402 — FREE/STARTER/PROFESSIONAL's monthly national-law call allowance is used up; `resetsAt`/`limit`/`upgradeUrl` |
 | `NationalSemanticNotEnabledError` | `NATIONAL_SEMANTIC_NOT_ENABLED` | 409 — this jurisdiction has no semantic index to search; `.jurisdiction`; not retryable, refunded |
 | `TierForbiddenError` | `TIER_FORBIDDEN` | 403 |
+| `PaymentPastDueError` (extends `TierForbiddenError`) | `PAYMENT_PAST_DUE` | 403 — a subscription payment failed and was not completed in time; API requests are refused until the payment succeeds; pay the open invoice in the dashboard (`.billingUrl`; `.accessEndedAt` when known); not retryable. Before API 2.27.0 a failed payment was refused at once with a 403 without a code, raised as `TierForbiddenError`. |
 | `RateLimitedError` | `RATE_LIMITED`, `QUOTA_EXHAUSTED` | 429 — `QUOTA_EXHAUSTED` (legacy plans' used-up quota) is never retried; `resetsAt` says when it refills |
 | `InternalServerError` | `INTERNAL` | 500 |
 | `UpstreamError` | `UPSTREAM_ERROR` | 502; Cloudflare 520–523 |
@@ -504,9 +575,13 @@ try {
 | `TimeoutError` | `TIMEOUT` (504, 524; 503 from `getCounterparts`, with `.partial` / `.serverTimeoutMs`) / `REQUEST_TIMEOUT` (status 0, the SDK's own timeout) | |
 | `NetworkError` | `CONNECTION_ERROR` | 0 (transport failure, or the connection dropped — incl. mid-export) |
 | `RequestAbortedError` | `ABORTED` | 0 (your `signal` fired) |
-| `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx whose body was not JSON (e.g. a proxy HTML page) |
+| `InvalidResponseError` | `INVALID_RESPONSE` | a 2xx that is not the documented shape: no body, a body that is not JSON (e.g. a proxy HTML page), JSON that is not an object, `success: false`, a list such as `results` that is missing where the endpoint always sends it, is not a list, or holds items that are not objects, or an object such as `document` that is missing or not an object. Never read as an empty result; unknown extra fields are accepted. The message never quotes the body. |
 | `IncompleteExportError` | `INCOMPLETE_EXPORT` | 0 — an export ended without a complete `_done` trailer, or the server sent an `_error` line (`rowsRead`, `details`) |
 | `LexAPIError` (base) | `INTERNAL` | any other status (e.g. 409, 413), with `status` kept |
+
+`PaymentPastDueError` extends `TierForbiddenError`, so a handler for `TierForbiddenError` still catches a failed payment, as it did before API 2.27.0. To tell the two apart, check `PaymentPastDueError` (or `err.code === "PAYMENT_PAST_DUE"`) first.
+
+**Response text on errors.** No error message quotes the response body. For a body that is not JSON, the first 200 characters (code points) are on `err.bodyExcerpt`; for an `InvalidResponseError` about JSON of the wrong shape, the parsed value is on `err.body`. Both are raw response content that may contain document text: do not show them to a model or log them by default. Neither is an own property of the error (both are read through getters), so `console.log(err)`, `util.inspect(err)` and `JSON.stringify(err)` leave them out. A `2xx` answer with `success: false` and an API error in its body throws that error (e.g. `NotFoundError`) with the `2xx` status.
 
 **`instanceof` across builds.** The package ships an ESM and a CommonJS build; in a process that loads both (a CommonJS dependency wrapping the SDK inside an ESM app, Next.js, …) they are two copies of every class. The error classes carry a shared brand (`Symbol.for`), so `err instanceof NotFoundError` is still true for an error thrown by the other copy. `isLexAPIError(err)` / `isLexAPIError(err, NotFoundError)` does the same as a function.
 
@@ -532,6 +607,7 @@ npm run lint        # tsc --noEmit (strict)
 npm test            # vitest (Node ≥ 20)
 npm run build       # tsup -> dist/ (ESM + CJS + d.ts / d.cts)
 npm run smoke:dist  # framework-free check of the built bundles (runs on Node 18+)
+npm run check:readme # type-check this README's TypeScript examples against dist/
 ```
 
-See [PLAN.md](PLAN.md) for the endpoint coverage matrix and SDK contract. Docs: <https://lex-api.com/docs?ref=npm-sdk>
+See [docs/sdk-contract.md](https://github.com/Lex-API/lexapi-typescript/blob/main/docs/sdk-contract.md) for the SDK contract. Docs: <https://lex-api.com/docs?ref=npm-sdk>

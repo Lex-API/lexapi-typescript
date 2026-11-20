@@ -1,6 +1,6 @@
 /**
  * Top-level `code` on legacy-shape bodies and `QUOTA_EXHAUSTED`
- * (PLAN.md §1.2 / §1.3; lex-api PR #304). The code takes precedence over the
+ * (SDK contract §1.2 / §1.3; API 2.4.0). The code takes precedence over the
  * status-derived one, a quota 429 is never retried and exposes no
  * retry-after, and the absence-based detection stays as the fallback for
  * older servers.

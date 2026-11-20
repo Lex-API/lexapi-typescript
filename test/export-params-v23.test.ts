@@ -1,5 +1,5 @@
 /**
- * Export parameters for API 2.3.0 (lex-api #303): `documentTypeCode`,
+ * Export parameters for API 2.3.0: `documentTypeCode`,
  * `changedSince`, and the one client-side check that mirrors the server's
  * 400 exactly (`limit` a positive integer).
  */

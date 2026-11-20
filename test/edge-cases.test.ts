@@ -1,5 +1,6 @@
 /**
- * Regression tests for the adversarial review of PR #8 (S1–S12, N1–N12).
+ * Edge cases: export endings, timeouts, retries, key redaction, dual-package
+ * identity, aborts and error parsing.
  * Network behaviour runs against a real local `node:http` server so body
  * stalls, mid-stream disconnects and socket closes are real, not mocked.
  */
@@ -69,7 +70,7 @@ const META = JSON.stringify({ _meta: { totalMatching: 3, streaming: 3, truncated
 const ROW = JSON.stringify({ celex: "32016R0679", title: "GDPR" });
 const DONE = JSON.stringify({ _done: { written: 1, truncated: false, skippedStubs: 0 } });
 
-describe("S1 — export ending without _done", () => {
+describe("export ending without _done", () => {
   it("throws IncompleteExportError (with rowsRead) instead of finishing quietly", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/x-ndjson" });
@@ -100,7 +101,7 @@ describe("S1 — export ending without _done", () => {
   });
 });
 
-describe("S2 — mid-stream disconnect", () => {
+describe("mid-stream disconnect", () => {
   it("throws NetworkError (a LexAPIError) carrying the row count", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/x-ndjson" });
@@ -117,7 +118,7 @@ describe("S2 — mid-stream disconnect", () => {
   });
 });
 
-describe("S3 — the timeout covers the body", () => {
+describe("the timeout covers the body", () => {
   it("times out a JSON call whose server sends headers and then stalls", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
@@ -172,7 +173,7 @@ describe("S3 — the timeout covers the body", () => {
   });
 });
 
-describe("S4 — read-only POST retries only app-generated 5xx", () => {
+describe("read-only POST retries only app-generated 5xx", () => {
   const optIn = (fetchMock: typeof fetch) =>
     new LexAPI({ apiKey: "lex_k", fetch: fetchMock, retry: { ...FAST_RETRY, retryReadOnlyPosts: true } });
   const OK = () => jsonResponse(200, { success: true, results: [] });
@@ -183,7 +184,7 @@ describe("S4 — read-only POST retries only app-generated 5xx", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("retries an app 504 identified by RateLimit-Limit (pre-#299 deploys)", async () => {
+  it("retries an app 504 identified by RateLimit-Limit (servers before API 2.1.0)", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(504, { success: false, error: { code: "TIMEOUT", message: "upstream" } }, { "ratelimit-limit": "120" }),
       OK(),
@@ -211,7 +212,7 @@ describe("S4 — read-only POST retries only app-generated 5xx", () => {
   });
 });
 
-describe("S9 — the API key never leaks through inspect / JSON", () => {
+describe("the API key never leaks through inspect / JSON", () => {
   it("redacts the key in util.inspect, console-style formatting and JSON.stringify", () => {
     const client = new LexAPI({ apiKey: "lex_secret_key_123", baseUrl });
     expect(inspect(client, { depth: 10, showHidden: true })).not.toContain("lex_secret_key_123");
@@ -241,7 +242,7 @@ describe("S9 — the API key never leaks through inspect / JSON", () => {
   });
 });
 
-describe("S10 — instanceof across two copies of the package (dual-package hazard)", () => {
+describe("instanceof across two copies of the package (dual-package hazard)", () => {
   it("errors from another module instance satisfy instanceof and isLexAPIError", async () => {
     const spec = "../src/errors.ts?second-copy";
     const other = (await import(/* @vite-ignore */ spec)) as typeof import("../src/errors.js");
@@ -270,7 +271,7 @@ describe("S10 — instanceof across two copies of the package (dual-package haza
   });
 });
 
-describe("S11 — AbortSignal per call", () => {
+describe("AbortSignal per call", () => {
   it("aborts an in-flight request", async () => {
     handler = () => {
       /* never answers */
@@ -324,8 +325,8 @@ describe("S11 — AbortSignal per call", () => {
   });
 });
 
-describe("N1 / N2 / N3 — status, body and Retry-After edge cases", () => {
-  it("N1: unmapped 4xx are code INTERNAL per §1.3 but NOT an InternalServerError; status is kept", async () => {
+describe("status, body and Retry-After edge cases", () => {
+  it("unmapped 4xx are code INTERNAL per §1.3 but NOT an InternalServerError; status is kept", async () => {
     const e409 = await new LexAPI({ apiKey: "k", fetch: fetchSequence(new Response("", { status: 409 })) })
       .getInfo()
       .catch((e: unknown) => e as LexAPIError) as LexAPIError;
@@ -344,15 +345,16 @@ describe("N1 / N2 / N3 — status, body and Retry-After edge cases", () => {
     expect(e507).toBeInstanceOf(InternalServerError);
   });
 
-  it("N2: a 200 with a non-JSON body throws InvalidResponseError", async () => {
+  it("a 200 with a non-JSON body throws InvalidResponseError", async () => {
     const fetchMock = fetchSequence(new Response("<html>cf</html>", { status: 200, headers: { "content-type": "text/html" } }));
     const error = await new LexAPI({ apiKey: "k", fetch: fetchMock }).getInfo().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(InvalidResponseError);
     expect((error as InvalidResponseError).code).toBe("INVALID_RESPONSE");
-    expect((error as InvalidResponseError).body).toBe("<html>cf</html>");
+    expect((error as InvalidResponseError).body).toBeUndefined();
+    expect((error as InvalidResponseError).bodyExcerpt).toBe("<html>cf</html>");
   });
 
-  it("N3: an empty Retry-After falls back to backoff instead of a 0 ms hammer", async () => {
+  it("an empty Retry-After falls back to backoff instead of a 0 ms hammer", async () => {
     vi.useFakeTimers();
     try {
       const fetchMock = fetchSequence(new Response("", { status: 503, headers: { "retry-after": "" } }), jsonResponse(200, {}));
@@ -370,7 +372,7 @@ describe("N1 / N2 / N3 — status, body and Retry-After edge cases", () => {
     }
   });
 
-  it("N12: an HTTP-date Retry-After drives the wait", async () => {
+  it("an HTTP-date Retry-After drives the wait", async () => {
     vi.useFakeTimers();
     try {
       const date = new Date(Date.now() + 3_000).toUTCString();
@@ -398,7 +400,7 @@ describe("N1 / N2 / N3 — status, body and Retry-After edge cases", () => {
   });
 });
 
-describe("N4 — empty webhook secret", () => {
+describe("empty webhook secret", () => {
   it("throws a WebhookSignatureError('missing_secret') from every helper", async () => {
     for (const call of [
       () => computeSignature("{}", ""),
@@ -412,27 +414,49 @@ describe("N4 — empty webhook secret", () => {
   });
 });
 
-describe("N5 / N6 — NDJSON scanning and cancel()", () => {
-  it("N5: parses a multi-megabyte line delivered in small chunks in linear time", async () => {
-    const big = JSON.stringify({ celex: "X", htmlContent: "a".repeat(8_000_000) });
-    const text = `${META}\n${big}\n${DONE}\n`;
-    const bytes = new TextEncoder().encode(text);
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (let i = 0; i < bytes.length; i += 256) controller.enqueue(bytes.slice(i, i + 256));
-        controller.close();
-      },
-    });
-    const client = new LexAPI({ apiKey: "k", fetch: async () => new Response(body, { status: 200 }) });
-    const started = Date.now();
-    const stream = await client.export();
-    const rows: Array<{ htmlContent?: string }> = [];
-    for await (const row of stream) rows.push(row as { htmlContent?: string });
-    expect(rows[0]?.htmlContent).toHaveLength(8_000_000);
-    expect(Date.now() - started).toBeLessThan(3_000); // quadratic rescans take far longer
+describe("NDJSON scanning and cancel()", () => {
+  it("parses a multi-megabyte line delivered in small chunks in linear time", async () => {
+    // Time one export whose single row holds `size` characters, delivered in 256-byte chunks.
+    const exportOnce = async (size: number): Promise<number> => {
+      const big = JSON.stringify({ celex: "X", htmlContent: "a".repeat(size) });
+      const bytes = new TextEncoder().encode(`${META}\n${big}\n${DONE}\n`);
+      // Chunks are produced on demand: a stream with every chunk queued up
+      // front costs the runtime more than linear time to drain by itself.
+      let offset = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset >= bytes.length) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(bytes.slice(offset, offset + 256));
+          offset += 256;
+        },
+      });
+      const client = new LexAPI({
+        apiKey: "k",
+        baseUrl: "http://127.0.0.1:9/api/v1",
+        fetch: async () => new Response(body, { status: 200 }),
+      });
+      const started = performance.now();
+      const stream = await client.export();
+      const rows: Array<{ htmlContent?: string }> = [];
+      for await (const row of stream) rows.push(row as { htmlContent?: string });
+      const elapsed = performance.now() - started;
+      expect(rows[0]?.htmlContent).toHaveLength(size);
+      return elapsed;
+    };
+    // Best of two runs at each size, measured in the same process, so machine
+    // load affects both sides. Four times the input takes about four times as
+    // long when the scan is linear and about sixteen times when it rescans.
+    const best = async (size: number): Promise<number> => Math.min(await exportOnce(size), await exportOnce(size));
+    await exportOnce(200_000); // warm-up
+    const small = await best(2_000_000);
+    const large = await best(8_000_000);
+    expect(large / Math.max(small, 1)).toBeLessThan(9);
   });
 
-  it("N6: cancel() during a pending read settles immediately and closes the socket", async () => {
+  it("cancel() during a pending read settles immediately and closes the socket", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/x-ndjson" });
       res.write(`${META}\n`);
@@ -451,7 +475,7 @@ describe("N5 / N6 — NDJSON scanning and cancel()", () => {
   });
 });
 
-describe("S6 — batch errors as the server sends them", () => {
+describe("batch errors as the server sends them", () => {
   it("types { celex, error }", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(200, {
@@ -465,7 +489,7 @@ describe("S6 — batch errors as the server sends them", () => {
   });
 });
 
-describe("round 2 — R2: abort releases the export connection even while nobody reads", () => {
+describe("abort releases the export connection even while nobody reads", () => {
   it("closes the socket on abort with no iteration in progress, then iteration throws ABORTED", async () => {
     handler = (_req, res) => {
       res.writeHead(200, { "content-type": "application/x-ndjson" });

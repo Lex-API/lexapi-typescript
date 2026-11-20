@@ -1,11 +1,12 @@
 /**
- * SDK contract (PLAN.md §1, shared verbatim with lexapi-python) — one test
+ * SDK contract (docs/sdk-contract.md §1, shared with lexapi-python) — one test
  * per rule, so a drift between the two SDKs shows up as a named failure.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   InternalServerError,
+  InvalidResponseError,
   LexAPI,
   LexAPIError,
   NetworkError,
@@ -277,10 +278,17 @@ describe("§1.3 typed errors", () => {
     expect(net.status).toBe(0);
   });
 
-  it("a 204 or an empty 2xx body is a successful empty object", async () => {
+  it("a 204 or an empty 2xx body is InvalidResponseError, except on DELETE /webhooks/{id}", async () => {
     for (const res of [new Response(null, { status: 204 }), new Response("", { status: 200 })]) {
-      const result = await new LexAPI({ apiKey: "k", fetch: fetchSequence(res) }).getCitationStats();
-      expect(typeof result).toBe("object");
+      const error = await new LexAPI({ apiKey: "k", fetch: fetchSequence(res) })
+        .getCitationStats()
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(InvalidResponseError);
+      expect((error as InvalidResponseError).message).toBe(
+        `[INVALID_RESPONSE] Expected JSON, got no body (HTTP ${res.status})`,
+      );
+      const deleted = await new LexAPI({ apiKey: "k", fetch: fetchSequence(res) }).webhooks.delete("w1");
+      expect(typeof deleted).toBe("object");
     }
   });
 });
@@ -375,7 +383,7 @@ describe("§1.8 export stream", () => {
   });
 });
 
-describe("§1.2 never-reached transport codes (round 2 — R5)", () => {
+describe("§1.2 never-reached transport codes", () => {
   const billed = async (cause: unknown) => {
     const fetchMock = fetchSequence(Object.assign(new TypeError("fetch failed"), { cause }) as unknown as Response, OK());
     await http(fetchMock).requestJson({ method: "POST", path: "/webhooks", body: {} }).catch(() => undefined);

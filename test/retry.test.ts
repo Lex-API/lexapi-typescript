@@ -10,7 +10,7 @@ import {
 } from "../src/index.js";
 import { FAST_RETRY, fetchSequence, jsonResponse } from "./helpers.js";
 
-const OK = () => jsonResponse(200, { success: true, service: "LexAPI" });
+const OK = () => jsonResponse(200, { success: true, service: "LexAPI", results: [], document: {} });
 /** An app-generated error: the API's rate limiter stamps `RateLimit-*` on every app response (§1.2). */
 const ERR = (status: number, code = "UPSTREAM_ERROR", headers?: Record<string, string>) =>
   jsonResponse(status, { success: false, error: { code, message: "transient" } }, { "ratelimit-limit": "60", ...headers });
@@ -193,9 +193,9 @@ describe("retry policy", () => {
     await expect(pending).resolves.toMatchObject({ service: "LexAPI" });
   });
 
-  it("prefers the Retry-After header over a buggy JSON retryAfter body field", async () => {
+  it("prefers the Retry-After header over an epoch-valued JSON retryAfter body field", async () => {
     vi.useFakeTimers();
-    const epochRetryAfter = Math.round(Date.now() / 1000) + 3600; // buggy epoch-seconds body value
+    const epochRetryAfter = Math.round(Date.now() / 1000) + 3600; // epoch-seconds body value
     const fetchMock = fetchSequence(
       jsonResponse(
         429,
@@ -316,9 +316,12 @@ describe("read-only POST retries (opt-in)", () => {
       (c) => c.resolve("32016R0679"),
       (c) => c.semanticSearch({ query: "x" }),
       (c) => c.semanticLegislationSearch({ query: "x", asOf: "2020-01-01" }),
+      (c) => c.legislationAsOf({ document: "32016R0679", asOf: "2020-01-01" }),
     ];
+    const asOfOk = () =>
+      jsonResponse(200, { success: true, document: "32016R0679", asOfResolved: false, act: {}, provenance: {} });
     for (const call of reads) {
-      const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), OK());
+      const fetchMock = fetchSequence(ERR(504, "TIMEOUT"), call === reads[reads.length - 1] ? asOfOk() : OK());
       await call(client(fetchMock));
       expect(fetchMock).toHaveBeenCalledTimes(2);
     }
