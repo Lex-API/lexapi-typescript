@@ -1,8 +1,5 @@
 /**
- * Hand-curated types mirroring LexAPI's `openapi.yaml` (LexAPI 2.0.0) and
- * `docs.md`, cross-checked against the server's controllers.
- *
- * Validated against: lex-api `main` @ 633eb67 (2026-10-26, PR #298).
+ * Hand-curated types mirroring LexAPI's `openapi.yaml` and `docs.md`.
  *
  * Conventions:
  * - `type: [X, 'null']` becomes `X | null`; properties outside a `required`
@@ -115,6 +112,16 @@ export interface SubscriptionInfo {
   monthlyCredits?: number | null;
   /** e.g. `"120 requests/minute"`. `"0 requests/minute"` means unlimited (hand-priced plans). */
   rateLimit?: string;
+  /**
+   * `getInfo`: the most results one case-law semantic search returns on your
+   * plan (what `limit` is clamped to); `0` without semantic search (API 2.24.0).
+   */
+  maxSemanticResults?: number;
+  /**
+   * `getInfo`: the same for legislation semantic search, at most 50 per call;
+   * `0` without semantic search (API 2.24.0).
+   */
+  maxSemanticLegislationResults?: number;
 }
 
 /**
@@ -324,7 +331,7 @@ export interface TextAvailability {
   availableLanguages?: string[] | null;
   /** Where EUR-Lex itself points for the text (e.g. the European Parliament site). */
   externalSource?: string;
-  /** e.g. `"cellar-manifestations"`, `"parse-worker"` (our own `too_large` verdict). */
+  /** e.g. `"cellar-manifestations"`, `"parse-worker"` (`too_large` verdict). */
   source?: string;
   checkedAt?: string;
   /** Base acts only: newest consolidated version dated on or before today, in the requested language. */
@@ -388,8 +395,56 @@ export interface DocumentUrls {
   xml?: string;
 }
 
+/** Why an act is not in force today (`inForce: false`). */
+export type NotInForceReason = "no_longer_in_force" | "not_yet_in_force" | (string & {});
+
+/**
+ * Whether an act is in force today (UTC), as recorded by the Publications
+ * Office (API 2.19.0). All four fields are absent when the status is unknown,
+ * and on documents that have no in-force status (case law, preparatory acts).
+ * A consolidated text carries the label of the act it consolidates, a
+ * corrigendum the label of the act it corrects. It does not cover amendments
+ * (an act amended since is still `inForce: true`) or dates of application.
+ */
+export interface InForceLabel {
+  /** In force today (UTC). */
+  inForce?: boolean;
+  /**
+   * With `inForce: false` only. `no_longer_in_force`: past its end of
+   * validity (repealed or expired). `not_yet_in_force`: before its entry into force.
+   */
+  notInForceReason?: NotInForceReason;
+  /**
+   * The act's last day in force (`YYYY-MM-DD`), also a future date. Present
+   * only when exactly one end date is recorded for the act.
+   */
+  endOfValidity?: string;
+  /** With `not_yet_in_force`, the entry into force (`YYYY-MM-DD`) when it is recorded. */
+  entryIntoForce?: string;
+}
+
+/**
+ * Which fields of the object are the publisher's text and which were derived
+ * (API 2.20.0). Each value lists paths relative to the object that carries it
+ * (`content.articles[].content`); only classes with a field in the response
+ * appear. `official_source_text` means the publisher's wording, not that the
+ * text is legally authentic.
+ */
+export interface FieldProvenance {
+  /** The publisher's wording as extracted by LexAPI. */
+  official_source_text?: string[];
+  /** Parsed or computed by rule: metadata, identifiers, the in-force fields, the split into articles. */
+  machine_extracted_structure?: string[];
+  /** Machine-translated text. LexAPI serves none. */
+  machine_generated_translation?: string[];
+  /** Produced by a model: summaries, similarity scores, extracted outcomes. */
+  machine_generated_interpretation?: string[];
+  /** Written by LexAPI: notes and attribution statements. */
+  editorial_enrichment?: string[];
+}
+
 /** Fully-parsed document: metadata + structured content. */
-export interface Document extends DocumentMetadata {
+export interface Document extends DocumentMetadata, InForceLabel {
   /** ISO code of the language rendition actually served. */
   language?: string;
   /** Present only on a fallback — the language originally requested. */
@@ -407,6 +462,10 @@ export interface Document extends DocumentMetadata {
   fetchedAt?: string;
   /** Monotonic corpus version of this CELEX (corpus-served documents). */
   version?: number;
+  /** Where the document comes from (API 2.20.0). */
+  provenance?: Provenance;
+  /** Which fields are the publisher's text and which were derived (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
 }
 
 /**
@@ -548,7 +607,7 @@ export interface SearchResponse extends CreditedResponse, WithResponseHeaders {
   partial?: boolean;
   partialReason?: string;
   /**
-   * Comma-joined dimensions on which a controller-side post-filter dropped
+   * Comma-joined dimensions on which a server-side post-filter dropped
    * rows (`author`, `date`). `"date"` signals the recall-vs-pagination
    * trade-off: raise `maxPages` to widen recall on tight date filters.
    */
@@ -660,8 +719,8 @@ export interface RecentDocumentsParams {
   domain?: Domain;
   /**
    * ONE subdomain. A subdomain filter sends the request to EUR-Lex result
-   * pages, where EUR-Lex reads only the first `DTS_SUBDOM` value
-   * (lex-api `server/utils/urlBuilder.js`), so the SDK accepts a single value.
+   * pages, where EUR-Lex reads only the first `DTS_SUBDOM` value,
+   * so the SDK accepts a single value.
    */
   subdomain?: Subdomain;
   /** Result language (default `en`). */
@@ -731,7 +790,14 @@ export interface DocumentMetadataRequest {
 export interface DocumentMetadataResponse extends CreditedResponse, WithResponseHeaders {
   success: boolean;
   /** Metadata-only — no `content`. Includes the canonical EUR-Lex URLs. */
-  metadata: DocumentMetadata & {
+  metadata: DocumentMetadata & InForceLabel & {
+    /**
+     * Where the document comes from (API 2.20.0). The response carries no
+     * text: `contentHash` is `null`.
+     */
+    provenance?: Provenance;
+    /** Which fields are the publisher's text and which were derived (API 2.20.0). */
+    fieldProvenance?: FieldProvenance;
     /**
      * Sector-3 base acts only, and only when a recent document read already
      * looked it up (cached ~24 h). Absent means "not looked up", not "none exists".
@@ -1552,6 +1618,45 @@ export interface SemanticLegislationSearchOptions extends SemanticSearchOptions 
    * invalid `asOf` is a 400 (refunded in full).
    */
   asOf?: string;
+  /**
+   * `true`: only hits whose act is known to be in force today (UTC); hits not
+   * in force and hits with unknown status are removed and counted in the
+   * response's `inForceFilter`, so the page can come back shorter than
+   * `limit`. With `asOf` the filter is still about today (API 2.19.0).
+   */
+  inForce?: boolean;
+}
+
+/**
+ * Why a semantic case-law hit carries no `text` (API 2.30.0). Not the
+ * document reasons ({@link TextUnavailableReason}): a hit never carries
+ * those, and a document never carries `not_in_corpus`.
+ *
+ * - `not_in_corpus` — LexAPI does not hold the text of this document in the
+ *   hit's language. `getDocument` with `metadata.celex_id` reads it (a
+ *   separately charged read).
+ * - `unknown` — LexAPI could not check its copy for this request; retrying
+ *   the search may return the text.
+ *
+ * Open: later API versions may add values, so do not switch on it
+ * exhaustively.
+ */
+export type SemanticHitTextUnavailableReason = "not_in_corpus" | "unknown" | (string & {});
+
+/**
+ * Whether a semantic case-law hit carries `text`, and if not, why
+ * (`semanticSearch` with `includeText: true`, API 2.30.0). Not the
+ * document {@link TextAvailability}: same name on the wire, other reasons.
+ * Absent on `nationalSemanticSearch` hits.
+ */
+export interface SemanticHitTextAvailability {
+  /**
+   * `true`: the hit carries `text`. `false`: it carries `snippet` instead —
+   * the head of the machine-written `summary`, not court text.
+   */
+  available: boolean;
+  /** Absent when `available` is true. An open string: future values are possible. */
+  reason?: SemanticHitTextUnavailableReason;
 }
 
 /** Single case-law match from `/search/semantic`. */
@@ -1564,10 +1669,24 @@ export interface SemanticCaseLawResult {
   case_id?: string | null;
   /** Cosine similarity, 0–1. */
   score?: number;
-  /** Full matched-document text — present ONLY with `includeText: true`. */
+  /**
+   * Full matched-document text — present ONLY with `includeText: true`, on
+   * hits that have it (`textAvailability.available: true`). A blank `text`
+   * from the index is passed through and counts as no text.
+   */
   text?: string;
-  /** ~600-character preview — present by default (replaced by `text` with `includeText`). */
+  /**
+   * ~600-character preview — present by default. With `includeText: true`,
+   * present only on hits without text (API 2.30.0).
+   */
   snippet?: string;
+  /**
+   * With `includeText: true` only (API 2.30.0), on every `semanticSearch`
+   * hit: whether it carries `text`, and if not, why (`reason` is open — do
+   * not switch on it exhaustively). Absent without `includeText`, and absent
+   * on `nationalSemanticSearch` hits.
+   */
+  textAvailability?: SemanticHitTextAvailability;
   case_name?: string | null;
   case_number?: string | null;
   ecli?: string | null;
@@ -1597,6 +1716,8 @@ export interface SemanticCaseLawResult {
   extraction_confidence?: number;
   extraction_model?: string;
   extracted_at?: string;
+  /** Which fields of the hit are the publisher's text and which were derived (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
   /** Always includes `celex_id` when available — the persistent identity key. */
   metadata?: {
     celex_id?: string;
@@ -1606,6 +1727,12 @@ export interface SemanticCaseLawResult {
     [key: string]: unknown;
   };
   [key: string]: unknown;
+}
+
+/** A `semanticSearch` hit (EU case law), with the provenance of its document. */
+export interface EuSemanticCaseLawResult extends SemanticCaseLawResult {
+  /** Where the document comes from (API 2.20.0); `retrievedAt` and `contentHash` are `null` on hits. */
+  provenance?: Provenance;
 }
 
 /** Semantic-specific quota counters (legacy daily-call plans only). */
@@ -1622,7 +1749,7 @@ export interface SemanticCaseLawSearchResponse extends CreditedResponse, WithRes
   searchType?: "semantic-case-law";
   query?: string;
   resultCount?: number;
-  results: SemanticCaseLawResult[];
+  results: EuSemanticCaseLawResult[];
   /**
    * Present only on best-effort responses (low-confidence hits) — its
    * presence is itself the low-confidence signal. Omitted (never `null`) otherwise.
@@ -1636,6 +1763,8 @@ export interface SemanticCaseLawSearchResponse extends CreditedResponse, WithRes
   hyde?: boolean;
   /** Present only when HyDE ran: the LLM-drafted hypothetical judgment passage. */
   hypotheticalDocument?: string;
+  /** Present only with `hypotheticalDocument`, which it marks as `machine_generated_interpretation` (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
   /** Opaque upstream pass-through; shape not stable — use `tookMs` for timing. */
   metadata?: Record<string, unknown>;
   /** Server-measured wall-clock time for this request, in ms. */
@@ -1653,6 +1782,8 @@ export interface SemanticCaseLawSearchResponse extends CreditedResponse, WithRes
  * - `no_longer_in_force` — `asOf` is after the act's end of validity.
  * - `in_force_dates_unknown` — the act's in-force dates could not be established.
  * - `not_in_language` — the version in force has no text in that language.
+ * - `amendment_not_consolidated` — an act amending the act may have applied on that date, and no
+ *   consolidated version listed for the date is known to include it.
  * - `text_unavailable` — the version in force has no text.
  * - `article_not_in_version` — that article/annex/recital does not exist in the version in force.
  * - `part_not_resolvable` — the match is a part that cannot be looked up by date (e.g. a table).
@@ -1673,6 +1804,7 @@ export type AsOfReason =
   | "no_longer_in_force"
   | "in_force_dates_unknown"
   | "not_in_language"
+  | "amendment_not_consolidated"
   | "text_unavailable"
   | "article_not_in_version"
   | "part_not_resolvable"
@@ -1689,13 +1821,17 @@ export type AsOfReason =
   | "credit_check_failed"
   | (string & {});
 
-/** Every documented {@link AsOfReason} value, in spec order (runtime list). */
+/**
+ * Every documented {@link AsOfReason} value, in spec order (runtime list).
+ * For `semanticLegislationSearch` with `asOf`; `legislationAsOf` has {@link AS_OF_LOOKUP_REASONS}.
+ */
 export const AS_OF_REASONS = [
   "not_yet_adopted",
   "not_yet_in_force",
   "no_longer_in_force",
   "in_force_dates_unknown",
   "not_in_language",
+  "amendment_not_consolidated",
   "text_unavailable",
   "article_not_in_version",
   "part_not_resolvable",
@@ -1712,7 +1848,7 @@ export const AS_OF_REASONS = [
   "credit_check_failed",
 ] as const;
 
-/** The version an `asOf` hit's text comes from. */
+/** The version an EU `asOf` hit's text comes from (national hits: {@link NationalAsOfVersion}). */
 export interface AsOfVersion {
   celex?: string;
   /** Consolidation date; `null` for the act as published. */
@@ -1774,8 +1910,19 @@ export interface SemanticLegislationResult {
     law_id?: string;
     consolidatedAsOf?: string | null;
   };
+  /** Which fields of the hit are the publisher's text and which were derived (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
   metadata?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+/**
+ * A `semanticLegislationSearch` hit (EU legislation): the article-level match
+ * plus the in-force label of its act (API 2.19.0) and its provenance.
+ */
+export interface EuSemanticLegislationResult extends SemanticLegislationResult, InForceLabel {
+  /** Where the document comes from (API 2.20.0); `retrievedAt` and `contentHash` are `null` on hits. */
+  provenance?: Provenance;
 }
 
 export interface SemanticLegislationSearchResponse extends CreditedResponse, WithResponseHeaders {
@@ -1783,7 +1930,19 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
   searchType?: "semantic-legislation";
   query?: string;
   resultCount?: number;
-  results: SemanticLegislationResult[];
+  results: EuSemanticLegislationResult[];
+  /**
+   * Present only when the request set `inForce: true` (API 2.19.0): the hits
+   * the filter removed that you would otherwise have seen. When
+   * `removedUnknown` is above 0 the response also carries a `hint`: unknown
+   * can be temporary.
+   */
+  inForceFilter?: {
+    /** Removed because their act is not in force today. */
+    removedNotInForce?: number;
+    /** Removed because their in-force status is unknown. */
+    removedUnknown?: number;
+  };
   /** `asOf` requests only — echo of the request's `asOf`. */
   asOf?: string;
   /** `asOf` requests only. */
@@ -1800,6 +1959,205 @@ export interface SemanticLegislationSearchResponse extends CreditedResponse, Wit
   tookMs?: number;
   /** Legacy daily-call plans only. */
   semanticUsage?: SemanticUsageInfo;
+}
+
+// ── POST /legislation/as-of ─────────────────────────────────────────
+
+/** Request for `legislationAsOf` (API 2.26.0). */
+export interface LegislationAsOfRequest {
+  /**
+   * A CELEX number, without a `CELEX:` prefix: an EU act (`32016R0679`). A consolidated id
+   * (`02016R0679-20160504`) is read as its act; the version is always chosen
+   * by `asOf`. For an ELI or a URL, call `resolve` first.
+   */
+  document: string;
+  /** The date, `YYYY-MM-DD`, from `1952-01-01` to today (UTC). */
+  asOf: string;
+  /**
+   * A whole article (`art_17`, `17`, `Article 17`, `6a`), an annex by its
+   * numeral or letter as printed (`anx_III`, `anx_A`), or recitals
+   * (`rct_26`, `rct_26-28`, at most 50). Numbers match exactly: `6` is not
+   * `6a`. Paragraphs and points are not addressable. Omit it to get the
+   * version only.
+   */
+  provision?: string;
+  /** Default `en`. */
+  language?: Language;
+}
+
+/**
+ * Why `asOfResolved` is false on `legislationAsOf`.
+ *
+ * - `not_yet_adopted` / `not_yet_in_force` / `no_longer_in_force` — the date is outside the act's dates.
+ * - `in_force_dates_unknown` — the act's dates do not establish it, or could not be read.
+ * - `act_type_not_supported` — the act is not a regulation, directive, decision or other act of
+ *   the institutions (CELEX sector 3) — for example a treaty or an international agreement.
+ * - `version_list_unavailable` / `version_lookup_cap` — the list of versions, or of the acts
+ *   amending the act, could not be read, or a lookup limit was reached. Retry.
+ * - `not_in_language` — the version for the date has no text in `language`.
+ * - `amendment_not_consolidated` — an act amending this act may have applied by the date, and no
+ *   listed version is known to include it.
+ *
+ * With `provision` only:
+ *
+ * - `article_not_in_version` — the version has no such article, annex or recital (`asOfVersion` is present).
+ * - `provision_ambiguous` — more than one part of the text answers to that id.
+ * - `version_not_parsed` — the text is not split into identifiable parts of that kind.
+ * - `text_unavailable` — the version has no text at the source.
+ * - `fetch_failed` / `fetch_timeout` / `fetch_pending` / `fetch_capacity` /
+ *   `fetch_budget_exhausted` / `request_deadline` — the text could not be fetched now. Retry.
+ * - `insufficient_credits` / `credit_check_failed` — the fetch was not paid for, so it was not made.
+ */
+export type AsOfLookupReason =
+  | "not_yet_adopted"
+  | "not_yet_in_force"
+  | "no_longer_in_force"
+  | "in_force_dates_unknown"
+  | "act_type_not_supported"
+  | "version_list_unavailable"
+  | "version_lookup_cap"
+  | "not_in_language"
+  | "amendment_not_consolidated"
+  | "text_unavailable"
+  | "article_not_in_version"
+  | "provision_ambiguous"
+  | "version_not_parsed"
+  | "fetch_budget_exhausted"
+  | "fetch_pending"
+  | "fetch_capacity"
+  | "fetch_failed"
+  | "fetch_timeout"
+  | "request_deadline"
+  | "insufficient_credits"
+  | "credit_check_failed"
+  | (string & {});
+
+/**
+ * Every documented {@link AsOfLookupReason} value, in spec order (runtime list).
+ * For `legislationAsOf`; `semanticLegislationSearch` with `asOf` has {@link AS_OF_REASONS}.
+ */
+export const AS_OF_LOOKUP_REASONS = [
+  "not_yet_adopted",
+  "not_yet_in_force",
+  "no_longer_in_force",
+  "in_force_dates_unknown",
+  "act_type_not_supported",
+  "version_list_unavailable",
+  "version_lookup_cap",
+  "not_in_language",
+  "amendment_not_consolidated",
+  "text_unavailable",
+  "article_not_in_version",
+  "provision_ambiguous",
+  "version_not_parsed",
+  "fetch_budget_exhausted",
+  "fetch_pending",
+  "fetch_capacity",
+  "fetch_failed",
+  "fetch_timeout",
+  "request_deadline",
+  "insufficient_credits",
+  "credit_check_failed",
+] as const;
+
+/** The version listed for the date. */
+export interface LegislationAsOfVersion {
+  /** CELEX of the version — a consolidated id, or the act itself for `as_published`. */
+  celex: string;
+  /**
+   * `consolidated`: a consolidated version. `as_published`: the act as
+   * published in the Official Journal — no consolidated version is dated on
+   * or before the date.
+   */
+  kind: "consolidated" | "as_published" | (string & {});
+  /**
+   * Consolidated versions only — the date the consolidated version carries.
+   * It can be earlier than the act's entry into force.
+   */
+  date?: string;
+  /**
+   * The day before the next version listed, in any language, and never
+   * later than the act's end of validity. Absent when not known.
+   */
+  validUntil?: string;
+  /** When the version list was read (ISO date-time), when known. */
+  checkedAt?: string;
+}
+
+/** What the Publications Office records about the act; a field is absent when not known. */
+export interface LegislationAsOfAct {
+  celex: string;
+  /** Date of the act. */
+  dateOfDocument?: string;
+  /** First entry into force. */
+  entryIntoForce?: string;
+  /** End of validity, when the act has exactly one. */
+  endOfValidity?: string;
+  /** Whether the act is in force **today** (UTC). It says nothing about `asOf`. */
+  inForceToday?: boolean;
+}
+
+/** One article, annex or recital range of the version returned. */
+export interface LegislationAsOfProvision {
+  /** The provision as normalised: `art_17`, `anx_III`, `rct_26`, `rct_26-28`. */
+  id: string;
+  /** Its heading in the text, e.g. `Article 17`. */
+  number?: string;
+  /** Its title, when it has one. */
+  title?: string;
+  /** The text of the provision in the version returned. */
+  text: string;
+}
+
+/** Where a document comes from. A value LexAPI does not know is `null`. */
+export interface Provenance {
+  /** Who publishes the document, e.g. `Publications Office of the European Union`. */
+  publisher: string | null;
+  /** The document's page at its publisher. */
+  sourceUrl: string | null;
+  /** The publisher's identifier — for EU documents, the CELEX number. */
+  sourceIdentifier: string | null;
+  /** When LexAPI fetched what the response returns (ISO date-time). */
+  retrievedAt: string | null;
+  /** SHA-256 fingerprint of the text LexAPI holds. */
+  contentHash: string | null;
+  /** Which version of the text this is — for EU documents, the CELEX number of the text served. */
+  versionIdentifier: string | null;
+  /** Language of the text (ISO 639-1). */
+  language: string | null;
+  licence: string | null;
+}
+
+/**
+ * Answer of `legislationAsOf`. Use `asOfVersion` and `provision` only when
+ * `asOfResolved` is `true`; otherwise `asOfReason` says why, and there is no
+ * `provision`.
+ */
+export interface LegislationAsOfResponse extends CreditedResponse, WithResponseHeaders {
+  success: boolean;
+  /** CELEX of the act (the base act when a consolidated id was sent). */
+  document: string;
+  language: Language;
+  /** Echo of the request's `asOf`. */
+  asOf: string;
+  /** Whether the version for the date — and, with `provision`, its text — was established. */
+  asOfResolved: boolean;
+  /** Why `asOfResolved` is false. */
+  asOfReason?: AsOfLookupReason;
+  /** The version listed for the date. Can be present on an unresolved `provision` answer. */
+  asOfVersion?: LegislationAsOfVersion;
+  act: LegislationAsOfAct;
+  /** Present only when `provision` was asked and `asOfResolved` is `true`. */
+  provision?: LegislationAsOfProvision;
+  /** Present (`true`) when the resolved version is a consolidated version. */
+  consolidated?: boolean;
+  /** Consolidated versions only — the consolidation date (`YYYY-MM-DD`). */
+  consolidatedAsOf?: string;
+  /** Consolidated versions only — the act; cite it as the authentic source. */
+  baseCelex?: string;
+  /** Consolidated versions only — says the text is not the authentic one. */
+  consolidatedNote?: string;
+  provenance: Provenance;
 }
 
 // ── National law ────────────────────────────────────────────────────
@@ -2301,9 +2659,9 @@ export interface NationalSemanticCaseLawOptions {
 }
 
 /**
- * Options for `nationalLegislationSemanticSearch`. No `hyde`, no `asOf` —
- * both are EU-only. See {@link NationalSemanticCaseLawOptions} for why this
- * does not extend `SemanticSearchOptions`.
+ * Options for `nationalLegislationSemanticSearch`. No `hyde` (no national
+ * index rewrites queries). See {@link NationalSemanticCaseLawOptions} for why
+ * this does not extend `SemanticSearchOptions`.
  */
 export interface NationalSemanticLegislationOptions {
   query: string;
@@ -2313,6 +2671,20 @@ export interface NationalSemanticLegislationOptions {
   language?: string;
   includeText?: boolean;
   filters?: NationalLegislationFilters;
+  /**
+   * Label each hit for this date (`YYYY-MM-DD`, from `1800-01-01` to today,
+   * UTC; API 2.29.0), a `YYYY-MM-DD` string. The search
+   * runs over today's texts only: a provision repealed or replaced since that
+   * date cannot be found, and the text is never swapped for an earlier one.
+   * A hit is resolved (`asOfResolved: true`) only when the publisher's dates,
+   * as of LexAPI's last recorded read of the act (`asOfVersion.checkedAt`),
+   * show that today's wording already applied on the date. An unresolved hit
+   * keeps today's wording; it is not established as the text for the date.
+   * LexAPI holds such dates for Austria and Spain; elsewhere every hit is
+   * `asof_not_available`. `in_force` and the `inForce` filter stay about
+   * today. No extra cost; an invalid date is a 400 `InvalidParamsError`.
+   */
+  asOf?: string;
 }
 
 /**
@@ -2341,17 +2713,103 @@ export interface NationalSemanticCaseLawResult extends SemanticCaseLawResult {
 }
 
 /**
- * Single hit from `nationalLegislationSemanticSearch`, same shape as
- * {@link SemanticLegislationResult} plus national fields. Unlike the EU hit,
- * a national hit always carries `law_title`, `article_ref`, `section`,
- * `language`, `in_force`, `valid_from`, `valid_to` and `law_type` — `null`
- * when the index has nothing for the unit (API 2.8.0). NOTE: these index
- * fields are deliberately snake_case — that is what the server sends — do
- * not "fix" the casing without changing the server first. The act's
- * cross-jurisdiction metadata is under `document`.
+ * Why a national legislation hit is not resolved for `asOf`
+ * (`asOfResolved: false`, API 2.29.0). The hit keeps today's wording, which
+ * is not established as the text for that date.
+ *
+ * - `provision_amended_since` — the publisher dates today's wording from after `asOf`: the
+ *   provision was amended or added since, or the publisher's consolidated record of it starts later.
+ * - `no_longer_in_force` — the provision's or the act's end of validity is before `asOf`.
+ * - `provision_dates_unknown` — no usable publisher date for the provision's current wording, it
+ *   could not be matched to the hit, or LexAPI's copy of the act may be out of date on that date.
+ * - `asof_not_available` — LexAPI holds no per-provision dates for this country.
  */
-export interface NationalSemanticLegislationResult
-  extends Omit<SemanticLegislationResult, "law_id" | "law_title" | "article_ref" | "section" | "language"> {
+export type NationalAsOfReason =
+  | "provision_amended_since"
+  | "no_longer_in_force"
+  | "provision_dates_unknown"
+  | "asof_not_available"
+  | (string & {});
+
+/** Every documented {@link NationalAsOfReason} value, in spec order (runtime list). */
+export const NATIONAL_AS_OF_REASONS = [
+  "provision_amended_since",
+  "no_longer_in_force",
+  "provision_dates_unknown",
+  "asof_not_available",
+] as const;
+
+/**
+ * The publisher's dates for a national hit's current wording, on a hit with
+ * `asOfResolved: true` (API 2.29.0). Not the EU {@link AsOfVersion}: `kind`
+ * is always `current_unit`, and the text is today's. `validTo`, `sourceId`
+ * and `checkedAt` are `null` when not known.
+ */
+export interface NationalAsOfVersion {
+  kind: "current_unit";
+  /** The publisher's start date of this wording (`YYYY-MM-DD`, on or before `asOf`). */
+  validFrom: string;
+  /** The publisher's end date of this wording, when given; `null` when open. */
+  validTo: string | null;
+  /** The publisher's id of the provision (the RIS document number in Austria, the BOE block id in Spain). */
+  sourceId: string | null;
+  /**
+   * The day (`YYYY-MM-DD`) of the last read of the act that LexAPI recorded.
+   * LexAPI may have checked the act since without finding a change. Dates
+   * and wording are as of that read; a change the publisher made after it is
+   * not reflected.
+   */
+  checkedAt: string | null;
+}
+
+/**
+ * Tells a national {@link NationalAsOfVersion} from an EU {@link AsOfVersion}
+ * by `kind` (`current_unit`). The EU `kind` is an open union, so TypeScript
+ * cannot narrow on a `kind` comparison alone; this guard does. `false` for
+ * `null`, `undefined` and anything that is not an object.
+ */
+export function isNationalAsOfVersion(
+  version: AsOfVersion | NationalAsOfVersion | null | undefined | unknown,
+): version is NationalAsOfVersion {
+  return typeof version === "object" && version !== null && (version as { kind?: unknown }).kind === "current_unit";
+}
+
+/**
+ * Single hit from `nationalLegislationSemanticSearch`: the fields of the
+ * {@link SemanticLegislationResult} hit a national hit carries (no
+ * consolidated-text fields; its own `asOf` fields) plus national fields.
+ * Unlike the EU hit, a national hit always carries `law_title`,
+ * `article_ref`, `section`, `language`, `in_force`, `valid_from`, `valid_to`
+ * and `law_type` — `null` when the index has nothing for the unit (API
+ * 2.8.0). NOTE: these index fields are deliberately snake_case — that is
+ * what the server sends — do not "fix" the casing without changing the
+ * server first. The act's cross-jurisdiction metadata is under `document`.
+ */
+export interface NationalSemanticLegislationResult {
+  /** Id of the matched chunk in the index; regenerated when the index is rebuilt — key on `law_id` + `article_ref`. */
+  id?: string;
+  /** Cosine similarity, 0–1. */
+  score?: number;
+  /** The matched unit's text — present ONLY with `includeText: true`. */
+  text?: string;
+  /** ~600-character preview of the matched text — present by default. */
+  snippet?: string;
+  chapter?: string | null;
+  exact_match_law_id?: boolean;
+  /** Which fields of the hit are the publisher's text and which were derived (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
+  metadata?: Record<string, unknown>;
+  /** `asOf` requests only — echo of the request's `asOf` (API 2.29.0). */
+  asOf?: string;
+  /**
+   * `asOf` requests only — `true` when the publisher's dates show that the
+   * wording returned (today's) already applied on `asOf`. The text is never swapped.
+   */
+  asOfResolved?: boolean;
+  /** Why `asOfResolved` is false; the hit keeps today's wording. */
+  asOfReason?: NationalAsOfReason;
+  /** `asOfResolved: true` only — the publisher's dates for the unit's current wording. */
+  asOfVersion?: NationalAsOfVersion;
   /** LexAPI id of the act. */
   law_id: string;
   /** Same as `law_id`. */
@@ -2376,6 +2834,7 @@ export interface NationalSemanticLegislationResult
   /** The matched act as the listing returns it, from LexAPI's own record (API 2.8.0). */
   document: NationalDocumentSummary;
   attribution: string;
+  [key: string]: unknown;
 }
 
 /**
@@ -2426,6 +2885,15 @@ export interface NationalSemanticLegislationResponse extends CreditedResponse, W
   query?: string;
   resultCount?: number;
   results: NationalSemanticLegislationResult[];
+  /** `asOf` requests only — echo of the request's `asOf` (API 2.29.0). */
+  asOf?: string;
+  /** `asOf` requests only (API 2.29.0). */
+  asOfSummary?: {
+    /** Always `0`: national `asOf` fetches nothing. */
+    liveFetches: number;
+    /** Hits returned with `asOfResolved: false`. */
+    unresolved: number;
+  };
   metadata?: Record<string, unknown>;
   hint?: string;
   /**
@@ -2781,11 +3249,9 @@ export type WebhookPayload =
 /**
  * One entry in a document's version history.
  *
- * Versions are LexAPI *observation snapshots* (content-hash changes between
- * fetches), not legal in-force reconstructions — for the text in force on a
- * date use a consolidated CELEX, or `semanticLegislationSearch({ asOf })`.
- * `fetchedAt` is when THIS version was fetched — version N is "current"
- * from there until version N+1's `fetchedAt`.
+ * Versions are LexAPI's fetch snapshots (content-hash changes between
+ * fetches), not the law in force on a date — for the version of an EU act
+ * for a date use `legislationAsOf`.
  */
 export interface VersionEntry {
   version: number;
@@ -2796,12 +3262,27 @@ export interface VersionEntry {
    * improved parser.
    */
   contentHash: string;
+  /**
+   * When this version's text arrived at LexAPI. For a version without
+   * `observedFrom` (possible for snapshots stored before API 2.28.0) it is
+   * the last fetch of its text, which is not when the version began.
+   */
   fetchedAt: string;
+  /** When the version began in LexAPI's fetch history; `null` when LexAPI has no record of it (API 2.28.0). */
+  observedFrom?: string | null;
   title?: string | null;
   documentType?: string | null;
   documentTypeCode?: string | null;
   /** Present on single-snapshot responses only (not in history listings). */
   parsedContent?: Record<string, unknown> | null;
+  /**
+   * Single-snapshot responses only (API 2.20.0): `contentHash` and
+   * `retrievedAt` are the snapshot's own; `sourceUrl` is the document's page
+   * today, which can show a later text.
+   */
+  provenance?: Provenance;
+  /** Single-snapshot responses only (API 2.20.0). */
+  fieldProvenance?: FieldProvenance;
 }
 
 export interface DocumentVersionsResponse extends CreditedResponse, WithResponseHeaders {
@@ -2821,12 +3302,75 @@ export interface DocumentVersionResponse extends CreditedResponse, WithResponseH
   success: boolean;
   celex: string;
   language: string;
-  /** Present on `/at/{date}` responses only — the requested date. */
+  /**
+   * Present on `/at/{date}` responses only — the date you asked about, in
+   * LexAPI's fetch history. Not a date of the law.
+   */
   asOf?: string;
   semantics: string;
   document: VersionEntry;
   /** SDK-added: mirrors the `X-Corpus-Version` response header. */
   corpusVersion?: number;
+}
+
+/**
+ * The request that answers which version of an EU act is listed for a date
+ * (`legislationAsOf`). A field is absent when it is not a string.
+ */
+export interface InForceLookup {
+  method?: "POST" | (string & {});
+  path?: "/api/v1/legislation/as-of" | (string & {});
+}
+
+/** The snapshot returned by `getDocumentAtDate`. */
+export interface DocumentAtDateSnapshot extends VersionEntry {
+  /**
+   * When the next version's text arrived — this snapshot was the current one
+   * until then; `null` for the current version (API 2.28.0). A version is the
+   * current one from `observedFrom` until `observedUntil`.
+   */
+  observedUntil?: string | null;
+}
+
+/**
+ * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI held as current at
+ * the end of that day (UTC), from its own fetch history. It is not the law in
+ * force on that date: for the version of an EU act for a date use
+ * `legislationAsOf` (`inForceLookup` points to it).
+ */
+export interface DocumentAtDateResponse extends DocumentVersionResponse {
+  /** Always `observation_snapshot`: a snapshot from LexAPI's fetch history (API 2.28.0). */
+  kind?: "observation_snapshot" | (string & {});
+  document: DocumentAtDateSnapshot;
+  /** `true` when the date is after today (UTC): the answer is the current version; absent otherwise (API 2.28.0). */
+  dateInFuture?: boolean;
+  /**
+   * Present for an EU act `legislationAsOf` resolves (CELEX sector 3, or a
+   * consolidated version of one); absent for case law, treaties, corrigenda (API 2.28.0).
+   */
+  inForceLookup?: InForceLookup;
+  /** SDK-added: the `X-Warning` response header (a future date), when present. */
+  xWarning?: string;
+}
+
+/**
+ * `NotFoundError.reason` (`error.details.reason` on a 404). `unknown_endpoint`
+ * (API 2.27.0): no such endpoint. On `getDocumentAtDate` (API 2.28.0):
+ * `before_tracking` — the date is before the document entered the corpus;
+ * `boundary_unknown` — LexAPI has no record of when a version stored before
+ * API 2.28.0 began, so it cannot say which snapshot it held on that date.
+ */
+export type NotFoundReason = "unknown_endpoint" | "before_tracking" | "boundary_unknown" | (string & {});
+
+/**
+ * A version a `boundary_unknown` date could fall in (`NotFoundError.candidates`).
+ * For these versions `fetchedAt` can be the last fetch and later than the date.
+ * `fetchedAt` and `observedFrom` are `null` when the API sent no string.
+ */
+export interface SnapshotCandidate {
+  version: number;
+  fetchedAt: string | null;
+  observedFrom: string | null;
 }
 
 /** Shared params for the version endpoints. */

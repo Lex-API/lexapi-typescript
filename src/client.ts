@@ -7,6 +7,7 @@ import {
 } from "./http.js";
 import { createExportStream, type ExportParams, type ExportStream } from "./export.js";
 import { parseResponseHeaders } from "./headers.js";
+import { REPEATS_BEFORE_THROW, compactForm, count, stalled, startingPosition } from "./paging.js";
 import { WebhooksAPI } from "./webhooks.js";
 import type {
   CitationEdgeParams,
@@ -18,6 +19,8 @@ import type {
   CitationPathResponse,
   CitationStatsParams,
   CitationStatsResponse,
+  CitedDocumentGroup,
+  CitingDocumentGroup,
   CitedByResponse,
   CitesParams,
   CitesResponse,
@@ -32,6 +35,7 @@ import type {
   DocumentMetadataRequest,
   DocumentMetadataResponse,
   DocumentVersionResponse,
+  DocumentAtDateResponse,
   DocumentVersionsResponse,
   InfoResponse,
   NationalCoverageResponse,
@@ -53,6 +57,8 @@ import type {
   SemanticCaseLawSearchResponse,
   SemanticLegislationSearchOptions,
   SemanticLegislationSearchResponse,
+  LegislationAsOfRequest,
+  LegislationAsOfResponse,
   TranspositionParams,
   TranspositionResponse,
   VersionParams,
@@ -71,13 +77,16 @@ export interface LexAPIOptions {
   baseUrl?: string;
   /**
    * Per-attempt timeout in milliseconds, covering the response body (for
-   * `export`: an idle timeout per read). Default 95_000 — enough for a
-   * single live EUR-Lex fetch (the API caps each at 90 s, then answers with
-   * a typed, refunded 504), and below Cloudflare's 100 s proxy timeout. A
-   * request that needs several upstream fetches can still exceed it.
+   * `export`: an idle timeout per read). The 95 s default sits above the
+   * API's 90 s deadline on document reads, so that timeout comes back as a
+   * typed, refunded 504; the CDN ends any wait at 100 s.
    */
   timeoutMs?: number;
-  /** Injectable fetch (used for testing / polyfills). Defaults to global fetch. */
+  /**
+   * Injectable fetch (used for testing / polyfills). Defaults to global fetch.
+   * It is called with `redirect: "manual"` and must honour it: the SDK follows
+   * redirects itself, and only within the API origin.
+   */
   fetch?: typeof fetch;
   /** Retry policy. Default: 3 retries, 500 ms base, 30 s cap; read-only POST 5xx retries are opt-in. */
   retry?: RetryOptions;
@@ -124,11 +133,16 @@ export class LexAPI {
     if (!apiKey) {
       throw new Error("apiKey is required (or set LEXAPI_API_KEY)");
     }
+    if (options.fetch === undefined && typeof globalThis.fetch !== "function") {
+      throw new Error("This runtime has no global fetch; pass one with the `fetch` option");
+    }
     this.http = new HttpClient({
       apiKey,
       baseUrl: (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, ""),
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      fetchFn: options.fetch ?? fetch,
+      // Looked up per call and invoked on the global object, which Cloudflare
+      // Workers and browsers require.
+      fetchFn: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
       retry: {
         maxRetries: options.retry?.maxRetries ?? 3,
         baseDelayMs: options.retry?.baseDelayMs ?? 500,
@@ -194,6 +208,7 @@ export class LexAPI {
     return this.call<SearchResponse>({
       method: "POST",
       path: "/search",
+      shape: { lists: ["results"], required: ["results"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -222,6 +237,7 @@ export class LexAPI {
     return this.call<DocumentContentResponse>({
       method: "POST",
       path: "/documentContent",
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -247,6 +263,7 @@ export class LexAPI {
     return this.call<DocumentContentBatchResponse>({
       method: "POST",
       path: "/documentContent/batch",
+      shape: { lists: ["documents", "errors"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -273,6 +290,7 @@ export class LexAPI {
     return this.call<RecentDocumentsResponse>({
       method: "GET",
       path: "/documents/recent",
+      shape: { lists: ["results"] },
       query: {
         days: params.days,
         documentType: params.documentType,
@@ -299,6 +317,7 @@ export class LexAPI {
     return this.call<DocumentByUrlResponse>({
       method: "POST",
       path: "/documents/url",
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       body: request,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -343,14 +362,15 @@ export class LexAPI {
   }
 
   // ── Point-in-time versions ────────────────────────────────────────
-  // Versions are LexAPI observation snapshots (content-hash changes between
-  // fetches), NOT legal in-force reconstructions; history begins at first
-  // ingestion. For the text in force on a date, use a consolidated CELEX or
-  // semanticLegislationSearch({ asOf }).
+  // Versions are LexAPI's fetch snapshots (content-hash changes between
+  // fetches), NOT the law in force on a date; history begins at first
+  // ingestion. For the version of an EU act for a date, use legislationAsOf.
 
   /**
    * `GET /documents/{celex}/versions` — version history, newest first,
-   * current version included and flagged. 1 credit.
+   * current version included and flagged. These are LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async listDocumentVersions(
     celex: string,
@@ -360,6 +380,7 @@ export class LexAPI {
     return this.call<DocumentVersionsResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions`,
+      shape: { lists: ["versions"] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -369,7 +390,9 @@ export class LexAPI {
   /**
    * `GET /documents/{celex}/versions/{version}` — one immutable snapshot
    * including `parsedContent`. `corpusVersion` mirrors the
-   * `X-Corpus-Version` response header. 1 credit.
+   * `X-Corpus-Version` response header. This is one of LexAPI's fetch
+   * snapshots, not the law in force on a date; for the version of an EU act
+   * for a date use `legislationAsOf`. 1 credit.
    */
   async getDocumentVersion(
     celex: string,
@@ -380,6 +403,7 @@ export class LexAPI {
     return this.call<DocumentVersionResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/versions/${version}`,
+      shape: { fields: [{ path: "document", kind: "object" }] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -387,20 +411,31 @@ export class LexAPI {
   }
 
   /**
-   * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI observed as
-   * current on `date` (`YYYY-MM-DD`, end-of-day UTC inclusive). Dates
-   * before the document entered the corpus reject with `NotFoundError`
-   * carrying the tracking start date. 1 credit.
+   * `GET /documents/{celex}/at/{date}` — the snapshot LexAPI held as current
+   * at the end of `date` (`YYYY-MM-DD`, UTC), from its own fetch history
+   * (`kind: "observation_snapshot"`). This is not the law in force on that
+   * date: for the version of an EU act for a date use `legislationAsOf`
+   * (`inForceLookup` points to it). The snapshot was the current one from
+   * `document.observedFrom` until `document.observedUntil` (`null` for the
+   * current version). A future date returns the current version with
+   * `dateInFuture: true`.
+   *
+   * A date before the document entered the corpus rejects with
+   * `NotFoundError` where `beforeTracking` is `true` (`trackedSince`); a date
+   * next to a version stored before API 2.28.0 whose start LexAPI has no
+   * record of rejects with `boundaryUnknown` `true` and `candidates`
+   * (refunded). 1 credit.
    */
   async getDocumentAtDate(
     celex: string,
     date: string,
     params: VersionParams = {},
     options?: CallOptions,
-  ): Promise<DocumentVersionResponse> {
-    return this.call<DocumentVersionResponse>({
+  ): Promise<DocumentAtDateResponse> {
+    return this.call<DocumentAtDateResponse>({
       method: "GET",
       path: `/documents/${encodeURIComponent(celex)}/at/${encodeURIComponent(date)}`,
+      shape: { fields: [{ path: "document", kind: "object" }] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -422,6 +457,7 @@ export class LexAPI {
     return this.call<CitationExtractResponse>({
       method: "POST",
       path: "/citations/extract",
+      shape: { lists: ["citations"] },
       body: { celexNumber },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -453,6 +489,7 @@ export class LexAPI {
     return this.call<CitesResponse>({
       method: "GET",
       path: `/citations/cites/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["cites", "unresolved"] },
       query: { ...edgeQuery(params), unresolved: params.unresolved },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -477,6 +514,7 @@ export class LexAPI {
     return this.call<CitedByResponse>({
       method: "GET",
       path: `/citations/cited-by/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["citedBy"] },
       query: edgeQuery(params),
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -491,17 +529,24 @@ export class LexAPI {
    * missed. A target's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages — merge by
    * `celexNumber` if you need one group per document.
+   * The walk also ends once the offset reaches `totalEdges`, when that is a
+   * non-negative integer. It throws `InvalidResponseError` when a page echoes
+   * an `offset` other than the one requested, or, when the answers carry
+   * neither `totalEdges` nor `offset`, after three pages in a row that each
+   * repeat the one before (comparing the list only; a page with either
+   * signal ends a run, and its list is still the one the next page is
+   * compared with). When a walk throws, the pages already yielded stay
+   * valid; the page that showed the stall is not yielded and is on the
+   * error's `body`. A starting `offset` or `limit` that is not a non-negative
+   * (positive) integer is a `RangeError` before any request. A group whose
+   * `citationCount` is 0 but whose edge list is not empty counts its list.
    */
   async *paginateCites(
     celexNumber: string,
     params: CitesParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitesResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCites(celexNumber, p, options),
-      (page) => page.cites.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCites(celexNumber, p, options), (page) => page.cites, params);
   }
 
   /**
@@ -509,17 +554,23 @@ export class LexAPI {
    * empty page (SDK contract §1.4). Each page is a billed call (1 credit);
    * edges may repeat or be missed if extractions happen during the walk. A source's edges can straddle a page boundary, so the same
    * `celexNumber` may appear in two consecutive pages.
+   * The walk also ends once the offset reaches `totalEdges`, when that is a
+   * non-negative integer. It throws `InvalidResponseError` when a page echoes
+   * an `offset` other than the one requested, or, when the answers carry
+   * neither `totalEdges` nor `offset`, after three pages in a row that each
+   * repeat the one before (comparing the list only; a page with either
+   * signal ends a run, and its list is still the one the next page is
+   * compared with). When a walk throws, the pages already yielded stay
+   * valid; the page that showed the stall is not yielded and is on the
+   * error's `body`. A starting `offset` or `limit` that is not a non-negative
+   * (positive) integer is a `RangeError` before any request.
    */
   async *paginateCitedBy(
     celexNumber: string,
     params: CitationEdgeParams = {},
     options?: CallOptions,
   ): AsyncGenerator<CitedByResponse, void> {
-    yield* paginateEdges(
-      (p) => this.getCitedBy(celexNumber, p, options),
-      (page) => page.citedBy.reduce((n, g) => n + (g.citationCount ?? g.citations?.length ?? 0), 0),
-      params,
-    );
+    yield* paginateEdges((p) => this.getCitedBy(celexNumber, p, options), (page) => page.citedBy, params);
   }
 
   /**
@@ -542,6 +593,7 @@ export class LexAPI {
     return this.call<CitationNetworkResponse>({
       method: "GET",
       path: `/citations/network/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["network.cites", "network.citedBy", "unresolved"] },
       query: {
         ...filterQuery(params),
         limit: params.limit,
@@ -574,6 +626,7 @@ export class LexAPI {
     return this.call<CitationPathResponse>({
       method: "GET",
       path: `/citations/path/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+      shape: { lists: ["path"] },
       query: {
         ...filterQuery(params),
         maxDepth: params.maxDepth,
@@ -603,6 +656,7 @@ export class LexAPI {
     return this.call<RelatedDocumentsResponse>({
       method: "GET",
       path: `/citations/related/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["related"] },
       query: {
         ...filterQuery(params),
         limit: params.limit,
@@ -655,6 +709,7 @@ export class LexAPI {
     return this.call<CitationStatsResponse>({
       method: "GET",
       path: "/citations/stats",
+      shape: { lists: ["stats.mostCited", "stats.mostCiting"] },
       query: { includeNational: effectiveParams?.includeNational },
       timeoutMs: effectiveOptions?.timeoutMs,
       signal: effectiveOptions?.signal,
@@ -688,6 +743,7 @@ export class LexAPI {
     return this.call<TranspositionResponse>({
       method: "GET",
       path: `/citations/transposition/${encodeURIComponent(celexNumber)}`,
+      shape: { lists: ["jurisdictions"] },
       query: {
         jurisdictions: listParam(params.jurisdictions),
         resolvedOnly: params.resolvedOnly,
@@ -721,6 +777,7 @@ export class LexAPI {
     return this.call<CounterpartsResponse>({
       method: "GET",
       path: `/citations/counterparts/${encodeURIComponent(id)}`,
+      shape: { lists: ["via"] },
       query: {
         jurisdictions: listParam(params.jurisdictions),
         language: params.language,
@@ -749,6 +806,7 @@ export class LexAPI {
     return this.call<NationalCoverageResponse>({
       method: "GET",
       path: "/national/coverage",
+      shape: { lists: ["jurisdictions"] },
       free: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -782,6 +840,7 @@ export class LexAPI {
     return this.call<NationalDocumentResponse>({
       method: "GET",
       path: `/${jurisdictionSegment(jurisdiction)}/documents/${encodeURIComponent(id)}`,
+      shape: { fields: [{ path: "document", kind: "object" }], optionalObjects: ["document.content"], lists: ["document.content.articles"] },
       query: { language: params.language },
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -809,6 +868,7 @@ export class LexAPI {
     return this.call<NationalDocumentListResponse>({
       method: "GET",
       path: `/${jurisdictionSegment(jurisdiction)}/documents`,
+      shape: { lists: ["results"] },
       query: {
         page: params.page,
         cursor: params.cursor,
@@ -825,13 +885,18 @@ export class LexAPI {
   /**
    * Walk every page of `listNationalDocuments` via `cursor` (works past the
    * 1,000-row `page` ceiling, unlike passing `page` yourself). Each page is
-   * a separate billed call. Stops after a page with `hasMore: false` (or an
-   * empty page). Any `params.page` is ignored and never sent — pass
+   * a separate billed call. Stops after a page whose `hasMore` is not `true`,
+   * whose `nextCursor` is absent, `null` or empty, or that is empty. A
+   * `nextCursor` the walk already sent, or one that is not a string, throws
+   * `InvalidResponseError`; the pages already yielded stay valid, and the
+   * page that showed the stall is not yielded and is on the error's `body`.
+   * Any `params.page` is ignored and never sent — pass
    * `params.cursor` only to resume a walk you saved partway through;
    * `page` together with `cursor` is a 400 ("Use either cursor or page,
    * not both"), so this strips `page` at runtime, not just in the type
    * (`Omit` alone only guards TypeScript callers — a JS caller, or one
-   * using `as`, could otherwise still pass it through).
+   * using `as`, could otherwise still pass it through). A `limit` that is
+   * not a positive integer is a `RangeError` before any request.
    */
   async *paginateNationalDocuments(
     jurisdiction: string,
@@ -839,16 +904,28 @@ export class LexAPI {
     options?: CallOptions,
   ): AsyncGenerator<NationalDocumentListResponse, void> {
     const { page: _ignoredPage, ...rest } = params as NationalDocumentListParams;
+    startingPosition(undefined, rest.limit, 1);
     let cursor = rest.cursor;
+    const sent = new Set<string>();
     for (;;) {
+      if (typeof cursor === "string") sent.add(cursor);
       const page = await this.listNationalDocuments(
         jurisdiction,
         cursor !== undefined ? { ...rest, cursor } : { ...rest },
         options,
       );
+      const results: unknown = page.results;
+      const next: unknown = page.nextCursor;
+      const ends =
+        page.hasMore !== true || next === undefined || next === null || next === "" || !Array.isArray(results) || results.length === 0;
+      if (!ends) {
+        // The page that shows the stall is not yielded; it is on the error's `body`.
+        if (typeof next !== "string") throw stalled("the server sent a page cursor that is not a string", page);
+        if (sent.has(next)) throw stalled("the server repeated a page cursor", page);
+      }
       yield page;
-      if (!page.hasMore || !page.nextCursor || page.results.length === 0) return;
-      cursor = page.nextCursor;
+      if (ends) return;
+      cursor = next as string;
     }
   }
 
@@ -871,6 +948,7 @@ export class LexAPI {
     return this.call<NationalSemanticCaseLawResponse>({
       method: "POST",
       path: `/${jurisdictionSegment(jurisdiction)}/search/semantic`,
+      shape: { lists: ["results"], required: ["results"] },
       body: nationalSemanticWireBody(request),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
@@ -885,7 +963,17 @@ export class LexAPI {
    * `attribution` and `document` (the matched act's listing summary) on
    * every hit; the index fields (`law_title`, `article_ref`, `section`,
    * `language`, `in_force`, `valid_from`, `valid_to`, `law_type`) are
-   * always present, `null` when the index has nothing (API 2.8.0). No `hyde`, no `asOf` — both are EU-only.
+   * always present, `null` when the index has nothing (API 2.8.0).
+   *
+   * **`asOf` (API 2.29.0)** labels each hit for a date (`asOfResolved`,
+   * `asOfReason`, `asOfVersion`); the response adds `asOf` and
+   * `asOfSummary`. The search runs over today's texts only. A hit is
+   * resolved only when the publisher's dates, as of LexAPI's last recorded
+   * read of the act (`asOfVersion.checkedAt`), show today's wording already
+   * applied on the date; an unresolved hit keeps today's wording — it is not
+   * established as the text for the date. LexAPI holds such dates for
+   * Austria and Spain.
+   *
    * `NationalSemanticLegislationOptions` has no `hyde` field, and this SDK
    * never forwards one on this call even if a caller bypasses the type
    * system — the server now validates `hyde` as a boolean on this route too
@@ -901,7 +989,8 @@ export class LexAPI {
     return this.call<NationalSemanticLegislationResponse>({
       method: "POST",
       path: `/${jurisdictionSegment(jurisdiction)}/legislation/semantic`,
-      body: nationalSemanticWireBody(request, { allowHyde: false }),
+      shape: { lists: ["results"], required: ["results"] },
+      body: nationalSemanticWireBody(request, { allowHyde: false, allowAsOf: true }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -936,7 +1025,8 @@ export class LexAPI {
     return this.call<SemanticCaseLawSearchResponse>({
       method: "POST",
       path: "/search/semantic",
-      body: semanticWireBody(request),
+      shape: { lists: ["results"], required: ["results"] },
+      body: semanticWireBody(request, { legislation: false }),
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -959,6 +1049,11 @@ export class LexAPI {
    * cannot be answered keeps its latest text with `asOfResolved: false` and
    * an `asOfReason`. The response adds `asOf` and `asOfSummary`.
    *
+   * **In force today:** EU hits carry `inForce` (with `notInForceReason`,
+   * `endOfValidity`, `entryIntoForce`) when the act's status is known;
+   * `inForce: true` keeps only hits known to be in force today and reports
+   * what it removed in `inForceFilter`.
+   *
    * **Cost:** 5 credits for the search; with `asOf`, each live fetch of a
    * version the corpus does not hold reserves 5 and settles by outcome
    * (Cellar 4, browser 5, no text 1, failed 0) — at most 3 per request by
@@ -972,7 +1067,63 @@ export class LexAPI {
     return this.call<SemanticLegislationSearchResponse>({
       method: "POST",
       path: "/legislation/semantic",
-      body: semanticWireBody(request),
+      shape: { lists: ["results"], required: ["results"] },
+      body: semanticWireBody(request, { legislation: true }),
+      idempotent: true,
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
+  }
+
+  /**
+   * `POST /legislation/as-of` — the version of an EU regulation, directive
+   * or decision listed for a date: the newest consolidated version dated on
+   * or before it, or the act as published in the Official Journal when none
+   * is. With `provision`, also that article, annex or recital range of the
+   * version. Requires LexAPI API 2.26.0.
+   *
+   * **Unresolved is a normal return, not an error:** when the version or
+   * the text cannot be established the call resolves with
+   * `asOfResolved: false`, an `asOfReason` and no `provision`. Use
+   * `provision.text` only when `asOfResolved` is `true`; `asOfVersion` can
+   * also be present on an unresolved `provision` answer.
+   * An unknown act throws `NotFoundError`; invalid input throws
+   * `InvalidCelexError` / `InvalidParamsError`. An API older than 2.26.0
+   * has no such endpoint and also answers 404 (`NotFoundError`).
+   * `err.unknownEndpoint` is `false` there (the API sends it from 2.27.0):
+   * check `err.message.includes("Unknown API endpoint")`.
+   *
+   * Consolidated versions have no legal force; only the act as published in
+   * the Official Journal (`baseCelex`) is authentic. The answer does not say
+   * whether an individual provision applied on that date, and
+   * `act.inForceToday` is about today, not `asOf`. A retroactive amendment
+   * counts from the date of the amending act.
+   *
+   * **Cost:** 1 credit when no text is fetched; when the provision's text
+   * has to be fetched, 4 (5 when it is fetched live from EUR-Lex) whatever
+   * the answer, and 1 if the fetch fails or finds no text. A fetch reserves
+   * up to 5 credits: a pool holding fewer gets
+   * `asOfReason: "insufficient_credits"`.
+   */
+  async legislationAsOf(
+    request: LegislationAsOfRequest,
+    options?: CallOptions,
+  ): Promise<LegislationAsOfResponse> {
+    const body: Record<string, unknown> = { document: request.document, asOf: request.asOf };
+    if (request.provision !== undefined) body["provision"] = request.provision;
+    if (request.language !== undefined) body["language"] = request.language;
+    return this.call<LegislationAsOfResponse>({
+      method: "POST",
+      path: "/legislation/as-of",
+      shape: {
+        fields: [
+          { path: "document", kind: "string" },
+          { path: "asOfResolved", kind: "boolean" },
+          { path: "act", kind: "object" },
+          { path: "provenance", kind: "object" },
+        ],
+      },
+      body,
       idempotent: true,
       timeoutMs: options?.timeoutMs,
       signal: options?.signal,
@@ -1041,9 +1192,14 @@ export class LexAPI {
   }
 }
 
-/** Map camel-cased SDK semantic options to the wire shape (`min_score`, `include: ["text"]`). */
+/**
+ * Map camel-cased SDK semantic options to the wire shape (`min_score`,
+ * `include: ["text"]`). `asOf` and `inForce` are legislation options: never
+ * sent on case-law search, even when set on the request object.
+ */
 function semanticWireBody(
   request: SemanticCaseLawSearchOptions & SemanticLegislationSearchOptions,
+  { legislation }: { legislation: boolean },
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -1052,7 +1208,8 @@ function semanticWireBody(
   if (request.includeText) body["include"] = ["text"];
   if (request.filters !== undefined) body["filters"] = request.filters;
   if (request.hyde !== undefined) body["hyde"] = request.hyde;
-  if (request.asOf !== undefined) body["asOf"] = request.asOf;
+  if (legislation && request.asOf !== undefined) body["asOf"] = request.asOf;
+  if (legislation && request.inForce !== undefined) body["inForce"] = request.inForce;
   return body;
 }
 
@@ -1061,8 +1218,8 @@ function semanticWireBody(
  * deliberately don't extend `SemanticSearchOptions` (a narrower `language`,
  * exact `filters` interfaces — see `NationalSemanticCaseLawOptions`), so
  * `filters` is read as `unknown` here rather than `Record<string, unknown>`
- * to avoid the missing-index-signature assignability error. Never forwards
- * `asOf` — the national legislation options type has no such field.
+ * to avoid the missing-index-signature assignability error. `asOf` is sent
+ * only for legislation (`allowAsOf`).
  */
 function nationalSemanticWireBody(
   request: {
@@ -1073,8 +1230,9 @@ function nationalSemanticWireBody(
     includeText?: boolean;
     filters?: unknown;
     hyde?: boolean;
+    asOf?: string;
   },
-  { allowHyde = true }: { allowHyde?: boolean } = {},
+  { allowHyde = true, allowAsOf = false }: { allowHyde?: boolean; allowAsOf?: boolean } = {},
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { query: request.query };
   if (request.limit !== undefined) body["limit"] = request.limit;
@@ -1086,6 +1244,7 @@ function nationalSemanticWireBody(
   // system set one on the (typed hyde-less) request object — the server
   // validates it strictly as a boolean on this route too (400 otherwise).
   if (allowHyde && request.hyde !== undefined) body["hyde"] = request.hyde;
+  if (allowAsOf && request.asOf !== undefined) body["asOf"] = request.asOf;
   return body;
 }
 
@@ -1142,24 +1301,64 @@ function listParam(value: string | ReadonlyArray<string> | undefined): string | 
   return typeof value === "string" ? value : value.join(",");
 }
 
-async function* paginateEdges<T extends { limit?: number }, P extends CitationEdgeParams>(
+type EdgeGroup = CitedDocumentGroup | CitingDocumentGroup;
+
+/**
+ * A group's edge rows: its `citationCount` when that is a count, else the
+ * length of its edge list (0 without one). A count of 0 next to a non-empty
+ * edge list counts the list.
+ */
+function edgeRows(group: EdgeGroup): number {
+  const listed = Array.isArray(group.citations) ? group.citations.length : 0;
+  const counted = count(group.citationCount);
+  return counted === undefined || counted === 0 ? listed : counted;
+}
+
+async function* paginateEdges<
+  T extends { limit?: number; offset?: number; totalEdges?: number },
+  P extends CitationEdgeParams,
+>(
   fetchPage: (params: P) => Promise<T>,
-  rawRowsIn: (page: T) => number,
+  groupsIn: (page: T) => readonly EdgeGroup[] | undefined,
   params: P,
 ): AsyncGenerator<T, void> {
-  const limit = params.limit ?? 100;
-  let offset = params.offset ?? 0;
+  const start = startingPosition(params.offset, params.limit, 100);
+  const limit = start.limit;
+  let offset = start.offset;
+  let previous: string | undefined;
+  let repeats = 0;
   for (;;) {
     const page = await fetchPage({ ...params, limit, offset });
+    const listed: unknown = groupsIn(page);
+    const groups: readonly EdgeGroup[] = Array.isArray(listed) ? listed : [];
+    const echoed = count(page.offset);
+    const totalEdges = count(page.totalEdges);
+    // The page that shows a stall is not yielded; it is on the error's `body`.
+    if (echoed !== undefined && echoed !== offset) throw stalled("the server did not advance", page);
+    if (echoed === undefined && totalEdges === undefined) {
+      // No position signal: only the same list, page after page, is a stall.
+      const form = compactForm(groups);
+      repeats = form === previous ? repeats + 1 : 0;
+      previous = form;
+      if (repeats >= REPEATS_BEFORE_THROW) throw stalled("the server repeated the same page", page);
+    } else {
+      // A page with a position signal is not counted and ends any run of
+      // repeats; its list is still the one the next page is compared with.
+      repeats = 0;
+      previous = compactForm(groups);
+    }
     yield page;
     // SDK contract §1.4: offsets count edge rows; advance by the sum of the
     // page's citationCounts and stop at the first page shorter than the page
-    // size. (`totalCitations` counts distinct document pairs — raw rows can
-    // outnumber it — so it never ends the walk.)
-    const pageLimit = page.limit && page.limit > 0 ? page.limit : limit;
-    const rows = rawRowsIn(page);
+    // size, or once the offset reaches `totalEdges`. (`totalCitations` counts
+    // distinct document pairs — raw rows can outnumber it — so it never ends
+    // the walk.)
+    const echoedLimit = count(page.limit);
+    const pageLimit = echoedLimit !== undefined && echoedLimit > 0 ? echoedLimit : limit;
+    const rows = groups.reduce((n, g) => n + edgeRows(g), 0);
     offset += rows;
     if (rows === 0 || rows < pageLimit) return;
+    if (totalEdges !== undefined && offset >= totalEdges) return;
   }
 }
 

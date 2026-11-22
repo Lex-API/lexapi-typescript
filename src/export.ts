@@ -5,6 +5,8 @@ import {
   IncompleteExportError,
   TimeoutError,
 } from "./errors.js";
+import { parseHeaderInteger } from "./headers.js";
+import { timerDelay, trimSpaces } from "./retryHints.js";
 import type { Language } from "./types.js";
 
 // ── GET /export (NDJSON stream, BUSINESS / SCALE / ENTERPRISE) ───────
@@ -13,7 +15,7 @@ import type { Language } from "./types.js";
 export type ExportListFilter = string | ReadonlyArray<string>;
 
 /**
- * Filters for `GET /export` (API 2.3.0, lex-api #303). List values are sent
+ * Filters for `GET /export` (API 2.3.0). List values are sent
  * comma-separated and ORed.
  */
 export interface ExportParams {
@@ -63,7 +65,7 @@ export interface ExportParams {
   /**
    * Max rows to stream: a positive integer (anything else throws a
    * `RangeError` before the request — the API answers 400). Clamped to the
-   * server's `EXPORT_MAX_ROWS` ceiling (default 50 000).
+   * server's row ceiling (50,000).
    */
   limit?: number;
 }
@@ -194,8 +196,9 @@ export interface ExportHeaderInfo {
    */
   streaming: number | undefined;
   /**
-   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap. A hint
-   * only; `stream.truncated` prefers `_done.truncated` once it is read.
+   * `X-Export-Truncated: 1` — the up-front count exceeded the row cap (`0`:
+   * it did not; any other value is `undefined`). A hint only;
+   * `stream.truncated` prefers `_done.truncated` once it is read.
    */
   truncated: boolean | undefined;
 }
@@ -220,8 +223,13 @@ export interface ExportHeaderInfo {
  *   after the rows that did arrive (the `_error` body is on its `details` and
  *   on `stream.error`). Unknown `_done` fields (`truncatedBy`, `credits`) are
  *   kept on `done`.
- * - Lines that are not JSON objects are counted in `invalidLines`, not yielded.
- * - `_meta`/`_done`/`_error` lines are never yielded as rows.
+ * - A line ends at a line feed byte only. Lines are read as strict UTF-8,
+ *   whatever charset the response names (one byte order mark at the very
+ *   start of the stream is ignored), with spaces, tabs and carriage returns
+ *   trimmed; blank lines are skipped. Lines that are not UTF-8, or not one
+ *   JSON object, are counted in `invalidLines`, not yielded.
+ * - `_meta`/`_done`/`_error` lines are never yielded as rows; `meta` comes
+ *   only from the very first line of the stream.
  */
 export interface ExportStream extends AsyncIterable<ExportRow> {
   readonly meta: ExportMeta | undefined;
@@ -246,9 +254,10 @@ export interface ExportStream extends AsyncIterable<ExportRow> {
    * pool, see `done.truncatedBy`; never derived from the count; skipped stubs
    * do not count). Before the trailer: the `X-Export-Truncated` header, then
    * `_meta.truncated` — hints from the up-front count, which may be cached
-   * for up to a minute and never caps the stream. `undefined` when unknown.
+   * for up to a minute and never caps the stream. `false` when none of
+   * these says.
    */
-  readonly truncated: boolean | undefined;
+  readonly truncated: boolean;
   /**
    * Abandon the export and release the connection (e.g. after inspecting
    * `meta` without iterating). Breaking out of `for await` does this too.
@@ -264,20 +273,87 @@ export interface ExportStreamOptions {
   signal?: AbortSignal;
 }
 
+/** A line whose bytes are not UTF-8: an invalid line. */
+const INVALID_LINE = Symbol("invalid line");
+type Line = string | typeof INVALID_LINE;
+
+const NO_BYTES = new Uint8Array(0);
+
+/**
+ * The bytes a streaming decoder holds after `previous` (what it held before)
+ * and then `chunk` were decoded without an error: the start of a character
+ * not yet complete, at most three bytes, copied.
+ */
+function heldBytes(previous: Uint8Array, chunk: Uint8Array): Uint8Array {
+  const n = chunk.length;
+  if (n > 0 && chunk[n - 1]! < 0x80) return NO_BYTES;
+  const tail = n >= 3 ? chunk.subarray(n - 3) : new Uint8Array([...previous, ...chunk].slice(-3));
+  for (let k = 1; k <= tail.length; k++) {
+    const byte = tail[tail.length - k]!;
+    if ((byte & 0xc0) === 0x80) continue; // a continuation byte
+    const size = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return size > k ? tail.slice(tail.length - k) : NO_BYTES;
+  }
+  return NO_BYTES;
+}
+
+function strictDecoder(): TextDecoder {
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+}
+
+/** A chunk as a byte view, or `undefined` when it is not bytes. */
+function byteView(chunk: unknown): Uint8Array | undefined {
+  if (chunk instanceof Uint8Array) return chunk;
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  return undefined;
+}
+
+/** Remove leading and trailing spaces, tabs and carriage returns, and nothing else (SDK contract §1.8). */
+function trimLine(line: string): string {
+  let start = 0;
+  let end = line.length;
+  while (start < end && isLineSpace(line.charCodeAt(start))) start++;
+  while (end > start && isLineSpace(line.charCodeAt(end - 1))) end--;
+  return start === 0 && end === line.length ? line : line.slice(start, end);
+}
+
+function isLineSpace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0d;
+}
+
 /**
  * Pull-based NDJSON line reader over a fetch body. Every read has an idle
  * timeout and honours the caller's signal; any failure cancels the body so
- * the connection is released. Each decoded chunk is scanned once and partial
- * lines are kept as pieces (joined once, when the line completes), so a
- * multi-megabyte line (`includeHtml`) costs O(n), not O(n²).
+ * the connection is released.
+ *
+ * A line ends at a line feed byte and nowhere else. Lines are strict UTF-8,
+ * whatever charset the response names; a line that is not is an invalid line
+ * and does not affect the next one (a line feed byte never occurs inside a
+ * multi-byte sequence). One streaming decoder reads every byte once: each
+ * chunk's complete lines are decoded in one call and split on "\n" (only when
+ * that call fails are they decoded one by one, to find the invalid ones); the
+ * line still in progress is kept as text pieces and joined once, so a
+ * multi-megabyte line (`includeHtml`) costs O(n). No byte of a chunk is kept
+ * after the chunk is processed. One byte order mark at the very start of
+ * the stream is ignored.
  */
 class NdjsonReader {
-  private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
-  private readonly decoder = new TextDecoder();
-  /** Pieces of the line currently being received. */
+  private readonly reader: ReadableStreamDefaultReader<unknown>;
+  /** Decodes the line in progress; holds the bytes of a character split across chunks. */
+  private decoder = strictDecoder();
+  /** A copy of the bytes the decoder holds (a character not yet complete), so it can be rebuilt. */
+  private carry: Uint8Array = NO_BYTES;
+  /** Text pieces of the line in progress. */
   private partial: string[] = [];
+  /** The line in progress already holds bytes that are not UTF-8. */
+  private broken = false;
   /** Complete lines not yet handed out. */
-  private readonly ready: string[] = [];
+  private readonly ready: Line[] = [];
+  /** No line has been completed yet. */
+  private atStart = true;
+  /** The first line of the stream was blank (so the first line handed out is not the stream's first). */
+  firstLineBlank = false;
   private eof = false;
   private released = false;
   /** Data rows handed out so far (for error messages). */
@@ -287,7 +363,7 @@ class NdjsonReader {
   private readonly onAbort = (): void => this.cancel();
 
   constructor(
-    body: ReadableStream<Uint8Array>,
+    body: ReadableStream<unknown>,
     private readonly options: ExportStreamOptions,
   ) {
     this.reader = body.getReader();
@@ -296,47 +372,174 @@ class NdjsonReader {
     else signal?.addEventListener("abort", this.onAbort, { once: true });
   }
 
-  /** Next trimmed, non-empty line, or `undefined` at EOF. */
-  async nextLine(): Promise<string | undefined> {
+  /** Next non-blank line (trimmed), or `INVALID_LINE`, or `undefined` at EOF. */
+  async nextLine(): Promise<Line | undefined> {
     const { signal } = this.options;
     if (signal?.aborted) {
       this.cancel();
       throw new RequestAbortedError("Export stream was aborted", signal.reason);
     }
-    for (;;) {
-      const line = this.ready.shift();
-      if (line !== undefined) return line;
-      if (this.eof) {
-        const tail = this.partial.join("").trim();
-        this.partial = [];
-        return tail || undefined;
+    try {
+      for (;;) {
+        const line = this.ready.shift();
+        if (line !== undefined) return line;
+        if (this.eof) return undefined;
+        const result = await this.read();
+        if (result.done) {
+          this.finish();
+          this.release();
+        } else {
+          this.ingest(result.value);
+        }
       }
-      const chunk = await this.read();
-      if (chunk === undefined) {
-        this.eof = true;
-        this.ingest(this.decoder.decode());
-        this.release();
-      } else {
-        this.ingest(this.decoder.decode(chunk, { stream: true }));
-      }
+    } catch (cause) {
+      this.cancel();
+      if (cause instanceof LexAPIError) throw cause;
+      throw new NetworkError(`Export stream interrupted after ${this.rows} rows`, cause);
     }
   }
 
-  private ingest(text: string): void {
+  private ingest(value: unknown): void {
+    const chunk = byteView(value);
+    if (chunk === undefined) throw new TypeError("Export stream yielded a chunk that is not bytes");
+    if (!this.broken) {
+      // Common case: the whole chunk is UTF-8. Decode it in one call and
+      // split the text, as a non-strict reader would.
+      let text: string | undefined;
+      try {
+        text = this.decoder.decode(chunk, { stream: true });
+      } catch {
+        // Rebuild the decoder as it was before this chunk, then find the
+        // invalid line byte by byte.
+        this.decoder = strictDecoder();
+        if (this.carry.length > 0) this.decoder.decode(this.carry, { stream: true });
+      }
+      if (text !== undefined) {
+        this.carry = heldBytes(this.carry, chunk);
+        let pos = 0;
+        for (;;) {
+          const newline = text.indexOf("\n", pos);
+          if (newline === -1) break;
+          this.partial.push(text.slice(pos, newline));
+          const line = this.partial.length === 1 ? this.partial[0]! : this.partial.join("");
+          this.partial = [];
+          this.complete(line);
+          pos = newline + 1;
+        }
+        if (pos < text.length) this.partial.push(pos === 0 ? text : text.slice(pos));
+        return;
+      }
+    }
+    this.ingestBytes(chunk);
+  }
+
+  /** A chunk that is not all UTF-8, or that continues a line that is not. */
+  private ingestBytes(chunk: Uint8Array): void {
+    const first = chunk.indexOf(0x0a);
+    if (first === -1) {
+      this.feed(chunk);
+      return;
+    }
+    const last = chunk.lastIndexOf(0x0a);
+    // The line in progress ends at the first line feed. Every decode below
+    // ends at a line feed, so a sequence cut short before it throws instead
+    // of waiting for more bytes, and the decoder holds nothing afterwards.
+    let line: Line = INVALID_LINE;
+    if (!this.broken) {
+      try {
+        const text = this.decoder.decode(chunk.subarray(0, first + 1), { stream: true });
+        this.partial.push(text.slice(0, -1));
+        line = this.partial.length === 1 ? this.partial[0]! : this.partial.join("");
+      } catch {
+        this.decoder = strictDecoder();
+      }
+    }
+    this.partial = [];
+    this.broken = false;
+    this.carry = NO_BYTES;
+    this.complete(line);
+    // The complete lines after it: one call when they are all UTF-8.
+    if (first < last) this.completeRegion(chunk.subarray(first + 1, last + 1));
+    if (last + 1 < chunk.length) this.feed(chunk.subarray(last + 1));
+  }
+
+  /** Whole lines, each ending with its line feed. */
+  private completeRegion(region: Uint8Array): void {
+    let text: string | undefined;
+    try {
+      text = this.decoder.decode(region, { stream: true });
+    } catch {
+      this.decoder = strictDecoder();
+    }
+    if (text !== undefined) {
+      let pos = 0;
+      for (;;) {
+        const newline = text.indexOf("\n", pos);
+        if (newline === -1) break;
+        this.complete(text.slice(pos, newline));
+        pos = newline + 1;
+      }
+      return;
+    }
+    // Some line here is not UTF-8: decode them one by one.
     let pos = 0;
-    for (;;) {
-      const newline = text.indexOf("\n", pos);
-      if (newline === -1) break;
-      this.partial.push(text.slice(pos, newline));
-      const line = this.partial.join("").trim();
-      this.partial = [];
-      if (line) this.ready.push(line);
+    while (pos < region.length) {
+      const newline = region.indexOf(0x0a, pos);
+      try {
+        this.complete(this.decoder.decode(region.subarray(pos, newline + 1), { stream: true }).slice(0, -1));
+      } catch {
+        this.decoder = strictDecoder();
+        this.complete(INVALID_LINE);
+      }
       pos = newline + 1;
     }
-    if (pos < text.length) this.partial.push(text.slice(pos));
   }
 
-  private async read(): Promise<Uint8Array | undefined> {
+  /** Bytes of the line in progress (after a line feed, or continuing a line that is not UTF-8). */
+  private feed(bytes: Uint8Array): void {
+    if (this.broken || bytes.length === 0) return;
+    try {
+      const text = this.decoder.decode(bytes, { stream: true });
+      if (text) this.partial.push(text);
+      this.carry = heldBytes(this.carry, bytes);
+    } catch {
+      this.broken = true;
+      this.decoder = strictDecoder();
+      this.carry = NO_BYTES;
+    }
+  }
+
+  /** End of stream: the line in progress, if any. */
+  private finish(): void {
+    this.eof = true;
+    let line: Line = INVALID_LINE;
+    if (!this.broken) {
+      try {
+        this.partial.push(this.decoder.decode());
+        line = this.partial.length === 1 ? this.partial[0]! : this.partial.join("");
+      } catch {
+        // a sequence cut off by the end of the stream
+      }
+    }
+    this.partial = [];
+    this.broken = false;
+    this.complete(line);
+  }
+
+  /** Queue a complete line: a byte order mark leading the stream is dropped; blank lines are skipped. */
+  private complete(line: Line): void {
+    const first = this.atStart;
+    this.atStart = false;
+    if (line === INVALID_LINE) {
+      this.ready.push(line);
+      return;
+    }
+    const text = trimLine(first && line.charCodeAt(0) === 0xfeff ? line.slice(1) : line);
+    if (text) this.ready.push(text);
+    else if (first) this.firstLineBlank = true;
+  }
+
+  private async read(): Promise<ReadableStreamReadResult<unknown>> {
     const { idleTimeoutMs, signal } = this.options;
     if (signal?.aborted) {
       this.cancel();
@@ -345,12 +548,12 @@ class NdjsonReader {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const interruptions = new Promise<never>((_, reject) => {
-      if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
+      if (idleTimeoutMs !== undefined && idleTimeoutMs > 0 && idleTimeoutMs !== Infinity) {
         timer = setTimeout(() => {
           reject(
             new TimeoutError(`Export stream received no data for ${idleTimeoutMs}ms (after ${this.rows} rows)`, 0),
           );
-        }, idleTimeoutMs);
+        }, timerDelay(idleTimeoutMs));
       }
       if (signal) {
         onAbort = () => reject(new RequestAbortedError("Export stream was aborted", signal.reason));
@@ -362,7 +565,7 @@ class NdjsonReader {
       // The abort listener cancels the body, which can settle the pending
       // read as "done" before the rejection above wins the race.
       if (signal?.aborted) throw new RequestAbortedError("Export stream was aborted", signal.reason);
-      return result.done ? undefined : result.value;
+      return result;
     } catch (cause) {
       this.cancel();
       if (cause instanceof LexAPIError) throw cause;
@@ -397,13 +600,24 @@ class NdjsonReader {
   }
 }
 
-/** Lift the nested `_meta` / `_done` object's fields to the top level (keeping the raw key). */
+/** The nested `_meta` / `_done` object's fields at the top level (keeping the raw key). */
 function liftEnvelope<T>(parsed: Record<string, unknown>, key: "_meta" | "_done"): T {
   const inner = parsed[key];
+  // §1.8: an object under the key is the envelope; keys beside it on the line
+  // are not read. The flat form (`{"_meta": true, ...}`) is read from the line.
   if (typeof inner === "object" && inner !== null && !Array.isArray(inner)) {
-    return { ...(inner as Record<string, unknown>), ...parsed } as T;
+    return { ...(inner as Record<string, unknown>), [key]: inner } as T;
   }
   return parsed as T;
+}
+
+/** `String(value)`, or the value's kind when that fails (an array nested too deep to join). */
+function text(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return Array.isArray(value) ? "array" : typeof value;
+  }
 }
 
 /** A line whose only key is `_error`: a server failure signal, never a row. */
@@ -413,11 +627,12 @@ function errorLine(parsed: Record<string, unknown>): Record<string, unknown> | u
   const value = parsed._error;
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : { message: String(value) };
+    : { message: text(value) };
 }
 
-/** Parse one NDJSON line; `undefined` when it is not a JSON object. */
-function parseLine(line: string): Record<string, unknown> | undefined {
+/** Parse one NDJSON line; `undefined` when it is not UTF-8 or not a JSON object. */
+function parseLine(line: Line): Record<string, unknown> | undefined {
+  if (line === INVALID_LINE) return undefined;
   try {
     const value = JSON.parse(line) as unknown;
     return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -453,7 +668,7 @@ class ExportStreamImpl implements ExportStream {
 
   private failureReason(): string {
     if (this.error !== undefined) {
-      return `the server reported an error mid-stream (${String(this.error.code ?? "UNKNOWN")}: ${String(this.error.message ?? "")})`;
+      return `the server reported an error mid-stream (${text(this.error.code ?? "UNKNOWN")}: ${text(this.error.message ?? "")})`;
     }
     return "its _done trailer says complete: false";
   }
@@ -462,13 +677,13 @@ class ExportStreamImpl implements ExportStream {
     return this.lines.rows;
   }
 
-  get truncated(): boolean | undefined {
+  get truncated(): boolean {
     // API 2.3.0: once read, `_done.truncated` is authoritative — never
     // derived from the (possibly cached) count, skipped stubs not counted.
     if (typeof this.done?.truncated === "boolean") return this.done.truncated;
     if (this.headers.truncated !== undefined) return this.headers.truncated;
     if (typeof this.meta?.truncated === "boolean") return this.meta.truncated;
-    return undefined;
+    return false;
   }
 
   constructor(lines: NdjsonReader, headers: ExportHeaderInfo) {
@@ -483,21 +698,23 @@ class ExportStreamImpl implements ExportStream {
 
   /** Read the leading line so `meta` is available before iteration starts. */
   async init(): Promise<void> {
-    let parsed: Record<string, unknown> | undefined;
-    for (;;) {
-      const first = await this.lines.nextLine();
-      if (first === undefined) return;
-      parsed = parseLine(first);
-      if (parsed !== undefined) {
-        const error = errorLine(parsed);
-        if (error === undefined) break;
-        this.error = error; // never a row; iteration reports it
-        continue;
-      }
+    const first = await this.lines.nextLine();
+    if (first === undefined) return;
+    const parsed = parseLine(first);
+    if (parsed === undefined) {
       this.invalidLines++;
+      return;
     }
+    const error = errorLine(parsed);
+    if (error !== undefined) {
+      this.error = error; // never a row; iteration reports it
+      return;
+    }
+    // §1.8: `_meta` counts only on the very first line of the stream; a later
+    // one (also after a blank first line) is skipped, never a row.
+    // It is the `_meta` line even when it also carries `_done` or `_error`.
     if ("_meta" in parsed) {
-      this.meta = liftEnvelope<ExportMeta>(parsed, "_meta");
+      if (!this.lines.firstLineBlank) this.meta = liftEnvelope<ExportMeta>(parsed, "_meta");
     } else if ("_done" in parsed) {
       this.done = liftEnvelope<ExportDone>(parsed, "_done");
       this.lines.cancel();
@@ -547,12 +764,13 @@ class ExportStreamImpl implements ExportStream {
           this.invalidLines++;
           continue;
         }
+        // A later `_meta` line is skipped, also when it carries `_done` or `_error`.
+        if ("_meta" in parsed) continue;
         if ("_done" in parsed) {
           this.done = liftEnvelope<ExportDone>(parsed, "_done");
           if (!this.complete) throw this.incomplete(this.failureReason());
           return;
         }
-        if ("_meta" in parsed) continue; // never surface envelope lines as rows
         const error = errorLine(parsed);
         if (error !== undefined) {
           this.error = error; // a failure signal, never a row
@@ -568,6 +786,12 @@ class ExportStreamImpl implements ExportStream {
   }
 }
 
+/** `X-Export-Truncated`: `1` or `0` (spaces and tabs around allowed); anything else is absent. */
+function truncatedFlag(value: string | null): boolean | undefined {
+  const flag = value === null ? undefined : trimSpaces(value);
+  return flag === "1" ? true : flag === "0" ? false : undefined;
+}
+
 /** Build an `ExportStream` from a raw `/export` fetch response. */
 export async function createExportStream(
   response: Response,
@@ -580,9 +804,9 @@ export async function createExportStream(
   const streamingHeader = response.headers.get("x-export-streaming");
   const truncatedHeader = response.headers.get("x-export-truncated");
   const stream = new ExportStreamImpl(new NdjsonReader(response.body, options), {
-    total: totalHeader !== null ? Number(totalHeader) : undefined,
-    streaming: streamingHeader !== null ? Number(streamingHeader) : undefined,
-    truncated: truncatedHeader !== null ? truncatedHeader === "1" : undefined,
+    total: parseHeaderInteger(totalHeader),
+    streaming: parseHeaderInteger(streamingHeader),
+    truncated: truncatedFlag(truncatedHeader),
   });
   await stream.init();
   return stream;

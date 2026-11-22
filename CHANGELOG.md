@@ -5,6 +5,257 @@ versioning: [SemVer](https://semver.org/) — while the package is `0.x`, a **mi
 breaking changes (documented below with a migration note); `npm install @lexapi/client@^0.1.0` never
 picks up `0.2.0` on its own.
 
+## [Unreleased]
+
+## [0.5.0] — 2026-11-22
+
+Targets LexAPI API 3.0.0. API 2.19.0–2.30.0 were not released on their own; they are all part of
+3.0.0, and items that need a newer API name the version that introduced the feature. Works against
+API 2.18.1 as well: features of later versions are then absent (`legislationAsOf`, API 2.26.0,
+answers 404 there).
+
+### Upgrading from 0.4.0
+
+- **Malformed 2xx answers throw.** A 2xx that is empty, not UTF-8 JSON, not an object,
+  `success: false`, or lacks `results` / `document` (or carries them in the wrong shape) throws
+  `InvalidResponseError` (before: could read as an empty result), except an empty `webhooks.delete`
+  answer and `webhooks.test`'s `success: false`, which still resolve. A `success: false` that carries
+  an API error throws that error instead. Catch it; the call may have been charged.
+- **Failed payments.** A 403 `PAYMENT_PAST_DUE` (API 2.27.0) throws `PaymentPastDueError` (0.4.0:
+  base `LexAPIError`). It extends `TierForbiddenError`: an `instanceof TierForbiddenError` branch
+  now catches it (also when narrowing a union type: its `false` branch no longer includes
+  `PaymentPastDueError`), so test `PaymentPastDueError` first. Never retried.
+- **Iterators can throw** `InvalidResponseError` when the server stops advancing:
+  `paginateCites` / `paginateCitedBy` on a page echoing an `offset` other than the one requested,
+  or, when the answers carry neither `totalEdges` nor `offset`, three pages in a row with the same
+  list; `webhooks.paginateDeliveries`, when the answers carry no `total`, after three pages in a
+  row with no unseen delivery `id`; `paginateNationalDocuments` on a `nextCursor` already sent, or
+  not a string. Every iterator throws `RangeError` for an `offset` that is not an integer ≥ 0 or a
+  `limit` that is not an integer ≥ 1, before any request. Pages already yielded stay valid.
+- **Webhook verification.** The body must be a UTF-8 JSON object (`malformed_body`) and
+  `timestamp` an ISO date-time with `Z` or `±HH:MM` (`stale_timestamp`). `toleranceMs: NaN` is a
+  `RangeError` and a negative value rejects every delivery (use `0` to switch the window off).
+  LexAPI's deliveries verify as before.
+- **Export.** Lines end at `\n` and must be UTF-8, else they count in `invalidLines` (before: bad
+  bytes replaced, row yielded). `stream.truncated` is `false`, not `undefined`, when nothing says.
+- **Retries.** A `Retry-After` / `RateLimit-Reset` / `retryAfter` that is not in a documented form
+  counts as absent (normal back-off). A 429 whose top-level `code` or `error.code` is
+  `QUOTA_EXHAUSTED` is never retried, whatever other code the body carries.
+- **Redirects.** Followed only within the origin of `baseUrl` (or to the same host over HTTPS on
+  the default ports), at most five; any other throws `NetworkError`. Affects a custom `baseUrl`, a
+  proxy, or a custom `fetch` (it must honour `redirect: "manual"`).
+- **Error text.** Messages for non-JSON bodies changed, and `InvalidResponseError.body` no longer
+  holds response text (see `bodyExcerpt`). Match on `code`, not on messages.
+- **Types.**
+  - `NationalSemanticLegislationResult` typed the fields it shares with the EU hit (`id`, `score`,
+    `text`, `snippet`, `chapter`, `exact_match_law_id`, `metadata`) as `unknown`; they now have
+    their types (`score?: number`, `asOfVersion?: NationalAsOfVersion`, …). Other keys are still
+    readable as `unknown`. Code that redeclares them in an `interface … extends`, or assigns a
+    fixture of another shape, must follow.
+  - An `interface … extends` or subclass that redeclares a newly added optional member (for example
+    `observedFrom`, `asOf`, `asOfSummary`) with another type must follow.
+  - `getDocumentAtDate` returns `DocumentAtDateResponse`, which is assignable to the
+    `DocumentVersionResponse` it returned before.
+  - `ExportStream.truncated` is typed `boolean` (was `boolean | undefined`).
+  - `NotFoundError` has new read-only accessors (`reason`, `beforeTracking`, `boundaryUnknown`,
+    `trackedSince`, `inForceLookup`, `candidates`, `candidatesTruncated`). A subclass that declares
+    a property of the same name must rename it.
+
+### Added
+
+- **Text availability on case-law hits** (API 2.30.0): with `includeText: true`, every
+  `semanticSearch` hit carries `textAvailability` (`SemanticHitTextAvailability`): `{ available: true }`
+  when it carries `text`, otherwise `{ available: false, reason }` (`SemanticHitTextUnavailableReason`:
+  `not_in_corpus` or `unknown`; the reason is an open string) and the hit keeps its `snippet`. Absent without `includeText`. Not the
+  document `TextAvailability`: the reasons differ. The SDK passes the field through as received.
+- **National `asOf` labels** (API 2.29.0): `nationalLegislationSemanticSearch` takes `asOf`
+  (a `YYYY-MM-DD` string) and sends it; before, the option did not exist. Each hit carries `asOf`, `asOfResolved`, `asOfReason` (`NationalAsOfReason`, runtime list
+  `NATIONAL_AS_OF_REASONS`) and, when resolved, `asOfVersion: NationalAsOfVersion`
+  (`{ kind: "current_unit", validFrom, validTo, sourceId, checkedAt }`); the response adds `asOf`
+  and `asOfSummary`. The search runs over today's texts only: a hit is resolved only when the
+  publisher's dates, as of LexAPI's last recorded read of the act (`checkedAt`), show today's
+  wording already applied on the date; an unresolved hit keeps today's wording, which is not
+  established as the text for the date. LexAPI holds such dates for Austria and Spain.
+  `isNationalAsOfVersion(v)` tells it from the EU `AsOfVersion` by `kind`.
+- **Snapshot timing on the version endpoints** (API 2.28.0): `observedFrom` on every version
+  (`listDocumentVersions`, `getDocumentVersion`, `getDocumentAtDate`): when the version began in
+  LexAPI's fetch history, `null` when LexAPI has no record of it. `getDocumentAtDate` now returns `DocumentAtDateResponse`
+  (a `DocumentVersionResponse` with `kind: "observation_snapshot"`, `document.observedUntil`,
+  `inForceLookup`, `dateInFuture` and `xWarning`). These are LexAPI's fetch snapshots, not the law
+  in force on a date; for the version of an EU act for a date use `legislationAsOf`.
+- **`NotFoundError` details** (API 2.28.0): `reason` (`details.reason`), `beforeTracking` (with
+  `trackedSince` and `inForceLookup`) and `boundaryUnknown` (with `candidates` —
+  `{ version, fetchedAt, observedFrom }[]`, at most 10, `[]` when none — and
+  `candidatesTruncated`) for the 404s of `getDocumentAtDate`. Read from `details` only, when it is
+  a plain object. `unknownEndpoint` is unchanged.
+- **In-force label** (API 2.19.0): `inForce`, `notInForceReason`, `endOfValidity`,
+  `entryIntoForce` (`InForceLabel`, `NotInForceReason`) on documents (`getDocument`,
+  `getDocumentsBatch`, `getDocumentByUrl`), on `getDocumentMetadata`'s `metadata` and on
+  `semanticLegislationSearch` hits; the `inForce` option of `semanticLegislationSearch` (sent when
+  set) and the response's `inForceFilter`.
+- **Provenance** (API 2.20.0): `provenance` and `fieldProvenance` (`FieldProvenance`) on documents,
+  `getDocumentMetadata`'s `metadata`, single version snapshots and EU semantic hits
+  (`EuSemanticCaseLawResult`, `EuSemanticLegislationResult`, now the element types of `results`);
+  `fieldProvenance` on `semanticSearch` responses with `hypotheticalDocument`.
+- **`/info` semantic result caps** (API 2.24.0): `subscription.maxSemanticResults` and
+  `subscription.maxSemanticLegislationResults`.
+- **`legislationAsOf({ document, asOf, provision?, language? }, options?)`** (`POST /legislation/as-of`,
+  1 credit when no text is fetched; 4, or 5 live from EUR-Lex, when the provision's text is fetched,
+  whatever the answer; 1 if the fetch fails). **Requires LexAPI API 2.26.0.** The version of
+  an EU regulation, directive or decision listed for a date — the newest consolidated version dated
+  on or before it, or the act as published in the Official Journal — and optionally one article,
+  annex or recital range of it. An answer that cannot be established is returned, not thrown:
+  `asOfResolved: false` with an `asOfReason`; use a text only when `asOfResolved` is `true`.
+  Consolidated versions have no legal force (`baseCelex` names the authentic act). Types:
+  `LegislationAsOfRequest`, `LegislationAsOfResponse`, `LegislationAsOfVersion`,
+  `LegislationAsOfAct`, `LegislationAsOfProvision`, `AsOfLookupReason`, `Provenance`; runtime list
+  `AS_OF_LOOKUP_REASONS`.
+- **`PaymentPastDueError`** (403, code `PAYMENT_PAST_DUE`, API 2.27.0): a subscription payment failed
+  and was not completed in time; API requests are refused until the payment succeeds. Never
+  retried, on any status (a 429 included). `billingUrl` is where to pay the open invoice; `accessEndedAt` is when access ended, when
+  the API says so. It extends `TierForbiddenError`. Before API 2.27.0 a failed
+  payment was refused at once with a 403 without a code, raised as `TierForbiddenError`.
+  `"PAYMENT_PAST_DUE"` is added to `ErrorCode`. Earlier SDK versions raise the base `LexAPIError`
+  for this code. `TierForbiddenError`'s constructor takes an optional sixth parameter, the code
+  (`"TIER_FORBIDDEN"` by default).
+- **`NotFoundError.unknownEndpoint`**: `true` when the API (2.27.0 or later) has no such endpoint: a
+  mistyped path, a method newer than the API, or a national route for a country that is not
+  available. Always `false` on APIs before 2.27.0; there the message contains "Unknown API
+  endpoint".
+- **`LexAPIError.bodyExcerpt`**: the first 200 characters (code points) of a response body that is
+  not JSON (`undefined` otherwise), read through a getter; it is not an own property of the error.
+  It may contain document text: do not show it to a model or log it by default.
+  `LexAPIErrorContext` takes it too, and `LexAPIError.fromResponse` takes it as an optional fifth
+  parameter.
+
+### Changed
+
+- **2xx bodies are checked** (`InvalidResponseError`). A `2xx` answer that is not the documented
+  shape now throws instead of possibly being read as an empty result: an empty body (also a `204`,
+  except for `webhooks.delete`), a body of only whitespace (it returned an empty object), a body
+  that is not valid UTF-8 (before, the invalid bytes were replaced and the body was parsed), JSON
+  that is not an object, `success: false` (when the body carries the API's error envelope, that
+  error is thrown instead, keeping the `2xx` status; `webhooks.test` still resolves with
+  `success: false`), and a list field that is not a list or holds items that are not objects.
+  `results` is required on `search`, `semanticSearch`, `semanticLegislationSearch` and the national
+  semantic searches; `document` must be an object on `getDocument`, `getDocumentByUrl`,
+  `getDocumentVersion`, `getDocumentAtDate` and `getNationalDocument` (and `document.content`, when
+  present, an object whose `articles` is a list of objects); on `legislationAsOf`, `document` must
+  be a non-empty string, `asOfResolved` a boolean, and `act` and `provenance` objects. Unknown
+  extra fields are still accepted. To tell a malformed answer from an empty result, catch
+  `InvalidResponseError`. The message for a `2xx` body that is not JSON changed: it was, for
+  example, `Expected a JSON body (HTTP 200, content-type text/html; charset=utf-8)` and is now
+  `Expected JSON, got text/html that does not parse as JSON (1213 bytes)`; do not match on error
+  message text, use `code`. An error body that is not valid UTF-8 is treated as not JSON: the error
+  carries the code derived from the status and the message `HTTP <status>`.
+- Retry hints are read strictly (SDK contract §1.2): `Retry-After` and `RateLimit-Reset` as decimal
+  seconds or, for `Retry-After`, an RFC 9110 HTTP-date (IMF-fixdate or RFC 850 ending in `GMT`,
+  `UTC` or `+0000`; asctime has no zone and is read as UTC). Dates with other zone names,
+  impossible dates and other text are ignored; a body `retryAfter` only as a
+  number ≥ 0. An unusable hint counts as none: the retry uses the normal back-off, a legacy 429 with
+  `usage.resetsAt` and no usable hint is a quota 429, and a national 503 whose only hint is unusable
+  is not retried.
+- Figures that are not usable numbers read as absent: integer headers (`result.headers`, export
+  counts) accept only digits up to 2^53−1, and `getCreditUsage` ignores a figure that is not a finite
+  number or a `resetsAt` that is not a string.
+- The iterators throw `InvalidResponseError` when the server stops advancing: a cites/cited-by page
+  echoing another `offset`, a national `nextCursor` already sent or not a string, or, without
+  `totalEdges`/`offset` (or a deliveries `total`), three pages in a row that repeat the one before.
+  The page that shows the stall is not yielded and is on `err.body`. Cites/cited-by walks also end
+  once the offset reaches `totalEdges`. A national walk continues only while `hasMore` is `true`.
+  A starting `offset` that is not an integer from 0, or a `limit` that is not an integer from 1, up
+  to 2^53 − 1, is a `RangeError` before any request.
+- **Webhook verification** (`verifyWebhook`, `verifySignature`, `computeSignature`):
+  - The body is decoded as strict UTF-8 before parsing: a body that is not valid UTF-8 (an invalid
+    or truncated sequence, an encoded surrogate, an overlong form, latin-1 text) is
+    `WebhookSignatureError("malformed_body")`, like a body that is not JSON. Before, invalid bytes
+    were replaced with U+FFFD and the body was parsed. One leading byte order mark is ignored, also
+    at the start of a string body, which is read as its UTF-8 encoding (the bytes the signature
+    covers). The signature check is unchanged.
+  - A string body with a lone surrogate (it has no UTF-8 encoding) fails verification:
+    `verifySignature` returns `false`, `verifyWebhook` throws `WebhookSignatureError("invalid_signature")`
+    and `computeSignature` throws `WebhookSignatureError("malformed_body")`. Before, such a string
+    was signed as U+FFFD; `verifyWebhook` parsed the string with the surrogate in it.
+  - `verifyWebhook` reports the first failing check, in this order: `missing_secret`,
+    `missing_signature` (header absent or empty), `invalid_signature`, `malformed_body`,
+    `stale_timestamp`. A body that is JSON but not an object (`null`, an array, a number) is
+    `malformed_body`; before, it was returned as the event or failed as `stale_timestamp`.
+  - The signed `timestamp` must be `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or a `±HH:MM`
+    offset, naming a date and time that exist, in years 0001–9999; anything else is
+    `stale_timestamp`. Before, any text `Date.parse` accepted was read (a lower-case `z`, RFC 2822
+    dates). The distance from now is compared in whole microseconds (fraction digits past the sixth
+    are cut), and a delivery exactly at the edge of the window passes.
+  - `toleranceMs: NaN` is a `RangeError`, and a negative `toleranceMs` rejects every delivery as
+    `stale_timestamp`. Before, both turned the replay check off. `0` still turns it off.
+  - A secret with a lone surrogate (it has no UTF-8 encoding) is
+    `WebhookSignatureError("missing_secret")` in every helper. Before, it was used with each
+    surrogate replaced by U+FFFD.
+  - The signature header is trimmed of spaces, tabs, CR and LF only; other padding (a byte order
+    mark, a no-break space) fails. Hex digits in either case are accepted, as before.
+- **Export lines and envelope.** Lines end at a line feed byte only and are decoded as strict
+  UTF-8, whatever charset the response names: a line that is not UTF-8 is counted in
+  `invalidLines` and the next line is read intact. Before, invalid bytes were replaced with U+FFFD
+  and the line was parsed. Lines are trimmed of spaces, tabs and CR only (before: all Unicode
+  whitespace); one byte order mark at the very start of the stream is ignored, and one anywhere else
+  makes its line invalid. `meta` is set only from the very first line of the stream; a `_meta` line
+  after it is skipped and not counted, also when it carries `_done` or `_error` (before, such a line
+  was read as the trailer). When `_meta` or `_done` holds an object, the fields are read from that
+  object only (before, keys beside it on the line were read too and won); the flat
+  `{"_meta": true, ...}` form is still read from the line. `X-Export-Truncated` counts only as `1`
+  or `0`; any other value is absent and `_meta.truncated` decides (before, it read as `false`).
+  `stream.truncated` is `false` when neither the trailer, the header nor `_meta` says (before:
+  `undefined`). Chunks that are an `ArrayBuffer` or another byte view are read like `Uint8Array`; a
+  chunk that is not bytes ends the stream with `NetworkError` and releases the connection.
+- A 429 whose top-level `code` or typed `error.code` is `QUOTA_EXHAUSTED` is a quota 429
+  (`RateLimitedError`, `quotaExhausted`, not retried) whatever other code the body carries. The
+  shape test for servers before API 2.4.0 (`usage.resetsAt`, no wait) applies only to a 429 whose
+  code is `RATE_LIMITED`; a 429 with another code is retried as before. Off a 429, the code
+  `QUOTA_EXHAUSTED` no longer drops a `Retry-After` wait: `retryAfter` keeps it and the retry waits
+  it.
+
+### Fixed
+
+- `InvalidResponseError` no longer carries the response text on `body`, where `console.log(err)`
+  and `JSON.stringify(err)` printed it. The excerpt is on `bodyExcerpt`; for JSON of the wrong shape
+  the parsed value is on `body`, read through a getter and not an own property of the error. The
+  constructor's third argument is that parsed value.
+- An error body whose `code`, `message` or `error` is an empty string, or whose `error` is an array,
+  is read as if that field were absent. Before, an empty `message` replaced `HTTP <status>`, and an
+  array `error` was taken for the typed envelope.
+- `AsOfReason` and `AS_OF_REASONS` (`semanticLegislationSearch` with `asOf`) now include
+  `amendment_not_consolidated`, which the API returns since 2.25.0.
+- `fetch` is now called correctly on runtimes that require it to be invoked on the global object
+  (Cloudflare Workers, browsers) — both the default and the runtime's own `fetch` passed as the
+  `fetch` option. The default is also looked up on each request, so a `globalThis.fetch` replaced
+  after the client is created is the one used.
+- A runtime with no global `fetch` and no `fetch` option now fails at construction with a clear
+  error. Previously a `globalThis.fetch` set to `undefined` constructed and failed at the first call.
+- Waits and timeouts longer than the timer limit (2^31−1 ms) no longer fire at once: a huge server
+  wait with `maxDelayMs: Infinity`, or a `timeoutMs` above the limit, is clamped to it.
+  `timeoutMs: Infinity` sets no limit.
+- An asctime `Retry-After` date (`Sun Nov  6 08:49:37 1994`) is read as UTC, not local time.
+- `paginateNationalDocuments` checks `limit` before the first request: a value that is not a
+  positive integer is a `RangeError`, as on the other iterators. Before, it was sent.
+- Cites/cited-by walks: a page carrying `totalEdges` or an echoed `offset` ends a run of repeated
+  pages but is still the page the next one is compared with. Before, the comparison restarted
+  after it, so a server repeating the same page threw one request later.
+- Cites/cited-by walks: a group with a `citationCount` of 0 and a non-empty edge list counts its
+  list. Before, it counted 0 and the walk ended after that page.
+- A page without its list ended the walk with a `TypeError`; a `citationCount` that is not a count
+  mis-stepped the offset (a walk could end early or re-request rows). Both are handled now.
+- An export `_error` line whose value or `code` is an array nested too deep to turn into text ends
+  the stream with `IncompleteExportError`. Before, iteration threw a `RangeError`.
+- `verifyWebhook` on a correctly signed body that is JSON `null` throws
+  `WebhookSignatureError("malformed_body")`. Before, it threw a `TypeError`.
+
+### Security
+
+- Redirects are followed only within the origin of `baseUrl` (or to the same host over HTTPS on the
+  default ports), at most five per attempt. Any other redirect is refused with a `NetworkError`
+  instead of being followed with the `x-api-key` header. The LexAPI API does not redirect to other
+  hosts; this matters with a custom `baseUrl` or a proxy in front of the API. A custom `fetch` must
+  honour `redirect: "manual"`; a response it has already redirected is refused.
+
 ## [0.4.0] — 2026-11-11
 
 Cross-border citation graph. **Requires LexAPI API 2.13.0.** Additive at runtime: no existing
@@ -175,9 +426,8 @@ the `credits` block, like every other credit-metered route.
 
 ## [0.2.0] — 2026-10-26
 
-Full re-sync with the LexAPI API (validated against lex-api `main` @ `633eb67`, PR #298, and
-`openapi.yaml` / `docs.md` at that commit). Every endpoint, parameter, response field and error shape
-was audited against the spec **and** the server controllers.
+Full re-sync with the LexAPI API (validated against API 2.0.0; later items name their API version).
+Every endpoint, parameter, response field and error shape was checked against the API reference.
 
 ### Added
 
@@ -279,37 +529,35 @@ was audited against the spec **and** the server controllers.
   the `exports` map now points `require` at `index.d.cts`.
 - Legacy error bodies dropped their `details` (e.g. which `/search` parameter failed validation).
 - Docs/README: the export tier gate is a `403` (not `402`) and covers BUSINESS, SCALE and
-  ENTERPRISE; tier limits include SCALE; "not yet published" and "requires lex-api PR #72" notes
-  removed; webhook ceilings updated.
+  ENTERPRISE; tier limits include SCALE; outdated notes removed; webhook ceilings updated.
 - Export streams never report a failed export as complete. A `_done` trailer with
   `complete: false`, or any line whose only key is `_error`, now throws `IncompleteExportError`
   (after the rows that did arrive) and leaves `stream.complete` false; before, any `_done` line
   counted as complete and an `_error` line was yielded as an `ExportRow`. The error line's body is
   on the exception's `details` and on the new `stream.error`. Unknown `_done` fields
-  (`truncatedBy`, `credits`) are kept on `stream.done`. (PLAN.md §1.8; lex-api #303.)
-- A top-level string `code` on a legacy-shape error body (lex-api #304 adds it next to the text
+  (`truncatedBy`, `credits`) are kept on `stream.done`. (SDK contract §1.8.)
+- A top-level string `code` on a legacy-shape error body (API 2.4.0 adds it next to the text
   `error`) is now the error's `code`, ahead of the status-derived one. A 429 with
   `code: "QUOTA_EXHAUSTED"` (a legacy plan's used-up daily or monthly-semantic quota) is a
   `RateLimitedError` with `code === "QUOTA_EXHAUSTED"`, `quotaExhausted` true, `retryAfter`
   `undefined` and `resetsAt` from the body's `resetsAt`; it is never retried. `QUOTA_EXHAUSTED`
   joins `ErrorCode`. Servers without the `code` are still recognised by the old shape check.
-  (PLAN.md §1.2/§1.3.)
-- Export parameters for API 2.3.0 (lex-api #303): `documentTypeCode` (a type family) and
+  (SDK contract §1.2/§1.3.)
+- Export parameters for API 2.3.0: `documentTypeCode` (a type family) and
   `changedSince` (rows whose text changed); `fetchedSince` / `changedSince` also take a `Date`
   (sent as UTC). A `limit` that is not a positive integer throws `RangeError` before the request
   (the API answers 400). `ExportDoneInfo` types `truncatedBy` and `credits`. Docs describe the
-  per-row billing and the filter semantics of API 2.3.0. **Publish only after lex-api #303 is
-  deployed.**
+  per-row billing and the filter semantics of API 2.3.0.
 - `stream.truncated` reads `_done.truncated` first once the trailer has been read. From API
   2.3.0 that flag is authoritative: set when matching rows remain unreached (`truncatedBy`:
   `limit`, `max_rows`, `credits` or `recovered` — both join the type) and never derived from the row
   count. The `X-Export-Truncated` header and `_meta.truncated` come from an up-front count that
   may be a minute old and never caps the stream, so they are now only the fallback before the
-  trailer arrives. (PLAN.md §1.8; lex-api #303.)
+  trailer arrives. (SDK contract §1.8.)
 
 ### Changed
 
-Retries, timeouts and error codes now follow the shared SDK contract (PLAN.md §1, identical in
+Retries, timeouts and error codes now follow the shared SDK contract (docs/sdk-contract.md §1, identical in
 `lexapi-python`) — **an SDK retries only when the retry cannot charge the caller twice**:
 
 - **Retry decision table (§1.2).** 429 that is not a quota: every call. Never reached the server (DNS failure,
@@ -320,7 +568,7 @@ Retries, timeouts and error codes now follow the shared SDK contract (PLAN.md §
   timeout): **free calls only** (`getInfo`, webhook reads). Never: quota 429, 4xx, 500.
   0.1 retried every 502/503/504 and every network error on a GET, including when a proxy answered after the API
   had charged the call (no refund), and never retried a POST that provably never left the machine.
-- **App-origin** = a non-empty `X-LexAPI-Version` header (lex-api #299 on) or a `RateLimit-Limit` header (the
+- **App-origin** = a non-empty `X-LexAPI-Version` header (API 2.1.0 on) or a `RateLimit-Limit` header (the
   app's rate limiter sets `RateLimit-*` on every billable app response; proxies never do). A JSON error body alone
   is not enough.
 - **New opt-in `retry.retryReadOnlyPosts`** (default off): the eight read-only POSTs (`search`, `getDocument`,
@@ -390,5 +638,5 @@ Initial release: request core (auth, retries with `Retry-After`, typed errors, c
 search and document endpoints, citations, semantic search (incl. HyDE), webhooks, NDJSON export,
 point-in-time versions.
 
-[0.2.0]: https://github.com/Lex-API/lexapi-typescript/compare/583b501...v0.2.0
+[0.5.0]: https://www.npmjs.com/package/@lexapi/client/v/0.5.0
 [0.1.0]: https://www.npmjs.com/package/@lexapi/client/v/0.1.0

@@ -229,7 +229,7 @@ const CONSOLIDATED_HIT = {
   metadata: {},
 };
 
-describe("semanticLegislationSearch — consolidated merge + asOf (#284 / lex-api PR #298)", () => {
+describe("semanticLegislationSearch — consolidated merge + asOf", () => {
   it("omits asOf from the wire body when not provided", async () => {
     const fetchMock = fetchSequence(
       jsonResponse(200, { success: true, searchType: "semantic-legislation", results: [CONSOLIDATED_HIT] }),
@@ -367,16 +367,16 @@ describe("semanticLegislationSearch — consolidated merge + asOf (#284 / lex-ap
   });
 
   it("exports the asOfReason enum exactly as openapi.yaml lists it", () => {
-    // Copied verbatim from SemanticLegislationResult.asOfReason in lex-api openapi.yaml @ 633eb67.
+    // Copied verbatim from SemanticLegislationResult.asOfReason in openapi.yaml.
     const spec = [
       "not_yet_adopted", "not_yet_in_force", "no_longer_in_force", "in_force_dates_unknown",
-      "not_in_language", "text_unavailable", "article_not_in_version", "part_not_resolvable",
+      "not_in_language", "amendment_not_consolidated", "text_unavailable", "article_not_in_version", "part_not_resolvable",
       "article_unknown", "version_list_unavailable", "version_lookup_cap", "fetch_budget_exhausted",
       "fetch_pending", "fetch_capacity", "fetch_failed", "fetch_timeout", "request_deadline",
       "insufficient_credits", "credit_check_failed",
     ];
     expect([...AS_OF_REASONS]).toEqual(spec);
     const typed: AsOfReason[] = [...AS_OF_REASONS];
-    expect(typed).toHaveLength(19);
+    expect(typed).toHaveLength(20);
   });
 });

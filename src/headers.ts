@@ -82,10 +82,10 @@ export interface ResponseHeaders {
   /**
    * API contract version the server implements (`X-LexAPI-Version`, e.g.
    * `2.1.0`). Sent on every response the LexAPI application itself produces
-   * (lex-api ≥ API 2.1.0) — its absence on an error means a proxy answered.
+   * (API 2.1.0 and later) — its absence on an error means a proxy answered.
    */
   apiVersion?: string;
-  /** Deployed build (`X-LexAPI-Release`, e.g. `2.1.0+633eb67`) — quote it in bug reports. */
+  /** Deployed build (`X-LexAPI-Release`, e.g. `2.1.0+abc1234`) — quote it in bug reports. */
   release?: string;
   /** Rows kept by the `/documents/recent` lenient language filter (`X-Language-Partial-Kept`). */
   languagePartialKept?: number;
@@ -117,11 +117,20 @@ function str(headers: HeaderGetter, name: string): string | undefined {
   return value === null ? undefined : value;
 }
 
+/**
+ * An integer header: `1*DIGIT` after trimming spaces and tabs, at most
+ * 2^53 − 1; anything else (a sign, a fraction, an exponent, hex) is absent.
+ */
+export function parseHeaderInteger(value: string | null | undefined): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/^[ \t]+|[ \t]+$/g, "");
+  if (!/^[0-9]+$/.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
 function int(headers: HeaderGetter, name: string): number | undefined {
-  const value = headers.get(name);
-  if (value === null) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? undefined : parsed;
+  return parseHeaderInteger(headers.get(name));
 }
 
 /** Drop `undefined` keys so the object only shows headers that were present. */

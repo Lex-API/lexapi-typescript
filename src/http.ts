@@ -5,18 +5,16 @@ import {
   RateLimitedError,
   RequestAbortedError,
   TimeoutError,
-  normalizeRetryAfterSeconds,
 } from "./errors.js";
 import { parseResponseHeaders } from "./headers.js";
+import { decimalSeconds, retryAfterHeaderSeconds, timerDelay } from "./retryHints.js";
 import { VERSION } from "./version.js";
 
 export const DEFAULT_BASE_URL = "https://lex-api.com/api/v1";
 /**
- * 95 s per attempt: above the 90 s hard timeout the API puts on a single live
- * EUR-Lex fetch (so such a fetch ends in the server's typed, refunded 504
- * rather than a client abort that may still be billed), and below
- * Cloudflare's 100 s proxy timeout. A request that runs several upstream
- * fetches (Cellar, then the browser; a batch) can still exceed it.
+ * Per-attempt timeout. The 95 s default sits above the API's 90 s deadline on
+ * document reads, so that timeout comes back as a typed, refunded 504; the
+ * CDN ends any wait at 100 s.
  */
 export const DEFAULT_TIMEOUT_MS = 95_000;
 
@@ -33,10 +31,11 @@ export interface RetryOptions {
    */
   maxDelayMs?: number;
   /**
-   * SDK contract §1.2 opt-in (default `false`): also retry the eight
+   * SDK contract §1.2 opt-in (default `false`): also retry the ten
    * read-only POSTs (`search`, `getDocument`, `getDocumentsBatch`,
    * `getDocumentByUrl`, `getDocumentMetadata`, `resolve`, `semanticSearch`,
-   * `semanticLegislationSearch`) on an **app-origin** 502/503/504 — those
+   * `semanticLegislationSearch`, `nationalSemanticSearch`,
+   * `nationalLegislationSemanticSearch`) on an **app-origin** 502/503/504 — those
    * are refunded in full, so the retry is billing-safe. App-origin = a
    * non-empty `X-LexAPI-Version` or a `RateLimit-Limit` header; anything
    * else is treated as a proxy answer and never retried on a billed call. Never applies to mutating calls (webhook
@@ -72,7 +71,7 @@ export interface RequestOptions {
   /** `Accept` header override (default `application/json`). */
   accept?: string;
   /**
-   * One of the eight read-only POSTs of SDK contract §1.2 — retried on
+   * One of the ten read-only POSTs of SDK contract §1.2 — retried on
    * app-origin 502/503/504 when `retryReadOnlyPosts` is on.
    */
   idempotent?: boolean;
@@ -82,6 +81,38 @@ export interface RequestOptions {
    * retried too (SDK contract §1.2).
    */
   free?: boolean;
+  /**
+   * @internal What a 2xx answer must look like (SDK contract §1.3); every
+   * JSON method checks that the body is a JSON object without `success: false`.
+   */
+  shape?: ResponseShape;
+}
+
+/** @internal A field a 2xx answer always carries, and its kind. */
+export interface RequiredField {
+  path: string;
+  kind: "object" | "string" | "boolean";
+}
+
+const KIND_NAMES = { object: "an object", string: "a string", boolean: "a boolean" } as const;
+
+/** @internal The documented shape of a 2xx JSON answer (SDK contract §1.3). */
+export interface ResponseShape {
+  /** List fields (dotted paths for nested ones): when present and not `null`, a list of objects. */
+  lists?: readonly string[];
+  /** List fields the endpoint always sends: missing or `null` is an error. Checked first. */
+  required?: readonly string[];
+  /**
+   * Fields the endpoint always sends, with their kind: missing or `null` (an
+   * empty string for `string`) is an error, and so is a value of another kind.
+   */
+  fields?: readonly RequiredField[];
+  /** Object fields that, when present and not `null`, must be a JSON object. */
+  optionalObjects?: readonly string[];
+  /** `success: false` is a normal answer here (`POST /webhooks/{id}/test`). */
+  successFalseOk?: boolean;
+  /** A 204 or an empty body is an empty result (`DELETE /webhooks/{id}`). */
+  allowEmpty?: boolean;
 }
 
 /** Context handed to a success handler; the attempt's inactivity timer is still running. */
@@ -162,6 +193,50 @@ const ORIGIN_DEPENDENT_STATUSES = new Set([502, 503, 504]);
 /** Proxy-only statuses (Cloudflare unknown error / origin timeout): the app may have charged. */
 const PROXY_STATUSES = new Set([520, 524]);
 
+/** The redirect statuses `fetch` follows. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Most redirects followed for one attempt. */
+const MAX_REDIRECTS = 5;
+
+/**
+ * Where a redirect may lead: the origin it came from, or the same host over
+ * HTTPS when both sides use the default port. Anything else is refused with
+ * a `NetworkError` that names the target origin only.
+ */
+function redirectTarget(location: string, from: URL): URL {
+  let to: URL;
+  try {
+    to = new URL(location, from);
+  } catch {
+    throw new NetworkError("Refused to follow a redirect with an invalid Location header");
+  }
+  if (to.protocol !== "http:" && to.protocol !== "https:") {
+    throw new NetworkError("Refused to follow a redirect to a URL that is not http(s)");
+  }
+  if (to.username !== "" || to.password !== "") {
+    throw new NetworkError(`Refused to follow a redirect to a URL that carries credentials (${to.origin})`);
+  }
+  const httpsUpgrade =
+    from.protocol === "http:" &&
+    to.protocol === "https:" &&
+    to.hostname === from.hostname &&
+    from.port === "" &&
+    to.port === "";
+  if (to.origin !== from.origin && !httpsUpgrade) {
+    throw new NetworkError(`Refused to follow a redirect to another origin (${to.origin})`);
+  }
+  return to;
+}
+
+/** Cancel a response body that will not be read, without waiting; a body that is not a web stream is left alone. */
+function discardBody(response: Response): void {
+  try {
+    response.body?.cancel().catch(() => undefined);
+  } catch {
+    // A custom fetch may return a body without `cancel()`.
+  }
+}
+
 /** `true` when a transport error (or one of its causes) carries a never-reached-the-app code. */
 export function isNeverReachedError(error: unknown, depth = 0): boolean {
   if (depth > 6 || typeof error !== "object" || error === null) return false;
@@ -184,7 +259,7 @@ export function isNeverReachedError(error: unknown, depth = 0): boolean {
 
 /**
  * App-origin response (SDK contract §1.2): it carries a non-empty
- * `X-LexAPI-Version` header (every app response, lex-api #299 on) or a
+ * `X-LexAPI-Version` header (every app response, API 2.1.0 on) or a
  * `RateLimit-Limit` header (the app's per-key rate limiter sets `RateLimit-*`
  * on every billable app response; proxies never do). A JSON body with an
  * `error` member is NOT enough on its own. Anything else is treated as
@@ -218,7 +293,12 @@ const INSPECT = Symbol.for("nodejs.util.inspect.custom");
  * - Caller `AbortSignal`: aborts the attempt and any retry wait; throws
  *   `RequestAbortedError`, never retried.
  * - Retries follow the billing-safety rule of SDK contract §1.2 — only when
- *   a retry cannot charge twice (see `shouldRetryStatus` and PLAN.md §1.2).
+ *   a retry cannot charge twice (see `shouldRetryStatus`).
+ * - Redirects are followed only within the API origin (or to the same host
+ *   over HTTPS on the default ports), at most five per attempt; any other
+ *   redirect is refused with a `NetworkError`, so the API key is never sent
+ *   to another origin. A custom `fetch` must honour `redirect: "manual"` for
+ *   this to hold. The attempt's timeout covers the whole redirect chain.
  * - Server-directed waits: `Retry-After` on any status; on a 429 only, then
  *   `RateLimit-Reset` and the JSON `retryAfter` field; on a 503
  *   `NATIONAL_SEMANTIC_UNAVAILABLE`, the JSON `retryAfter` field.
@@ -258,7 +338,10 @@ export class HttpClient {
     return `HttpClient { baseUrl: '${this.opts.baseUrl}', apiKey: '[redacted]' }`;
   }
 
-  /** Perform a request and parse the JSON body (204 / empty body yields `{}`). */
+  /**
+   * Perform a request and parse the JSON body. A 2xx that is not the
+   * documented shape (`options.shape`) throws `InvalidResponseError`.
+   */
   async requestJson<T>(options: RequestOptions): Promise<T> {
     const { data } = await this.requestJsonWithResponse<T>(options);
     return data;
@@ -270,7 +353,7 @@ export class HttpClient {
    */
   async requestJsonWithResponse<T>(options: RequestOptions): Promise<{ data: T; response: Response }> {
     return this.execute(options, async (response, ctx) => ({
-      data: (await readJsonBody(response, ctx.touch)) as T,
+      data: (await readJsonBody(response, options.shape ?? {}, ctx.touch)) as T,
       response,
     }));
   }
@@ -322,10 +405,11 @@ export class HttpClient {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const touch = (): void => {
         if (timer !== undefined) clearTimeout(timer);
+        if (timeoutMs === Infinity) return; // no limit
         timer = setTimeout(() => {
           timedOut = true;
           controller.abort();
-        }, timeoutMs);
+        }, timerDelay(timeoutMs));
       };
       touch();
       const onAbort = (): void => controller.abort();
@@ -335,12 +419,7 @@ export class HttpClient {
       let response: Response | undefined;
       let retryTransport = false;
       try {
-        response = await this.opts.fetchFn(url, {
-          method,
-          headers,
-          ...(serializedBody !== undefined ? { body: serializedBody } : {}),
-          signal: controller.signal,
-        });
+        response = await this.fetchWithinOrigin(url, method, headers, serializedBody, controller.signal);
         touch();
         if (response.ok) {
           return await onSuccess(response, { signal: controller.signal, timeoutMs, touch });
@@ -390,6 +469,66 @@ export class HttpClient {
       throw error;
     }
   }
+
+  /**
+   * `fetch` with redirects followed here rather than by the runtime, which
+   * would repeat every request header to whichever host a redirect names.
+   * Method and body change as `fetch` changes them: a 303, or a 301/302
+   * answer to a POST, continues as a body-less GET; 307/308 repeat the request.
+   * The body of a redirect response is cancelled, so its connection is released.
+   * A response that says it was already redirected (a custom `fetch` that did
+   * not honour `redirect: "manual"`) is refused.
+   */
+  private async fetchWithinOrigin(
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    // Called unbound: a runtime's own `fetch` rejects any other receiver.
+    const fetchFn = this.opts.fetchFn;
+    let target = url;
+    for (let hop = 0; ; hop++) {
+      const response = await fetchFn(target, {
+        method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+        redirect: "manual",
+        signal,
+      });
+      if (response.redirected === true) {
+        discardBody(response);
+        throw new NetworkError('The custom fetch followed a redirect itself; it must honour redirect: "manual"');
+      }
+      if (response.type === "opaqueredirect") {
+        throw new NetworkError("The API answered with a redirect, which this runtime does not expose");
+      }
+      const location = REDIRECT_STATUSES.has(response.status) ? response.headers.get("location") : null;
+      if (location === null) return response;
+      discardBody(response);
+      let from: URL;
+      try {
+        from = new URL(target);
+      } catch {
+        throw new NetworkError("Refused to follow a redirect from a request URL that is not absolute");
+      }
+      const next = redirectTarget(location, from);
+      if (hop >= MAX_REDIRECTS) {
+        throw new NetworkError(`Too many redirects (more than ${MAX_REDIRECTS})`);
+      }
+      if (
+        (response.status === 303 && method !== "GET") ||
+        ((response.status === 301 || response.status === 302) && method === "POST")
+      ) {
+        method = "GET";
+        body = undefined;
+        headers = { ...headers };
+        delete headers["content-type"];
+      }
+      target = next.href;
+    }
+  }
 }
 
 /** SDK contract §1.2 decision table for an HTTP error response. */
@@ -398,6 +537,8 @@ function shouldRetryStatus(
   call: { isGet: boolean; free: boolean; readOnly: boolean },
 ): boolean {
   const status = error.status;
+  // A failed payment is refused until it is paid, whatever the status.
+  if (error.code === "PAYMENT_PAST_DUE") return false;
   // A server-side budget timeout answered as a partial 503 would hit the same
   // budget again: leave the retry (or a narrower request) to the caller.
   if (status === 503 && isBudgetTimeout(error.body)) return false;
@@ -425,40 +566,171 @@ function isSearchIncomplete(error: LexAPIError): boolean {
   return (field(error.details) ?? field(error.body)) === "SEARCH_INCOMPLETE";
 }
 
-/** Read a body as text, restarting the inactivity timer on every chunk. */
-async function readBodyText(response: Response, touch?: () => void): Promise<string> {
-  if (response.body === null || touch === undefined) return response.text();
+/** Read a body as bytes, restarting the inactivity timer on every chunk. */
+async function readBodyBytes(response: Response, touch?: () => void): Promise<Uint8Array> {
+  if (response.body === null || touch === undefined) return new Uint8Array(await response.arrayBuffer());
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parts: string[] = [];
+  const chunks: Uint8Array[] = [];
+  let length = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     touch();
-    parts.push(decoder.decode(value, { stream: true }));
+    chunks.push(value);
+    length += value.byteLength;
   }
-  parts.push(decoder.decode());
-  return parts.join("");
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/** Characters (code points) of a body that is not JSON kept on `bodyExcerpt` (never in a message). */
+const EXCERPT_CHARS = 200;
+/** Bytes decoded for the excerpt: 200 code points take at most 4 bytes each. */
+const EXCERPT_BYTES = EXCERPT_CHARS * 4;
+const NOT_JSON = Symbol("not JSON");
+
+/** Strict UTF-8 + JSON parse; `NOT_JSON` when either fails. */
+function parseJsonBytes(bytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return NOT_JSON;
+  }
 }
 
 /**
- * Read a JSON body (SDK contract §1.3): a 204 or an empty body is a
- * successful empty object; a non-empty non-JSON body is `InvalidResponseError`.
+ * The first 200 code points of a body, decoded as UTF-8 with replacement.
+ * Every decoded code point (a U+FFFD included) uses at least one byte and at
+ * most four, so the first 800 bytes decode to the same first 200.
  */
-async function readJsonBody(response: Response, touch?: () => void): Promise<unknown> {
-  if (response.status === 204) return {};
-  const text = await readBodyText(response, touch);
-  if (text.trim() === "") return {};
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new InvalidResponseError(
-      `Expected a JSON body (HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "none"})`,
-      response.status,
-      text,
-      { headers: parseResponseHeaders(response) },
+function excerptOf(bytes: Uint8Array): string | undefined {
+  if (bytes.byteLength === 0) return undefined;
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(0, EXCERPT_BYTES));
+  let out = "";
+  let count = 0;
+  for (const char of text) {
+    if (count++ === EXCERPT_CHARS) break;
+    out += char;
+  }
+  return out;
+}
+
+/** The `Content-Type` value before `;`, trimmed, at most 100 characters. */
+function mediaTypeOf(response: Response): string {
+  const value = response.headers.get("content-type") ?? "";
+  const media = Array.from(value.split(";", 1)[0]!.replace(/^[ \t]+|[ \t]+$/g, ""))
+    .slice(0, 100)
+    .join("");
+  return media === "" ? "no content type" : media;
+}
+
+function jsonKind(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value; // object | string | number | boolean (all JSON.parse yields)
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const MISSING = Symbol("missing");
+
+function lookup(body: Record<string, unknown>, path: string): unknown {
+  let value: unknown = body;
+  for (const key of path.split(".")) {
+    if (!isJsonObject(value) || !Object.prototype.hasOwnProperty.call(value, key)) return MISSING;
+    value = value[key];
+  }
+  return value;
+}
+
+/**
+ * What is wrong with a 2xx JSON object's documented fields, or `undefined`:
+ * required lists, then required fields, then optional objects, then lists.
+ */
+function shapeProblem(body: Record<string, unknown>, shape: ResponseShape): string | undefined {
+  const missing = (path: string): string => `Expected "${path}" in the response; it is missing`;
+  const wrongKind = (path: string, expected: RequiredField["kind"], value: unknown): string =>
+    `Expected "${path}" to be ${KIND_NAMES[expected]}, got ${jsonKind(value)}`;
+  for (const path of shape.required ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null) return missing(path);
+  }
+  for (const { path, kind } of shape.fields ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null || (kind === "string" && value === "")) return missing(path);
+    const ok = kind === "object" ? isJsonObject(value) : typeof value === kind;
+    if (!ok) return wrongKind(path, kind, value);
+  }
+  for (const path of shape.optionalObjects ?? []) {
+    const value = lookup(body, path);
+    if (value !== MISSING && value !== null && !isJsonObject(value)) return wrongKind(path, "object", value);
+  }
+  for (const path of shape.lists ?? []) {
+    const value = lookup(body, path);
+    if (value === MISSING || value === null) continue;
+    if (!Array.isArray(value)) return `Expected "${path}" to be a list, got ${jsonKind(value)}`;
+    for (let index = 0; index < value.length; index++) {
+      const item: unknown = value[index];
+      if (!isJsonObject(item)) {
+        return `Expected every item of "${path}" to be an object, got ${jsonKind(item)} at index ${index}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The API's error envelope: `error` is a JSON object or a non-empty string. */
+function hasErrorEnvelope(body: Record<string, unknown>): boolean {
+  const err = body["error"];
+  return isJsonObject(err) || (typeof err === "string" && err !== "");
+}
+
+/**
+ * Read a 2xx JSON body (SDK contract §1.3), or throw when it is not the
+ * documented shape: no body (unless `shape.allowEmpty`), a body that is not
+ * strict UTF-8 JSON, JSON that is not an object, `success: false` (the mapped
+ * API error when the body carries the error envelope; skipped with
+ * `shape.successFalseOk`), or a list field that is not a list of objects.
+ * No message quotes the body.
+ */
+async function readJsonBody(response: Response, shape: ResponseShape, touch?: () => void): Promise<unknown> {
+  const status = response.status;
+  const headers = parseResponseHeaders(response);
+  const invalid = (message: string, body?: unknown, bodyExcerpt?: string): InvalidResponseError =>
+    new InvalidResponseError(message, status, body, { headers, ...(bodyExcerpt !== undefined ? { bodyExcerpt } : {}) });
+  if (status === 204) {
+    discardBody(response);
+    if (shape.allowEmpty === true) return {};
+    throw invalid("Expected JSON, got no body");
+  }
+  const bytes = await readBodyBytes(response, touch);
+  if (bytes.byteLength === 0) {
+    if (shape.allowEmpty === true) return {};
+    throw invalid("Expected JSON, got no body");
+  }
+  const body = parseJsonBytes(bytes);
+  if (body === NOT_JSON) {
+    throw invalid(
+      `Expected JSON, got ${mediaTypeOf(response)} that does not parse as JSON (${bytes.byteLength} bytes)`,
+      undefined,
+      excerptOf(bytes),
     );
   }
+  if (!isJsonObject(body)) throw invalid(`Expected a JSON object, got ${jsonKind(body)}`, body);
+  if (body["success"] === false && shape.successFalseOk !== true) {
+    if (hasErrorEnvelope(body)) throw LexAPIError.fromResponse(status, body, undefined, headers);
+    throw invalid("Response reported success: false without an error", body);
+  }
+  const problem = shapeProblem(body, shape);
+  if (problem !== undefined) throw invalid(problem, body);
+  return body;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, method: string, path: string): void {
@@ -469,47 +741,29 @@ function throwIfAborted(signal: AbortSignal | undefined, method: string, path: s
 
 /** Parse a non-2xx response into the typed error hierarchy. */
 export async function parseErrorResponse(response: Response, touch?: () => void): Promise<LexAPIError> {
-  let body: unknown;
-  try {
-    const text = await readBodyText(response, touch);
-    body = text.trim() === "" ? undefined : (JSON.parse(text) as unknown);
-  } catch (cause) {
-    // A body that is not JSON (proxy HTML/text) leaves `body` undefined; an
-    // aborted or broken read (timeout / caller abort / reset) propagates.
-    if (!(cause instanceof SyntaxError)) throw cause;
-    body = undefined;
-  }
+  // An aborted or broken read (timeout / caller abort / reset) propagates.
+  const bytes = await readBodyBytes(response, touch);
+  // A body that is not JSON (proxy HTML/text) leaves `body` undefined and is
+  // kept, cut short, on `bodyExcerpt` only: the message stays `HTTP <status>`.
+  const parsed = bytes.byteLength === 0 ? NOT_JSON : parseJsonBytes(bytes);
+  const body = parsed === NOT_JSON ? undefined : parsed;
+  const bodyExcerpt = parsed === NOT_JSON ? excerptOf(bytes) : undefined;
   // §1.2 retry-after resolution, steps 1–2 (step 3, the JSON field, is
   // applied in fromResponse on a 429 and a NATIONAL_SEMANTIC_UNAVAILABLE 503;
   // a quota 429 drops the value).
   const hint =
     headerRetryAfterSeconds(response) ??
     (response.status === 429 ? resetHeaderSeconds(response, "ratelimit-reset") : undefined);
-  return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response));
+  return LexAPIError.fromResponse(response.status, body, hint, parseResponseHeaders(response), bodyExcerpt);
 }
 
-/**
- * `Retry-After` header — delta-seconds or an HTTP-date (§1.2). Empty or
- * unparseable values count as absent; numbers go through the epoch guard.
- */
+/** `Retry-After` header (§1.2); anything outside the grammar counts as absent. */
 function headerRetryAfterSeconds(response: Response): number | undefined {
-  const raw = response.headers.get("retry-after");
-  if (raw === null) return undefined;
-  const header = raw.trim();
-  if (header === "") return undefined;
-  if (/^\d+(\.\d+)?$/.test(header)) return normalizeRetryAfterSeconds(Number(header));
-  if (/^[-+]?\d/.test(header)) return undefined;
-  const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, Math.round((date - Date.now()) / 1000));
-  return undefined;
+  return retryAfterHeaderSeconds(response.headers.get("retry-after"));
 }
 
 function resetHeaderSeconds(response: Response, name: string): number | undefined {
-  const raw = response.headers.get(name);
-  if (raw === null || raw.trim() === "") return undefined;
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return normalizeRetryAfterSeconds(seconds);
+  return decimalSeconds(response.headers.get(name));
 }
 
 /** Full-jitter exponential backoff: `random() * min(cap, base * 2^attempt)`. */
@@ -519,6 +773,7 @@ function fullJitterBackoff(attempt: number, baseDelayMs: number, maxDelayMs: num
 
 /** Sleep that a caller's `AbortSignal` interrupts (rejecting with `RequestAbortedError`). */
 function sleep(ms: number, signal: AbortSignal | undefined, method: string, path: string): Promise<void> {
+  ms = timerDelay(ms);
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new RequestAbortedError(`Request ${method} ${path} was aborted`, signal.reason));
